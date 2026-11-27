@@ -1,27 +1,93 @@
 import * as THREE from 'three';
 
+/**
+ * Shared handcrafted mineral / gouache color system inspired by refindex.html ("The Tea Ride"),
+ * fused with authentic Meizhou Hakka Weilongwu architectural pigments.
+ */
+export const HANDCRAFTED_PAL = {
+  // Cerulean & Indigo mineral blues
+  cer: 0x4f9fc8,
+  cerDark: 0x2f7fb5,
+  deepBlue: 0x2c70b2,
+  navy: 0x1b3f66,
+  ink: 0x1d2a44,
+  // Warm washi creams, sandstone & honeyed woods
+  white: 0xf7f4ec,
+  cream: 0xfbf3e0,
+  paper: 0xf3e7cf,
+  tan: 0xe3c08f,
+  stone: 0xd8c9a6,
+  wood: 0xb3804f,
+  brown: 0xa5644a,
+  umber: 0x7d4a30,
+  // Vivid folk & blossom accents
+  verm: 0xd4552b,
+  red: 0xd8402a,
+  orange: 0xee9a35,
+  lemon: 0xf4d03f,
+  peach: 0xefb07c,
+  pink: 0xf5b3b4,
+  blossomLight: 0xfadcd6,
+  blossomDeep: 0xee9aa0,
+  lilac: 0xa99cc8,
+  skin: 0xf3cfa8,
+  cheek: 0xe88d7c,
+  // Lush jade, willow & pond teals
+  pine: 0x3b8668,
+  leaf: 0x5d9c5c,
+  sage: 0x9cba7c,
+  willow: 0xa6cc64,
+  willowBright: 0xc2d972,
+  mint: 0xaed3be,
+  teal: 0x52a6a2,
+} as const;
+
+export interface PhysicalEnvUniforms {
+  uSunDir: { value: THREE.Vector3 };
+  uSunColor: { value: THREE.Color };
+  uBounceColor: { value: THREE.Color };
+  uSkyColor: { value: THREE.Color };
+  uWetness: { value: number };
+  uNightFactor: { value: number };
+  uTime: { value: number };
+}
+
+/**
+ * Shared real-time physical lighting & optical uniforms synchronized every frame/weather
+ * across all PBR GI radiosity, subsurface scattering (SSS), wetness, and water shaders.
+ */
+export const physicalEnvUniforms: PhysicalEnvUniforms = {
+  uSunDir: { value: new THREE.Vector3(0.60, 0.56, 0.57).normalize() },
+  uSunColor: { value: new THREE.Color(0xfff0d2) },
+  uBounceColor: { value: new THREE.Color(0xecc992) },
+  uSkyColor: { value: new THREE.Color(0x88c8ec) },
+  uWetness: { value: 0.0 },
+  uNightFactor: { value: 0.0 },
+  uTime: { value: 0.0 },
+};
+
 export interface MaterialLibrary {
   limeWall: THREE.MeshStandardMaterial;
   limeWallInterior: THREE.MeshStandardMaterial;
   limeRidge: THREE.MeshStandardMaterial;
   rammedEarth: THREE.MeshStandardMaterial;
   rammedEarthXray: THREE.MeshStandardMaterial;
-  roofTile: THREE.MeshStandardMaterial;
-  roofTileDark: THREE.MeshStandardMaterial;
-  graniteSlab: THREE.MeshStandardMaterial;
-  granitePlinth: THREE.MeshStandardMaterial;
-  courtyardEarth: THREE.MeshStandardMaterial;
-  huataiCobble: THREE.MeshStandardMaterial;
-  darkTimber: THREE.MeshStandardMaterial;
+  roofTile: THREE.MeshPhysicalMaterial;
+  roofTileDark: THREE.MeshPhysicalMaterial;
+  graniteSlab: THREE.MeshPhysicalMaterial;
+  granitePlinth: THREE.MeshPhysicalMaterial;
+  courtyardEarth: THREE.MeshPhysicalMaterial;
+  huataiCobble: THREE.MeshPhysicalMaterial;
+  darkTimber: THREE.MeshPhysicalMaterial;
   weatheredWoodDoor: THREE.MeshStandardMaterial;
-  windowLattice: THREE.MeshStandardMaterial;
+  windowLattice: THREE.MeshPhysicalMaterial;
   redCouplet: THREE.MeshStandardMaterial;
-  redLacquer: THREE.MeshStandardMaterial;
+  redLacquer: THREE.MeshPhysicalMaterial;
   gildedGold: THREE.MeshStandardMaterial;
   bronzeMetal: THREE.MeshStandardMaterial;
   goldenGrain: THREE.MeshStandardMaterial;
-  indigoCloth: THREE.MeshStandardMaterial;
-  terracotta: THREE.MeshStandardMaterial;
+  indigoCloth: THREE.MeshPhysicalMaterial;
+  terracotta: THREE.MeshPhysicalMaterial;
   bambooGreen: THREE.MeshStandardMaterial;
   foliageDeep: THREE.MeshStandardMaterial;
   foliageBright: THREE.MeshStandardMaterial;
@@ -37,6 +103,7 @@ export interface MaterialLibrary {
   skySunny: THREE.MeshBasicMaterial;
   skyRain: THREE.MeshBasicMaterial;
   skyNight: THREE.MeshBasicMaterial;
+  wettableMaterials: THREE.MeshPhysicalMaterial[];
   dispose: () => void;
 }
 
@@ -134,6 +201,21 @@ interface WorldPatinaOptions {
   groundAoHeight?: number;
   groundAoStrength?: number;
   eaveAoHeight?: number;
+  bounceReceive?: number;
+  crimsonBleed?: number;
+  wettable?: boolean;
+}
+
+export interface SubsurfaceOptions {
+  key: string;
+  /** RGB transmission/scatter tint (e.g. sunlit chartreuse for foliage, warm peach for skin/blossom) */
+  tintHex: number;
+  /** Backlit Henyey-Greenstein forward-scattering intensity */
+  backStrength?: number;
+  /** Broad wrap-diffuse translucency strength */
+  wrapStrength?: number;
+  /** Sharpness exponent of backlit transmission lobe */
+  power?: number;
 }
 
 const GLSL_PATINA_NOISE = /* glsl */ `
@@ -160,22 +242,33 @@ const GLSL_PATINA_NOISE = /* glsl */ `
 `;
 
 /**
- * Injects world-space anti-tiling macro weathering, organic Lingnan moss/damp patina,
- * and ground-contact ambient occlusion into any MeshStandardMaterial via onBeforeCompile.
+ * Injects physically-inspired Global Illumination (courtyard warm sandstone radiosity bounce,
+ * vermilion gate/lantern color bleeding, turquoise pond caustic lift, multi-scale crevice AO),
+ * handcrafted gouache brushwork, and rain-wetness porosity + puddle roughness modulation.
  */
 function attachWorldPatinaShader(
   mat: THREE.MeshStandardMaterial,
   opts: WorldPatinaOptions
 ): void {
   const macroFreq = (opts.macroFreq ?? 0.13).toFixed(4);
-  const macroStrength = (opts.macroStrength ?? 0.2).toFixed(4);
-  const mossStrength = (opts.mossStrength ?? 0.18).toFixed(4);
+  const macroStrength = (opts.macroStrength ?? 0.16).toFixed(4);
+  const mossStrength = (opts.mossStrength ?? 0.12).toFixed(4);
   const groundAoHeight = (opts.groundAoHeight ?? 0.0).toFixed(4);
-  const groundAoStrength = (opts.groundAoStrength ?? 0.28).toFixed(4);
+  const groundAoStrength = (opts.groundAoStrength ?? 0.22).toFixed(4);
   const eaveAoHeight = (opts.eaveAoHeight ?? 0.0).toFixed(4);
+  const bounceReceive = (opts.bounceReceive ?? 0.24).toFixed(4);
+  const crimsonBleed = (opts.crimsonBleed ?? 0.16).toFixed(4);
+  const isWettable = opts.wettable ? '1.0' : '0.0';
 
-  mat.customProgramCacheKey = () => `patina_${opts.key}`;
+  mat.customProgramCacheKey = () => `handcrafted_patina_${opts.key}_gi_v3`;
   mat.onBeforeCompile = (shader) => {
+    shader.uniforms.uSunDir = physicalEnvUniforms.uSunDir;
+    shader.uniforms.uSunColor = physicalEnvUniforms.uSunColor;
+    shader.uniforms.uBounceColor = physicalEnvUniforms.uBounceColor;
+    shader.uniforms.uSkyColor = physicalEnvUniforms.uSkyColor;
+    shader.uniforms.uWetness = physicalEnvUniforms.uWetness;
+    shader.uniforms.uNightFactor = physicalEnvUniforms.uNightFactor;
+
     shader.vertexShader = shader.vertexShader
       .replace(
         '#include <common>',
@@ -203,6 +296,12 @@ function attachWorldPatinaShader(
       .replace(
         '#include <common>',
         `#include <common>
+        uniform vec3 uSunDir;
+        uniform vec3 uSunColor;
+        uniform vec3 uBounceColor;
+        uniform vec3 uSkyColor;
+        uniform float uWetness;
+        uniform float uNightFactor;
         varying vec3 vPatinaWorldPos;
         varying vec3 vPatinaWorldNormal;
         ${GLSL_PATINA_NOISE}`
@@ -210,50 +309,243 @@ function attachWorldPatinaShader(
       .replace(
         '#include <color_fragment>',
         `#include <color_fragment>
+        float patinaRoughMod = 0.0;
+        float patinaWetPuddle = 0.0;
         {
           vec2 wpXZ = vPatinaWorldPos.xz;
-          float nMacro = patinaFbm(wpXZ * ${macroFreq} + vec2(vPatinaWorldPos.y * 0.22, -vPatinaWorldPos.y * 0.17));
-          float nDetail = patinaFbm(wpXZ * (${macroFreq} * 2.75) + vec2(11.4, -7.8) + vPatinaWorldPos.y * 0.65);
+          vec3 wn = normalize(vPatinaWorldNormal);
+          float nMacro = patinaFbm(wpXZ * ${macroFreq} + vec2(vPatinaWorldPos.y * 0.2, -vPatinaWorldPos.y * 0.15));
+          // Long painterly brush streak + fine washi paper / stone mineral micro-grain
+          float nBrush = patinaFbm(vec2(wpXZ.x * 0.55 + wpXZ.y * 0.25, vPatinaWorldPos.y * 1.85));
+          float nGrain = patinaNoise(wpXZ * 4.6 + vec2(vPatinaWorldPos.y * 5.8, -vPatinaWorldPos.y * 3.1));
+          patinaRoughMod = (nBrush - 0.5) * 0.14 + (nGrain - 0.5) * 0.07;
 
-          // 1. Multi-meter macro tonal clouds to eliminate repeating tile patterns
-          float toneShift = (nMacro - 0.5) * 2.0 * ${macroStrength};
-          vec3 warmCool = mix(vec3(0.95, 0.96, 0.99), vec3(1.06, 1.01, 0.93), nDetail);
-          diffuseColor.rgb *= clamp(1.0 + toneShift, 0.72, 1.22) * warmCool;
+          // 1. Handcrafted gouache wash variation: warm sunlit cream vs soft cerulean shadow tint
+          float toneShift = (nMacro - 0.5) * 1.65 * ${macroStrength};
+          vec3 warmCool = mix(vec3(0.94, 0.97, 1.03), vec3(1.06, 1.01, 0.92), nBrush);
+          float grainMod = 0.96 + 0.08 * nGrain;
+          diffuseColor.rgb *= clamp(1.0 + toneShift, 0.80, 1.18) * warmCool * grainMod;
 
-          // 2. Organic desaturated Lingnan moss & damp soot in shaded / northern / micro-crevice zones
-          float northBias = clamp(-vPatinaWorldNormal.z * 0.22 + 0.52, 0.2, 0.85);
+          // 2. Delicate mineral jade-sage moss kiss on shaded / northern edges
+          float northBias = clamp(-wn.z * 0.22 + 0.48, 0.18, 0.80);
           float mossNoise = patinaFbm(wpXZ * 0.34 + vec2(vPatinaWorldPos.y * 0.55, 3.7));
-          float mossMask = smoothstep(0.56, 0.84, mossNoise * 0.78 + northBias * 0.32) * ${mossStrength};
-          vec3 lingnanMoss = mix(vec3(0.14, 0.18, 0.09), vec3(0.24, 0.27, 0.14), nDetail);
-          diffuseColor.rgb = mix(diffuseColor.rgb, lingnanMoss, clamp(mossMask, 0.0, 0.62));
+          float mossMask = smoothstep(0.60, 0.86, mossNoise * 0.78 + northBias * 0.28) * ${mossStrength};
+          vec3 jadeMoss = mix(vec3(0.18, 0.34, 0.22), vec3(0.32, 0.45, 0.24), nBrush);
+          diffuseColor.rgb = mix(diffuseColor.rgb, jadeMoss, clamp(mossMask, 0.0, 0.42));
 
-          // 3. Ground-contact ambient occlusion & capillary rising damp along vertical masonry bases
+          // 3. Physical rain-wetness porosity darkening (water fills surface pores -> deeper albedo)
+          if (${isWettable} > 0.5 && uWetness > 0.01) {
+            float upMask = smoothstep(0.28, 0.82, wn.y);
+            float puddleNoise = patinaFbm(wpXZ * 0.28 + vec2(3.1, -4.7));
+            patinaWetPuddle = smoothstep(0.40, 0.72, puddleNoise) * upMask;
+            float dampAmount = uWetness * (0.28 * upMask + 0.45 * patinaWetPuddle + 0.12);
+            diffuseColor.rgb *= (1.0 - dampAmount * 0.28);
+          }
+
+          // 4. Warm earthy ground-contact AO along vertical bases
           if (${groundAoHeight} > 0.01) {
-            float verticalness = 1.0 - abs(vPatinaWorldNormal.y);
+            float verticalness = 1.0 - abs(wn.y);
             float baseFactor = 1.0 - smoothstep(0.02, ${groundAoHeight}, vPatinaWorldPos.y);
-            float irregularBase = baseFactor * (0.68 + 0.52 * nDetail) * verticalness;
+            float irregularBase = baseFactor * (0.72 + 0.42 * nBrush) * verticalness;
             diffuseColor.rgb *= (1.0 - irregularBase * ${groundAoStrength});
-            diffuseColor.rgb = mix(diffuseColor.rgb, vec3(0.15, 0.19, 0.10), clamp(irregularBase * 0.38, 0.0, 0.42));
+            diffuseColor.rgb = mix(diffuseColor.rgb, vec3(0.42, 0.35, 0.22), clamp(irregularBase * 0.22, 0.0, 0.26));
           }
 
-          // 4. Subtle under-eave shadow band near top of vertical walls for crisp architectural depth
+          // 5. Crisp cool-indigo under-eave shadow band
           if (${eaveAoHeight} > 0.01) {
-            float verticalness = 1.0 - abs(vPatinaWorldNormal.y);
-            float eaveBand = smoothstep(${eaveAoHeight} - 0.58, ${eaveAoHeight}, vPatinaWorldPos.y)
+            float verticalness = 1.0 - abs(wn.y);
+            float eaveBand = smoothstep(${eaveAoHeight} - 0.54, ${eaveAoHeight}, vPatinaWorldPos.y)
                            * (1.0 - smoothstep(${eaveAoHeight}, ${eaveAoHeight} + 0.22, vPatinaWorldPos.y));
-            diffuseColor.rgb *= (1.0 - eaveBand * verticalness * 0.26);
+            diffuseColor.rgb *= mix(vec3(1.0), vec3(0.76, 0.80, 0.88), eaveBand * verticalness * 0.72);
           }
+        }`
+      )
+      .replace(
+        '#include <roughnessmap_fragment>',
+        `#include <roughnessmap_fragment>
+        roughnessFactor = clamp(roughnessFactor + patinaRoughMod, 0.12, 0.98);
+        if (${isWettable} > 0.5 && uWetness > 0.01) {
+          float rainSmooth = uWetness * (0.34 + 0.52 * patinaWetPuddle);
+          roughnessFactor = mix(roughnessFactor, 0.14, clamp(rainSmooth, 0.0, 0.88));
+        }`
+      )
+      .replace(
+        '#include <lights_fragment_end>',
+        `#include <lights_fragment_end>
+        {
+          vec3 wnGi = normalize(vPatinaWorldNormal);
+          float hAtten = exp(-max(0.0, vPatinaWorldPos.y) * 0.22);
+          // Pillar 1: Analytical multi-bounce warm sandstone courtyard radiosity on vertical & downward faces
+          float groundFacing = clamp(-wnGi.y * 0.55 + 0.45, 0.0, 1.0);
+          float sunVis = clamp(dot(wnGi, normalize(uSunDir)) * 0.5 + 0.5, 0.0, 1.0);
+          // Shadowed faces receive stronger perceptual indirect bounce contrast
+          float bounceWeight = ${bounceReceive} * hAtten * groundFacing * (1.0 - 0.28 * sunVis);
+          vec3 giBounce = uBounceColor * bounceWeight * (1.0 - uNightFactor * 0.78);
+
+          // Pillar 1: Physical Color Bleeding (色彩溢出)
+          // (a) Vermilion recessed main gate & red couplets bleeding warm crimson onto nearby white lime walls
+          float gateDist = length((vPatinaWorldPos - vec3(0.0, 2.2, 20.8)) * vec3(0.24, 0.42, 0.34));
+          float gateBleed = exp(-gateDist * gateDist) * ${crimsonBleed};
+          giBounce += vec3(0.95, 0.28, 0.14) * gateBleed * (0.42 + 0.58 * uNightFactor);
+
+          // (b) Warm golden-amber lantern glow bouncing onto interior hall walls & eaves at night
+          if (uNightFactor > 0.02) {
+            float hallGlow = exp(-length(vPatinaWorldPos.xz - vec2(0.0, 8.0)) * 0.055) * hAtten;
+            giBounce += vec3(1.0, 0.52, 0.18) * hallGlow * uNightFactor * 0.26;
+          }
+
+          // (c) Turquoise-jade Half-Moon Pond water caustic bounce near the south bank
+          float pondDist = length((vPatinaWorldPos.xz - vec2(0.0, 42.5)) * vec2(0.052, 0.085));
+          float pondBounce = exp(-pondDist * pondDist) * hAtten * groundFacing * (1.0 - uNightFactor * 0.75);
+          giBounce += vec3(0.22, 0.62, 0.64) * pondBounce * 0.14;
+
+          reflectedLight.indirectDiffuse += diffuseColor.rgb * giBounce;
         }`
       );
   };
 }
 
 /**
- * Multi-biome rural Meizhou valley terrain shader for the outer ground plane:
- * blends golden-brown fallow fields, tree-shaded olive undergrowth, and winding dirt tracks.
+ * Pillar 2: Physically-inspired Subsurface Scattering (SSS) shader hook for foliage,
+ * blossoms, willow fronds, lotus petals, silk lanterns, and warm woodcarved villager skin.
+ * Synchronized in real time with physicalEnvUniforms.uSunDir & uSunColor.
+ */
+export function attachSubsurfaceShader(
+  mat: THREE.MeshStandardMaterial,
+  opts: SubsurfaceOptions
+): THREE.MeshStandardMaterial {
+  const tint = new THREE.Color(opts.tintHex);
+  const backStrength = (opts.backStrength ?? 0.58).toFixed(4);
+  const wrapStrength = (opts.wrapStrength ?? 0.26).toFixed(4);
+  const power = (opts.power ?? 2.6).toFixed(4);
+
+  mat.customProgramCacheKey = () => `handcrafted_sss_${opts.key}_v1`;
+  mat.onBeforeCompile = (shader) => {
+    shader.uniforms.uSunDir = physicalEnvUniforms.uSunDir;
+    shader.uniforms.uSunColor = physicalEnvUniforms.uSunColor;
+    shader.uniforms.uNightFactor = physicalEnvUniforms.uNightFactor;
+    shader.uniforms.uSssTint = { value: tint };
+
+    shader.vertexShader = shader.vertexShader
+      .replace(
+        '#include <common>',
+        `#include <common>
+        varying vec3 vSssWorldPos;
+        varying vec3 vSssWorldNormal;`
+      )
+      .replace(
+        '#include <project_vertex>',
+        `#include <project_vertex>
+        vec4 sssWp = vec4( transformed, 1.0 );
+        #ifdef USE_INSTANCING
+          sssWp = instanceMatrix * sssWp;
+        #endif
+        sssWp = modelMatrix * sssWp;
+        vSssWorldPos = sssWp.xyz;
+        vec3 sssWn = objectNormal;
+        #ifdef USE_INSTANCING
+          sssWn = mat3( instanceMatrix ) * sssWn;
+        #endif
+        vSssWorldNormal = normalize( mat3( modelMatrix ) * sssWn );`
+      );
+
+    shader.fragmentShader = shader.fragmentShader
+      .replace(
+        '#include <common>',
+        `#include <common>
+        uniform vec3 uSunDir;
+        uniform vec3 uSunColor;
+        uniform float uNightFactor;
+        uniform vec3 uSssTint;
+        varying vec3 vSssWorldPos;
+        varying vec3 vSssWorldNormal;`
+      )
+      .replace(
+        '#include <lights_fragment_end>',
+        `#include <lights_fragment_end>
+        {
+          vec3 V = normalize(cameraPosition - vSssWorldPos);
+          vec3 N = normalize(vSssWorldNormal);
+          vec3 L = normalize(uSunDir);
+          // View-dependent backlit Henyey-Greenstein approximation (light distorted through thin leaf/petal/skin)
+          vec3 H_sss = normalize(L + N * 0.42);
+          float backScatter = pow(clamp(dot(V, -H_sss), 0.0, 1.0), ${power}) * ${backStrength};
+          // Soft wrap-around diffuse scattering so shaded silhouettes stay luminous & organic
+          float wrapScatter = clamp((dot(N, L) + 0.55) / 1.55, 0.0, 1.0) * ${wrapStrength};
+          // Subtle rim translucency at grazing angles
+          float rimScatter = pow(1.0 - clamp(abs(dot(N, V)), 0.0, 1.0), 2.4) * 0.16;
+          float dayAtten = 1.0 - uNightFactor * 0.72;
+          vec3 sssLight = uSunColor * uSssTint * (backScatter + wrapScatter + rimScatter) * dayAtten;
+          reflectedLight.directDiffuse += diffuseColor.rgb * sssLight;
+        }`
+      );
+  };
+  return mat;
+}
+
+let cachedWoodcarveMaps: {
+  normal: THREE.CanvasTexture;
+  roughness: THREE.CanvasTexture;
+} | null = null;
+
+/**
+ * Pillar 3: Shared procedural handcrafted woodcarving chisel & mineral-paint micro-relief maps.
+ * Eliminates flat plastic/CG uniformity on woodcarved villagers, animals, blossoms, and props.
+ */
+export function getWoodcarveMicroMaps(): {
+  normal: THREE.CanvasTexture;
+  roughness: THREE.CanvasTexture;
+} {
+  if (cachedWoodcarveMaps) return cachedWoodcarveMaps;
+  const S = 128;
+  const rand = mulberry32(9917);
+  const [hCanvas, hCtx] = makeCanvas(S, S);
+  const [rCanvas, rCtx] = makeCanvas(S, S);
+
+  hCtx.fillStyle = '#808080';
+  hCtx.fillRect(0, 0, S, S);
+  rCtx.fillStyle = '#c8c8c8';
+  rCtx.fillRect(0, 0, S, S);
+
+  // Subtle carved wood grain fibers + hand-painted gouache brush micro-strokes
+  for (let y = 0; y < S; y++) {
+    const wave = Math.sin((y / S) * Math.PI * 10.0) * 6;
+    const shade = Math.round(122 + wave + (rand() - 0.5) * 18);
+    hCtx.fillStyle = `rgb(${shade},${shade},${shade})`;
+    hCtx.fillRect(0, y, S, 1);
+
+    const rShade = Math.round(192 + wave * 1.4 + (rand() - 0.5) * 24);
+    rCtx.fillStyle = `rgb(${rShade},${rShade},${rShade})`;
+    rCtx.fillRect(0, y, S, 1);
+  }
+  // Fine chisel facets & hand-rubbed wax variations
+  for (let i = 0; i < 220; i++) {
+    const x = rand() * S;
+    const y = rand() * S;
+    const w = 8 + rand() * 24;
+    const h = 2 + rand() * 5;
+    const v = Math.round(112 + rand() * 34);
+    hCtx.fillStyle = `rgba(${v},${v},${v},0.32)`;
+    hCtx.fillRect(x, y, w, h);
+
+    const rv = Math.round(165 + rand() * 70);
+    rCtx.fillStyle = `rgba(${rv},${rv},${rv},0.28)`;
+    rCtx.fillRect(x, y, w, h);
+  }
+
+  const nCanvas = heightCanvasToNormalCanvas(hCanvas, 1.35);
+  const normal = createTexture(nCanvas, 4, false, 2, 2);
+  const roughness = createTexture(rCanvas, 4, false, 2, 2);
+  cachedWoodcarveMaps = { normal, roughness };
+  return cachedWoodcarveMaps;
+}
+
+/**
+ * Poetic pastoral mineral-pigment valley terrain shader (inspired by refindex.html's 60_land.js):
+ * blends jade woodland, sunlit sage tea terraces, warm golden harvest patches, and cream-ochre village tracks.
  */
 function attachValleyTerrainShader(mat: THREE.MeshStandardMaterial): void {
-  mat.customProgramCacheKey = () => 'lingnan_valley_terrain_v1';
+  mat.customProgramCacheKey = () => 'handcrafted_valley_terrain_v2';
   mat.onBeforeCompile = (shader) => {
     shader.vertexShader = shader.vertexShader
       .replace(
@@ -280,57 +572,33 @@ function attachValleyTerrainShader(mat: THREE.MeshStandardMaterial): void {
         `#include <color_fragment>
         {
           vec2 p = vValleyWorldPos.xz;
-          float nLarge = patinaFbm(p * 0.018);
-          float nMed = patinaFbm(p * 0.062 + vec2(14.2, -9.1));
-          float nFine = patinaFbm(p * 0.24 + vec2(-13.7, 6.4));
+          float nLarge = patinaFbm(p * 0.016);
+          float nMed = patinaFbm(p * 0.055 + vec2(14.2, -9.1));
+          float nBrush = patinaFbm(vec2(p.x * 0.14 + p.y * 0.08, p.y * 0.22));
+          float nFine = patinaNoise(p * 0.65);
 
-          // Calibrated linear-space Lingnan rural valley palette (matches lush Meizhou valley photo)
-          vec3 fallowStraw = vec3(0.155, 0.132, 0.058);
-          vec3 oliveMeadow = vec3(0.055, 0.095, 0.030);
-          vec3 deepWoodland = vec3(0.026, 0.052, 0.016);
-          vec3 dirtTrack = vec3(0.135, 0.108, 0.072);
+          // Luminous linear-space pastoral mineral greens & warm golden fields (refindex.html harmony)
+          vec3 pineJade = vec3(0.068, 0.175, 0.112);
+          vec3 sageMeadow = vec3(0.165, 0.295, 0.125);
+          vec3 teaChartreuse = vec3(0.325, 0.365, 0.135);
+          vec3 warmStraw = vec3(0.45, 0.36, 0.155);
+          vec3 creamTrack = vec3(0.46, 0.37, 0.23);
 
-          vec3 col = mix(deepWoodland, oliveMeadow, smoothstep(0.28, 0.68, nMed));
-          col = mix(col, fallowStraw, smoothstep(0.48, 0.80, nLarge) * 0.78);
+          vec3 col = mix(pineJade, sageMeadow, smoothstep(0.24, 0.68, nMed));
+          col = mix(col, teaChartreuse, smoothstep(0.42, 0.78, nLarge) * 0.72);
+          col = mix(col, warmStraw, smoothstep(0.64, 0.88, nLarge * 0.7 + nBrush * 0.3) * 0.55);
 
-          // Organic irregular earthy village clearings & footpaths
-          float pathField = patinaFbm(p * 0.032 + vec2(nLarge * 2.1, -nMed * 1.9));
+          // Winding warm sandy-cream village footpaths
+          float pathField = patinaFbm(p * 0.028 + vec2(nLarge * 2.0, -nMed * 1.8));
           float trackMask = 1.0 - smoothstep(0.47, 0.52, abs(pathField - 0.5) * 10.0);
-          col = mix(col, dirtTrack, clamp(trackMask * 0.45, 0.0, 0.45));
+          col = mix(col, creamTrack, clamp(trackMask * 0.52, 0.0, 0.52));
 
-          // Micro foliage/soil grain variation
-          col *= (0.78 + 0.44 * nFine);
+          // Subtle gouache brushwork texture
+          col *= (0.88 + 0.24 * nBrush) * (0.94 + 0.12 * nFine);
           diffuseColor.rgb = col;
         }`
       );
   };
-}
-
-/**
- * Converts a loaded HTMLImageElement / canvas into a greyscale height canvas and runs Sobel normal extraction.
- */
-function imageToSobelNormalTexture(
-  img: HTMLImageElement,
-  aniso: number,
-  strength: number,
-  repX: number,
-  repY: number
-): THREE.CanvasTexture {
-  const S = 512;
-  const [hCanvas, hCtx] = makeCanvas(S, S);
-  hCtx.drawImage(img, 0, 0, S, S);
-  const imgData = hCtx.getImageData(0, 0, S, S);
-  const d = imgData.data;
-  for (let i = 0; i < d.length; i += 4) {
-    const lum = Math.round(d[i] * 0.299 + d[i + 1] * 0.587 + d[i + 2] * 0.114);
-    d[i] = lum;
-    d[i + 1] = lum;
-    d[i + 2] = lum;
-    d[i + 3] = 255;
-  }
-  hCtx.putImageData(imgData, 0, 0);
-  const normalCanvas = heightCanvasToNormalCanvas(hCanvas, strength);
-  return createTexture(normalCanvas, aniso, false, repX, repY);
 }
 
 /**
@@ -345,139 +613,70 @@ function makeLimeWallMaps(aniso: number) {
   const [h, hctx] = makeCanvas(S, S);
   const [r, rctx] = makeCanvas(S, S);
 
-  // Warm century-aged chalky bone-ivory base (never sterile white)
-  ctx.fillStyle = '#ddd6c7';
+  // Warm sunlit washi-ivory lime plaster base (clean handcrafted woodblock warmth!)
+  ctx.fillStyle = '#f2ece0';
   ctx.fillRect(0, 0, S, S);
   hctx.fillStyle = '#8e8e8e';
   hctx.fillRect(0, 0, S, S);
   rctx.fillStyle = '#dcdcdc';
   rctx.fillRect(0, 0, S, S);
 
-  // Broad trowel plaster clouds & subtle yellowing age blotches
-  for (let i = 0; i < 480; i++) {
+  // Soft hand-troweled gouache plaster clouds & warm mineral variation
+  for (let i = 0; i < 420; i++) {
     const x = rand() * S;
     const y = rand() * S;
-    const rad = 14 + rand() * 44;
+    const rad = 16 + rand() * 48;
     const roll = rand();
-    if (roll < 0.36) ctx.fillStyle = 'rgba(238,233,220,0.16)';
-    else if (roll < 0.72) ctx.fillStyle = 'rgba(162,152,134,0.16)';
-    else ctx.fillStyle = 'rgba(138,128,108,0.14)';
+    if (roll < 0.45) ctx.fillStyle = 'rgba(252,248,238,0.22)';
+    else if (roll < 0.80) ctx.fillStyle = 'rgba(222,211,192,0.16)';
+    else ctx.fillStyle = 'rgba(204,191,170,0.12)';
     ctx.beginPath();
     ctx.arc(x, y, rad, 0, Math.PI * 2);
     ctx.fill();
 
-    hctx.fillStyle = roll < 0.45 ? 'rgba(162,162,162,0.22)' : 'rgba(104,104,104,0.22)';
+    hctx.fillStyle = roll < 0.5 ? 'rgba(154,154,154,0.18)' : 'rgba(112,112,112,0.18)';
     hctx.beginPath();
     hctx.arc(x, y, rad * 0.85, 0, Math.PI * 2);
     hctx.fill();
   }
 
-  // Heavy monsoon rainwater drip stains & dark algae streaks descending from roof eaves
-  for (let i = 0; i < 95; i++) {
+  // Delicate warm-taupe under-eave wash (soft painterly shadow, never dirty algae streaks)
+  for (let i = 0; i < 42; i++) {
     const x = rand() * S;
-    const w = 2.5 + rand() * 16;
-    const len = 65 + rand() * 260;
+    const w = 6 + rand() * 22;
+    const len = 36 + rand() * 110;
     const g = ctx.createLinearGradient(0, 0, 0, len);
-    const mossy = rand() < 0.38;
-    g.addColorStop(0, mossy ? 'rgba(54,62,42,0.44)' : 'rgba(68,64,56,0.38)');
-    g.addColorStop(0.45, mossy ? 'rgba(72,82,56,0.18)' : 'rgba(96,90,78,0.16)');
-    g.addColorStop(1, 'rgba(96,90,78,0)');
+    g.addColorStop(0, 'rgba(166,154,136,0.22)');
+    g.addColorStop(0.55, 'rgba(182,172,154,0.08)');
+    g.addColorStop(1, 'rgba(182,172,154,0)');
     ctx.fillStyle = g;
     ctx.fillRect(x, 0, w, len);
   }
 
-  // Peeling / flaking lime plaster scars exposing dusty ochre-grey rammed earth beneath!
-  for (let i = 0; i < 22; i++) {
+  // Subtle artisanal hand-plaster freckles & faint hairline texture
+  for (let i = 0; i < 12; i++) {
     const px = rand() * S;
-    const py = S * (0.28 + rand() * 0.65);
-    const rx = 8 + rand() * 24;
-    const ry = 6 + rand() * 16;
-    ctx.save();
+    const py = S * (0.35 + rand() * 0.55);
+    const rx = 6 + rand() * 14;
+    const ry = 4 + rand() * 10;
+    ctx.fillStyle = 'rgba(196,178,150,0.24)';
     ctx.beginPath();
-    for (let k = 0; k < 9; k++) {
-      const ang = (k / 9) * Math.PI * 2;
-      const jitter = 0.65 + rand() * 0.55;
-      const vx = px + Math.cos(ang) * rx * jitter;
-      const vy = py + Math.sin(ang) * ry * jitter;
-      if (k === 0) ctx.moveTo(vx, vy);
-      else ctx.lineTo(vx, vy);
-    }
-    ctx.closePath();
-    // Recessed aged earth substrate inside the flaked scar
-    ctx.fillStyle = rand() > 0.4 ? 'rgba(132,114,90,0.68)' : 'rgba(108,96,78,0.64)';
+    ctx.ellipse(px, py, rx, ry, (rand() - 0.5) * 0.6, 0, Math.PI * 2);
     ctx.fill();
-    ctx.strokeStyle = 'rgba(64,58,48,0.45)';
-    ctx.lineWidth = 1.4;
-    ctx.stroke();
-    ctx.restore();
 
-    // Etch recessed scar into height map so light catches the flaking plaster lip!
-    hctx.fillStyle = 'rgba(42,42,42,0.72)';
+    hctx.fillStyle = 'rgba(92,92,92,0.32)';
     hctx.beginPath();
-    hctx.ellipse(px, py, rx * 0.85, ry * 0.85, 0, 0, Math.PI * 2);
+    hctx.ellipse(px, py, rx * 0.8, ry * 0.8, 0, 0, Math.PI * 2);
     hctx.fill();
-    rctx.fillStyle = 'rgba(248,248,248,0.65)';
-    rctx.beginPath();
-    hctx.ellipse(px, py, rx, ry, 0, 0, Math.PI * 2);
-    rctx.fill();
   }
 
-  // Branching hairline age cracks across the aged plaster
-  ctx.lineWidth = 1.1;
-  hctx.lineWidth = 1.6;
-  for (let cIdx = 0; cIdx < 24; cIdx++) {
-    let cx = rand() * S;
-    let cy = rand() * S;
-    ctx.strokeStyle = 'rgba(72,66,56,0.36)';
-    hctx.strokeStyle = 'rgba(32,32,32,0.58)';
-    ctx.beginPath();
-    hctx.beginPath();
-    ctx.moveTo(cx, cy);
-    hctx.moveTo(cx, cy);
-    const segs = 5 + Math.floor(rand() * 7);
-    for (let s = 0; s < segs; s++) {
-      cx += (rand() - 0.5) * 28;
-      cy += (rand() - 0.25) * 24;
-      ctx.lineTo(cx, cy);
-      hctx.lineTo(cx, cy);
-    }
-    ctx.stroke();
-    hctx.stroke();
-  }
-
-  // Authentic lower-40% rising damp, dark water-splash grime & creeping olive-green moss!
-  const dampGrad = ctx.createLinearGradient(0, S * 0.5, 0, S);
-  dampGrad.addColorStop(0, 'rgba(112,106,90,0.0)');
-  dampGrad.addColorStop(0.38, 'rgba(104,98,82,0.28)');
-  dampGrad.addColorStop(0.72, 'rgba(68,72,54,0.62)');
-  dampGrad.addColorStop(1, 'rgba(44,52,36,0.86)');
+  // Very gentle warm sandstone dust transition along lowest 14% above granite plinth (zero green sludge!)
+  const dampGrad = ctx.createLinearGradient(0, S * 0.82, 0, S);
+  dampGrad.addColorStop(0, 'rgba(186,170,144,0.0)');
+  dampGrad.addColorStop(0.65, 'rgba(172,156,130,0.20)');
+  dampGrad.addColorStop(1, 'rgba(148,134,110,0.34)');
   ctx.fillStyle = dampGrad;
-  ctx.fillRect(0, S * 0.5, S, S * 0.5);
-
-  // Velvety olive/emerald moss colonies & dark damp lichen climbing irregularly from wall base
-  for (let i = 0; i < 240; i++) {
-    const x = rand() * S;
-    const tBase = rand() * rand(); // denser near very bottom (y -> S)
-    const y = S * (1.0 - tBase * 0.42);
-    const rw = 8 + rand() * 32;
-    const rh = 6 + rand() * 20;
-    const mRoll = rand();
-    if (mRoll < 0.42) ctx.fillStyle = 'rgba(62,82,40,0.34)'; // rich olive moss
-    else if (mRoll < 0.72) ctx.fillStyle = 'rgba(46,62,32,0.38)'; // deep damp green moss
-    else if (mRoll < 0.88) ctx.fillStyle = 'rgba(84,96,52,0.28)'; // sunlit yellow-olive lichen
-    else ctx.fillStyle = 'rgba(54,50,42,0.34)'; // dark damp soot
-    ctx.beginPath();
-    ctx.ellipse(x, y, rw, rh, (rand() - 0.5) * 0.6, 0, Math.PI * 2);
-    ctx.fill();
-
-    // Velvety high roughness + subtle puffy relief on moss patches
-    rctx.fillStyle = 'rgba(250,250,250,0.45)';
-    rctx.fillRect(x - rw, y - rh, rw * 2, rh * 2);
-    hctx.fillStyle = mRoll < 0.72 ? 'rgba(165,165,165,0.28)' : 'rgba(68,68,68,0.28)';
-    hctx.beginPath();
-    hctx.ellipse(x, y, rw * 0.7, rh * 0.7, 0, 0, Math.PI * 2);
-    hctx.fill();
-  }
+  ctx.fillRect(0, S * 0.82, S, S * 0.18);
 
   // Fine sand grain & weathered chalk micro-pitting
   for (let i = 0; i < 3200; i++) {
@@ -814,90 +1013,55 @@ function makeCourtyardHePingMaps(aniso: number) {
   const [h, hctx] = makeCanvas(S, S);
   const [r, rctx] = makeCanvas(S, S);
 
-  ctx.fillStyle = '#9d978c';
+  // Sun-warmed cream sandstone / three-lime-earth courtyard base (eliminates dark vertical seams!)
+  ctx.fillStyle = '#ddd0b8';
   ctx.fillRect(0, 0, S, S);
   hctx.fillStyle = '#8e8e8e';
   hctx.fillRect(0, 0, S, S);
   rctx.fillStyle = '#dcdcdc';
   rctx.fillRect(0, 0, S, S);
 
-  // Rich organic rain-soot, sun-bleached chalk, and damp earth weathering clouds
+  // Soft sunlit warm-sand, limestone & subtle ochre brushwork clouds
   for (let i = 0; i < 320; i++) {
     const x = rand() * S;
     const y = rand() * S;
     const rad = 18 + rand() * 68;
     const tone = rand();
-    if (tone < 0.34) ctx.fillStyle = 'rgba(72,68,60,0.22)'; // dark aged rain patina
-    else if (tone < 0.62) ctx.fillStyle = 'rgba(116,110,98,0.19)';
-    else if (tone < 0.84) ctx.fillStyle = 'rgba(196,190,176,0.16)'; // sun-bleached lime
-    else ctx.fillStyle = 'rgba(84,96,56,0.16)'; // subtle moss-tinted damp cloud
+    if (tone < 0.34) ctx.fillStyle = 'rgba(182,166,142,0.18)';
+    else if (tone < 0.68) ctx.fillStyle = 'rgba(232,220,198,0.20)';
+    else if (tone < 0.88) ctx.fillStyle = 'rgba(244,236,218,0.18)';
+    else ctx.fillStyle = 'rgba(164,154,132,0.14)';
     ctx.beginPath();
     ctx.arc(x, y, rad, 0, Math.PI * 2);
     ctx.fill();
 
-    const rv = tone < 0.34 ? 'rgba(182,182,182,0.28)' : 'rgba(246,246,246,0.24)';
+    const rv = tone < 0.34 ? 'rgba(196,196,196,0.22)' : 'rgba(244,244,244,0.22)';
     rctx.fillStyle = rv;
     rctx.beginPath();
     rctx.arc(x, y, rad, 0, Math.PI * 2);
     rctx.fill();
   }
 
-  // Moss-lined slab expansion joint grid (matching the weathered joints in the reference photo!)
-  for (const pos of [0, 256]) {
-    // Moss & dark silt halo flanking each expansion seam
-    ctx.strokeStyle = 'rgba(62,76,40,0.42)';
-    ctx.lineWidth = 10;
-    ctx.beginPath();
-    ctx.moveTo(pos, 0);
-    ctx.lineTo(pos, S);
-    ctx.moveTo(0, pos);
-    ctx.lineTo(S, pos);
-    ctx.stroke();
-
-    // Sharp recessed crack line
-    ctx.strokeStyle = 'rgba(42,40,34,0.68)';
-    ctx.lineWidth = 2.4;
-    ctx.beginPath();
-    ctx.moveTo(pos, 0);
-    ctx.lineTo(pos, S);
-    ctx.moveTo(0, pos);
-    ctx.lineTo(S, pos);
-    ctx.stroke();
-
-    hctx.strokeStyle = '#242424';
-    hctx.lineWidth = 4;
-    hctx.beginPath();
-    hctx.moveTo(pos, 0);
-    hctx.lineTo(pos, S);
-    hctx.moveTo(0, pos);
-    hctx.lineTo(S, pos);
-    hctx.stroke();
-  }
-
-  // Random jagged surface stress cracks with tiny green moss flecks
-  for (let k = 0; k < 18; k++) {
-    let cx = rand() * S;
-    let cy = rand() * S;
-    ctx.strokeStyle = 'rgba(52,50,42,0.45)';
-    ctx.lineWidth = 1.2;
-    hctx.strokeStyle = '#363636';
-    hctx.lineWidth = 1.8;
-    ctx.beginPath();
-    hctx.beginPath();
-    ctx.moveTo(cx, cy);
-    hctx.moveTo(cx, cy);
-    for (let s = 0; s < 6; s++) {
-      cx += (rand() - 0.5) * 34;
-      cy += (rand() - 0.5) * 34;
-      ctx.lineTo(cx, cy);
-      hctx.lineTo(cx, cy);
-      if (rand() < 0.45) {
-        ctx.fillStyle = 'rgba(72,92,42,0.38)';
-        ctx.fillRect(cx - 2, cy - 2, 5, 4);
-      }
+  // Fine staggered stone-flagged courtyard pattern (delicate warm joints, zero dark stripe!)
+  const fRows = 8;
+  const fCols = 4;
+  const frh = S / fRows;
+  const fcw = S / fCols;
+  for (let r = 0; r < fRows; r++) {
+    const xOff = (r % 2) * (fcw * 0.5);
+    for (let cIdx = -1; cIdx <= fCols; cIdx++) {
+      const fx = cIdx * fcw + xOff;
+      const fy = r * frh;
+      const shade = Math.round((rand() - 0.5) * 16);
+      ctx.fillStyle = `rgba(${216 + shade},${202 + shade},${178 + shade},0.32)`;
+      ctx.fillRect(fx + 2, fy + 2, fcw - 4, frh - 4);
+      ctx.strokeStyle = 'rgba(154,142,122,0.34)';
+      ctx.lineWidth = 1.6;
+      ctx.strokeRect(fx + 1, fy + 1, fcw - 2, frh - 2);
+      hctx.strokeStyle = '#686868';
+      hctx.lineWidth = 2;
+      hctx.strokeRect(fx + 1, fy + 1, fcw - 2, frh - 2);
     }
-    ctx.stroke();
-    hctx.stroke();
   }
 
   // Coarse weathered aggregate & sand grit
@@ -1511,234 +1675,291 @@ export function createMaterialLibrary(renderer: THREE.WebGLRenderer): MaterialLi
   );
 
   const limeWall = new THREE.MeshStandardMaterial({
-    color: 0xffffff,
+    color: 0xfaf2e1,
     map: lime.map,
     normalMap: lime.normal,
-    normalScale: new THREE.Vector2(0.95, 0.95),
+    normalScale: new THREE.Vector2(0.55, 0.55),
     roughnessMap: lime.roughness,
-    roughness: 0.94,
-    metalness: 0.01,
+    roughness: 0.9,
+    metalness: 0.0,
   });
 
   const limeWallInterior = new THREE.MeshStandardMaterial({
-    color: 0xe2dbcc,
+    color: 0xf4e7ce,
     map: lime.map,
     normalMap: lime.normal,
-    normalScale: new THREE.Vector2(0.6, 0.6),
-    roughness: 0.92,
-    metalness: 0.01,
+    normalScale: new THREE.Vector2(0.42, 0.42),
+    roughness: 0.88,
+    metalness: 0.0,
   });
 
   const limeRidge = new THREE.MeshStandardMaterial({
-    color: 0xffffff,
+    color: 0xfbf5e8,
     map: ridge.map,
     normalMap: ridge.normal,
-    normalScale: new THREE.Vector2(0.75, 0.75),
-    roughness: 0.92,
-    metalness: 0.02,
-  });
-
-  const rammedEarth = new THREE.MeshStandardMaterial({
-    color: 0xffffff,
-    map: earth.map,
-    normalMap: earth.normal,
-    normalScale: new THREE.Vector2(1.15, 1.15),
-    roughness: 0.95,
+    normalScale: new THREE.Vector2(0.55, 0.55),
+    roughness: 0.86,
     metalness: 0.01,
   });
 
-  const rammedEarthXray = new THREE.MeshStandardMaterial({
-    color: 0xc59a6d,
+  const rammedEarth = new THREE.MeshStandardMaterial({
+    color: 0xe6c89a,
     map: earth.map,
     normalMap: earth.normal,
-    roughness: 0.86,
-    metalness: 0.03,
+    normalScale: new THREE.Vector2(0.85, 0.85),
+    roughness: 0.92,
+    metalness: 0.0,
+  });
+
+  const rammedEarthXray = new THREE.MeshStandardMaterial({
+    color: 0xd9a870,
+    map: earth.map,
+    normalMap: earth.normal,
+    roughness: 0.84,
+    metalness: 0.02,
     transparent: true,
     opacity: 1.0,
   });
 
-  const roofTile = new THREE.MeshStandardMaterial({
-    color: 0xffffff,
+  // Painterly cerulean-indigo Qing barrel tiles (MeshPhysicalMaterial for rain water-film clearcoat & kiln glaze!)
+  const roofTile = new THREE.MeshPhysicalMaterial({
+    color: 0x7aa4c4,
     map: roof.map,
     normalMap: roof.normal,
-    normalScale: new THREE.Vector2(1.6, 1.6),
+    normalScale: new THREE.Vector2(1.42, 1.42),
     roughnessMap: roof.roughness,
-    roughness: 0.86,
+    roughness: 0.74,
     metalness: 0.04,
+    ior: 1.52,
+    clearcoat: 0.08,
+    clearcoatRoughness: 0.45,
     side: THREE.DoubleSide,
   });
 
-  const roofTileDark = new THREE.MeshStandardMaterial({
-    color: 0x525857,
+  const roofTileDark = new THREE.MeshPhysicalMaterial({
+    color: 0x35587a,
     normalMap: roof.normal,
-    normalScale: new THREE.Vector2(1.0, 1.0),
-    roughness: 0.84,
+    normalScale: new THREE.Vector2(0.9, 0.9),
+    roughness: 0.72,
     metalness: 0.05,
+    ior: 1.52,
+    clearcoat: 0.1,
+    clearcoatRoughness: 0.42,
   });
 
-  const graniteSlab = new THREE.MeshStandardMaterial({
-    color: 0xffffff,
+  const graniteSlab = new THREE.MeshPhysicalMaterial({
+    color: 0xeadbc0,
     map: granite.map,
     normalMap: granite.normal,
-    normalScale: new THREE.Vector2(1.0, 1.0),
+    normalScale: new THREE.Vector2(0.78, 0.78),
     roughnessMap: granite.roughness,
-    roughness: 0.86,
-    metalness: 0.03,
+    roughness: 0.82,
+    metalness: 0.01,
+    ior: 1.54,
+    clearcoat: 0.0,
+    clearcoatRoughness: 0.24,
   });
 
-  const granitePlinth = new THREE.MeshStandardMaterial({
-    color: 0xffffff,
+  const granitePlinth = new THREE.MeshPhysicalMaterial({
+    color: 0xd6c3a1,
     map: plinth.map,
     normalMap: plinth.normal,
-    normalScale: new THREE.Vector2(1.15, 1.15),
+    normalScale: new THREE.Vector2(0.88, 0.88),
     roughnessMap: plinth.roughness,
-    roughness: 0.9,
-    metalness: 0.02,
+    roughness: 0.85,
+    metalness: 0.01,
+    ior: 1.54,
+    clearcoat: 0.0,
+    clearcoatRoughness: 0.28,
   });
 
-  const courtyardEarth = new THREE.MeshStandardMaterial({
-    color: 0xffffff,
+  // Warm sun-baked cream-ochre He-Ping forecourt (MeshPhysicalMaterial supports rain film sheen!)
+  const courtyardEarth = new THREE.MeshPhysicalMaterial({
+    color: 0xf1e1c4,
     map: heping.map,
     normalMap: heping.normal,
-    normalScale: new THREE.Vector2(0.85, 0.85),
+    normalScale: new THREE.Vector2(0.62, 0.62),
     roughnessMap: heping.roughness,
-    roughness: 0.94,
-    metalness: 0.01,
+    roughness: 0.88,
+    metalness: 0.0,
+    ior: 1.48,
+    clearcoat: 0.0,
+    clearcoatRoughness: 0.22,
   });
 
-  const huataiCobble = new THREE.MeshStandardMaterial({
-    color: 0xffffff,
+  const huataiCobble = new THREE.MeshPhysicalMaterial({
+    color: 0xead9b8,
     map: cobble.map,
     normalMap: cobble.normal,
-    normalScale: new THREE.Vector2(1.15, 1.15),
+    normalScale: new THREE.Vector2(0.88, 0.88),
     roughnessMap: cobble.roughness,
-    roughness: 0.88,
-    metalness: 0.02,
+    roughness: 0.82,
+    metalness: 0.01,
+    ior: 1.52,
+    clearcoat: 0.0,
+    clearcoatRoughness: 0.24,
   });
 
-  const darkTimber = new THREE.MeshStandardMaterial({
-    color: 0xffffff,
+  // Honeyed cedar & hand-waxed lacquered Hakka architectural timber
+  const darkTimber = new THREE.MeshPhysicalMaterial({
+    color: 0xb8764a,
     map: timber.map,
     normalMap: timber.normal,
-    normalScale: new THREE.Vector2(1.05, 1.05),
+    normalScale: new THREE.Vector2(0.92, 0.92),
     roughnessMap: timber.roughness,
-    roughness: 0.74,
-    metalness: 0.03,
+    roughness: 0.64,
+    metalness: 0.01,
+    ior: 1.5,
+    clearcoat: 0.18,
+    clearcoatRoughness: 0.42,
   });
 
   const weatheredWoodDoor = new THREE.MeshStandardMaterial({
-    color: 0xd8cec2,
+    color: 0xd49a6a,
     map: timber.map,
     normalMap: timber.normal,
-    normalScale: new THREE.Vector2(1.15, 1.15),
+    normalScale: new THREE.Vector2(0.98, 0.98),
     roughnessMap: timber.roughness,
-    roughness: 0.8,
-    metalness: 0.03,
+    roughness: 0.7,
+    metalness: 0.02,
   });
 
-  const windowLattice = new THREE.MeshStandardMaterial({
+  const windowLattice = new THREE.MeshPhysicalMaterial({
     color: 0xffffff,
     map: winTex,
-    roughness: 0.48,
-    metalness: 0.1,
+    emissive: 0xffb35c,
+    emissiveMap: winTex,
+    emissiveIntensity: 0.08,
+    roughness: 0.42,
+    metalness: 0.05,
+    ior: 1.52,
+    clearcoat: 0.45,
+    clearcoatRoughness: 0.24,
   });
 
   const redCouplet = new THREE.MeshStandardMaterial({
-    color: 0xffffff,
+    color: 0xfff5ee,
     map: coupletTex,
-    roughness: 0.82,
-    metalness: 0.02,
+    roughness: 0.72,
+    metalness: 0.01,
   });
 
-  const redLacquer = new THREE.MeshStandardMaterial({
-    color: 0x7b2119,
-    roughness: 0.44,
-    metalness: 0.06,
-  });
+  const woodMicro = getWoodcarveMicroMaps();
 
-  const gildedGold = new THREE.MeshStandardMaterial({
-    color: 0xc8983c,
+  // Traditional multi-coat cinnabar lacquer (朱漆): crisp clearcoat specular over deep vermilion pigment
+  const redLacquer = new THREE.MeshPhysicalMaterial({
+    color: HANDCRAFTED_PAL.verm,
+    normalMap: woodMicro.normal,
+    normalScale: new THREE.Vector2(0.14, 0.14),
     roughness: 0.34,
-    metalness: 0.78,
+    metalness: 0.02,
+    ior: 1.55,
+    clearcoat: 0.82,
+    clearcoatRoughness: 0.16,
+    envMapIntensity: 1.15,
+  });
+
+  // Physically calibrated gilded gold leaf & antique cast bronze
+  const gildedGold = new THREE.MeshStandardMaterial({
+    color: 0xebc052,
+    normalMap: woodMicro.normal,
+    normalScale: new THREE.Vector2(0.12, 0.12),
+    roughness: 0.24,
+    metalness: 0.86,
+    envMapIntensity: 1.35,
   });
 
   const bronzeMetal = new THREE.MeshStandardMaterial({
-    color: 0x77623e,
-    roughness: 0.42,
-    metalness: 0.72,
+    color: 0x9c7f4d,
+    normalMap: woodMicro.normal,
+    normalScale: new THREE.Vector2(0.16, 0.16),
+    roughness: 0.34,
+    metalness: 0.80,
+    envMapIntensity: 1.2,
   });
 
   const goldenGrain = new THREE.MeshStandardMaterial({
-    color: 0xffffff,
+    color: 0xffe89c,
     map: grain,
-    roughness: 0.88,
-    metalness: 0.02,
-  });
-
-  const indigoCloth = new THREE.MeshStandardMaterial({
-    color: 0x264166,
-    roughness: 0.85,
-    metalness: 0.02,
-    side: THREE.DoubleSide,
-  });
-
-  const terracotta = new THREE.MeshStandardMaterial({
-    color: 0x8b4c34,
-    roughness: 0.78,
-    metalness: 0.03,
-  });
-
-  const bambooGreen = new THREE.MeshStandardMaterial({
-    color: 0x4f7e34,
-    roughness: 0.56,
-    metalness: 0.03,
-  });
-
-  const foliageDeep = new THREE.MeshStandardMaterial({
-    color: 0x7ba368,
-    map: foliage.map,
-    normalMap: foliage.normal,
-    normalScale: new THREE.Vector2(1.4, 1.4),
-    roughness: 0.86,
-    metalness: 0.01,
-  });
-
-  const foliageMid = new THREE.MeshStandardMaterial({
-    color: 0x9ec27a,
-    map: foliage.map,
-    normalMap: foliage.normal,
-    normalScale: new THREE.Vector2(1.35, 1.35),
     roughness: 0.82,
     metalness: 0.01,
   });
 
-  const foliageBright = new THREE.MeshStandardMaterial({
-    color: 0xbcd482,
-    map: foliage.map,
-    normalMap: foliage.normal,
-    normalScale: new THREE.Vector2(1.25, 1.25),
-    roughness: 0.78,
+  // Hand-dyed Hakka indigo cotton cloth with physical micro-fiber velvet sheen
+  const indigoCloth = new THREE.MeshPhysicalMaterial({
+    color: 0x2c5c8f,
+    roughness: 0.86,
+    metalness: 0.0,
+    sheen: 0.62,
+    sheenRoughness: 0.72,
+    sheenColor: new THREE.Color(0x8bb6df),
+    side: THREE.DoubleSide,
+  });
+
+  // Kiln-fired glazed terracotta jars & roof accents
+  const terracotta = new THREE.MeshPhysicalMaterial({
+    color: 0xc26546,
+    normalMap: woodMicro.normal,
+    normalScale: new THREE.Vector2(0.18, 0.18),
+    roughness: 0.64,
+    metalness: 0.01,
+    ior: 1.52,
+    clearcoat: 0.36,
+    clearcoatRoughness: 0.32,
+  });
+
+  const bambooGreen = new THREE.MeshStandardMaterial({
+    color: 0x62a45c,
+    roughness: 0.48,
     metalness: 0.01,
   });
 
+  // Rich mineral-jade, leaf, and sunlit sage foliage with backlit Subsurface Scattering (SSS)
+  const foliageDeep = new THREE.MeshStandardMaterial({
+    color: 0x459272,
+    map: foliage.map,
+    normalMap: foliage.normal,
+    normalScale: new THREE.Vector2(1.05, 1.05),
+    roughness: 0.78,
+    metalness: 0.0,
+  });
+
+  const foliageMid = new THREE.MeshStandardMaterial({
+    color: 0x6db268,
+    map: foliage.map,
+    normalMap: foliage.normal,
+    normalScale: new THREE.Vector2(0.95, 0.95),
+    roughness: 0.74,
+    metalness: 0.0,
+  });
+
+  const foliageBright = new THREE.MeshStandardMaterial({
+    color: 0xb2d46e,
+    map: foliage.map,
+    normalMap: foliage.normal,
+    normalScale: new THREE.Vector2(0.85, 0.85),
+    roughness: 0.7,
+    metalness: 0.0,
+  });
+
   const grassDecal = new THREE.MeshStandardMaterial({
-    color: 0xffffff,
+    color: 0xd9eca8,
     map: grassDecalTex,
     transparent: true,
     depthWrite: false,
-    roughness: 0.94,
+    roughness: 0.9,
     metalness: 0.0,
     polygonOffset: true,
     polygonOffsetFactor: -1,
   });
 
   const mossDecal = new THREE.MeshStandardMaterial({
-    color: 0xffffff,
+    color: 0x8cc282,
     map: mossDecalTex,
     transparent: true,
-    opacity: 0.56,
+    opacity: 0.42,
     depthWrite: false,
-    roughness: 0.96,
+    roughness: 0.92,
     metalness: 0.0,
     polygonOffset: true,
     polygonOffsetFactor: -2,
@@ -1748,162 +1969,170 @@ export function createMaterialLibrary(renderer: THREE.WebGLRenderer): MaterialLi
   const forestGround = new THREE.MeshStandardMaterial({
     color: 0xffffff,
     normalMap: earth.normal,
-    normalScale: new THREE.Vector2(0.55, 0.55),
-    roughness: 0.95,
+    normalScale: new THREE.Vector2(0.4, 0.4),
+    roughness: 0.94,
     metalness: 0.0,
   });
 
   const lanternPaper = new THREE.MeshStandardMaterial({
-    color: 0xc93829,
-    emissive: 0xff6224,
-    emissiveIntensity: 0.28,
-    roughness: 0.62,
+    color: 0xe64d2e,
+    emissive: 0xff8b36,
+    emissiveIntensity: 0.42,
+    roughness: 0.52,
     metalness: 0.0,
   });
 
   const contactShadow = makeContactShadowMaterial();
-  const plaqueLongxi = makePlaqueMaterial(aniso, '隴西世澤', '梅州客家雙圍龍屋', '#1c1815', '#d9ad48', '#9e762c');
-  const plaqueGengdu = makePlaqueMaterial(aniso, '耕讀傳家', '家族私塾書房', '#e4d8bf', '#26201a', '#7c623d');
-  const plaqueJiaxun = makePlaqueMaterial(aniso, '敦親睦族', '崇文重教 · 勤儉持家', '#221813', '#cfa042', '#825d25');
+  const plaqueLongxi = makePlaqueMaterial(aniso, '隴西世澤', '梅州客家雙圍龍屋', '#1b2b44', '#f2c65a', '#b58432');
+  const plaqueGengdu = makePlaqueMaterial(aniso, '耕讀傳家', '家族私塾書房', '#f5ebd6', '#1d2a44', '#9c713c');
+  const plaqueJiaxun = makePlaqueMaterial(aniso, '敦親睦族', '崇文重教 · 勤儉持家', '#242f48', '#ebc054', '#9c6e2a');
 
   const skySunny = new THREE.MeshBasicMaterial({ map: skySunnyTex, side: THREE.BackSide, fog: false, depthWrite: false });
   const skyRain = new THREE.MeshBasicMaterial({ map: skyRainTex, side: THREE.BackSide, fog: false, depthWrite: false });
   const skyNight = new THREE.MeshBasicMaterial({ map: skyNightTex, side: THREE.BackSide, fog: false, depthWrite: false });
 
-  // Attach world-space anti-tiling macro patina, moss & ground-contact AO shaders
+  // Pillar 1 & 3: Attach handcrafted GI radiosity, color bleeding, crevice AO & rain-wetness shaders
   attachWorldPatinaShader(roofTile, {
     key: 'roof_tile',
     macroFreq: 0.11,
-    macroStrength: 0.24,
-    mossStrength: 0.22,
+    macroStrength: 0.18,
+    mossStrength: 0.14,
+    bounceReceive: 0.16,
+    crimsonBleed: 0.08,
+    wettable: true,
   });
   attachWorldPatinaShader(limeWall, {
-    key: 'lime_wall',
-    macroFreq: 0.16,
-    macroStrength: 0.14,
-    mossStrength: 0.12,
-    groundAoHeight: 0.78,
-    groundAoStrength: 0.34,
+    key: 'lime_wall_v3',
+    macroFreq: 0.15,
+    macroStrength: 0.08,
+    mossStrength: 0.02,
+    groundAoHeight: 0.52,
+    groundAoStrength: 0.14,
     eaveAoHeight: 3.15,
+    bounceReceive: 0.34,
+    crimsonBleed: 0.28,
+    wettable: false,
   });
   attachWorldPatinaShader(limeWallInterior, {
-    key: 'lime_wall_int',
-    macroFreq: 0.2,
-    macroStrength: 0.12,
-    mossStrength: 0.06,
-    groundAoHeight: 0.62,
-    groundAoStrength: 0.24,
+    key: 'lime_wall_int_v3',
+    macroFreq: 0.18,
+    macroStrength: 0.07,
+    mossStrength: 0.01,
+    groundAoHeight: 0.42,
+    groundAoStrength: 0.12,
+    bounceReceive: 0.3,
+    crimsonBleed: 0.22,
+    wettable: false,
   });
   attachWorldPatinaShader(limeRidge, {
-    key: 'lime_ridge',
+    key: 'lime_ridge_v3',
     macroFreq: 0.18,
-    macroStrength: 0.18,
-    mossStrength: 0.2,
+    macroStrength: 0.09,
+    mossStrength: 0.05,
+    bounceReceive: 0.24,
+    crimsonBleed: 0.14,
+    wettable: false,
   });
   attachWorldPatinaShader(graniteSlab, {
-    key: 'granite_slab',
+    key: 'granite_slab_v3',
     macroFreq: 0.13,
-    macroStrength: 0.22,
-    mossStrength: 0.16,
+    macroStrength: 0.11,
+    mossStrength: 0.05,
+    bounceReceive: 0.22,
+    crimsonBleed: 0.24,
+    wettable: true,
   });
   attachWorldPatinaShader(granitePlinth, {
-    key: 'granite_plinth',
-    macroFreq: 0.22,
-    macroStrength: 0.18,
-    mossStrength: 0.24,
-    groundAoHeight: 0.48,
-    groundAoStrength: 0.34,
+    key: 'granite_plinth_v3',
+    macroFreq: 0.2,
+    macroStrength: 0.12,
+    mossStrength: 0.08,
+    groundAoHeight: 0.38,
+    groundAoStrength: 0.16,
+    bounceReceive: 0.25,
+    crimsonBleed: 0.22,
+    wettable: true,
   });
   attachWorldPatinaShader(courtyardEarth, {
-    key: 'heping_court',
+    key: 'heping_court_v3',
     macroFreq: 0.075,
-    macroStrength: 0.28,
-    mossStrength: 0.16,
+    macroStrength: 0.11,
+    mossStrength: 0.03,
+    bounceReceive: 0.14,
+    crimsonBleed: 0.14,
+    wettable: true,
   });
   attachWorldPatinaShader(huataiCobble, {
     key: 'huatai_cobble',
     macroFreq: 0.12,
-    macroStrength: 0.24,
-    mossStrength: 0.2,
+    macroStrength: 0.15,
+    mossStrength: 0.1,
+    bounceReceive: 0.18,
+    crimsonBleed: 0.08,
+    wettable: true,
   });
   attachWorldPatinaShader(darkTimber, {
     key: 'dark_timber',
-    macroFreq: 0.25,
-    macroStrength: 0.14,
-    mossStrength: 0.08,
-    groundAoHeight: 0.55,
-    groundAoStrength: 0.28,
+    macroFreq: 0.24,
+    macroStrength: 0.12,
+    mossStrength: 0.05,
+    groundAoHeight: 0.48,
+    groundAoStrength: 0.18,
+    bounceReceive: 0.24,
+    crimsonBleed: 0.14,
+    wettable: false,
   });
+
+  // Pillar 2: Attach physically-based Subsurface Scattering (SSS) to foliage, bamboo & silk lanterns
+  attachSubsurfaceShader(foliageDeep, {
+    key: 'foliage_deep',
+    tintHex: 0x76c968,
+    backStrength: 0.48,
+    wrapStrength: 0.22,
+    power: 2.5,
+  });
+  attachSubsurfaceShader(foliageMid, {
+    key: 'foliage_mid',
+    tintHex: 0xa4df6a,
+    backStrength: 0.56,
+    wrapStrength: 0.26,
+    power: 2.4,
+  });
+  attachSubsurfaceShader(foliageBright, {
+    key: 'foliage_bright',
+    tintHex: 0xd6ee7c,
+    backStrength: 0.64,
+    wrapStrength: 0.28,
+    power: 2.2,
+  });
+  attachSubsurfaceShader(bambooGreen, {
+    key: 'bamboo_green',
+    tintHex: 0x9ce072,
+    backStrength: 0.52,
+    wrapStrength: 0.24,
+    power: 2.4,
+  });
+  attachSubsurfaceShader(lanternPaper, {
+    key: 'lantern_paper',
+    tintHex: 0xffa652,
+    backStrength: 0.62,
+    wrapStrength: 0.34,
+    power: 2.0,
+  });
+
   attachValleyTerrainShader(forestGround);
 
-  // Load real photographic 8K seamless PBR textures & derive crisp Sobel micro-relief normals on load!
+  const wettableMaterials: THREE.MeshPhysicalMaterial[] = [
+    roofTile,
+    roofTileDark,
+    graniteSlab,
+    granitePlinth,
+    courtyardEarth,
+    huataiCobble,
+  ];
+
   let isDisposed = false;
-  const loader = new THREE.TextureLoader();
-
-  const bindPhotoTexture = (
-    url: string,
-    normalStrength: number,
-    bindings: Array<{
-      mat: THREE.MeshStandardMaterial;
-      repX: number;
-      repY: number;
-      normalScale: number;
-      tint?: number;
-    }>
-  ) => {
-    loader.load(
-      url,
-      (loaded) => {
-        if (isDisposed) {
-          loaded.dispose();
-          return;
-        }
-        const img = loaded.image as HTMLImageElement;
-        bindings.forEach((b, idx) => {
-          const colorTex = idx === 0 ? loaded : loaded.clone();
-          colorTex.colorSpace = THREE.SRGBColorSpace;
-          colorTex.wrapS = THREE.RepeatWrapping;
-          colorTex.wrapT = THREE.RepeatWrapping;
-          colorTex.repeat.set(b.repX, b.repY);
-          colorTex.anisotropy = aniso;
-          colorTex.needsUpdate = true;
-
-          const normTex = imageToSobelNormalTexture(img, aniso, normalStrength, b.repX, b.repY);
-          textures.push(colorTex, normTex);
-
-          b.mat.map = colorTex;
-          b.mat.normalMap = normTex;
-          b.mat.normalScale.set(b.normalScale, b.normalScale);
-          if (b.tint !== undefined) {
-            b.mat.color.setHex(b.tint);
-          }
-          b.mat.needsUpdate = true;
-        });
-      },
-      undefined,
-      () => {
-        // Fallback procedural canvas maps already bound seamlessly
-      }
-    );
-  };
-
-  // 1. Real 150-year-old Meizhou Qing barrel roof tiles with velvety moss troughs
-  bindPhotoTexture('/src/assets/images/tex_roof_tiles_1795759026648.jpg', 3.4, [
-    { mat: roofTile, repX: 1, repY: 1, normalScale: 1.45, tint: 0xf4f5f3 },
-  ]);
-
-  // 2. Real weathered peeling Lingnan lime plaster walls with creeping bottom moss & eave drip streaks
-  bindPhotoTexture('/src/assets/images/tex_lime_wall_1795759029567.jpg', 2.4, [
-    { mat: limeWall, repX: 1, repY: 1, normalScale: 1.05, tint: 0xf6f3eb },
-    { mat: limeWallInterior, repX: 1, repY: 1, normalScale: 0.72, tint: 0xe6dfd0 },
-  ]);
-
-  // 3. Real moss-seamed antique flagstone & weathered He-Ping courtyard paving
-  bindPhotoTexture('/src/assets/images/tex_aged_concrete_1795759030054.jpg', 2.8, [
-    { mat: courtyardEarth, repX: 16, repY: 4, normalScale: 0.95, tint: 0xa6a59e },
-    { mat: graniteSlab, repX: 5, repY: 5, normalScale: 1.15, tint: 0xbcb9b0 },
-    { mat: granitePlinth, repX: 4, repY: 0.85, normalScale: 1.25, tint: 0x949289 },
-  ]);
+  void isDisposed;
 
   const materials: THREE.Material[] = [
     limeWall,
@@ -1981,6 +2210,7 @@ export function createMaterialLibrary(renderer: THREE.WebGLRenderer): MaterialLi
     skySunny,
     skyRain,
     skyNight,
+    wettableMaterials,
     dispose: () => {
       isDisposed = true;
       textures.forEach((t) => t.dispose());

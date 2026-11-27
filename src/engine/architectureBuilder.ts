@@ -1,5 +1,24 @@
 import * as THREE from 'three';
-import type { MaterialLibrary } from './proceduralTextures';
+import {
+  attachSubsurfaceShader,
+  HANDCRAFTED_PAL,
+  physicalEnvUniforms,
+  type MaterialLibrary,
+} from './proceduralTextures';
+import {
+  createCarvedBracket,
+  createCraftedLantern,
+  createCuppedPetalGeometry,
+  createDrumStone,
+  createLanternSharedGeos,
+  createPaintedWoodMat,
+  createSculptedLotusPadGeometry,
+  createSoftPillowGeometry,
+  createTaperedCurveGeometry,
+  createTurnedLatheGeometry,
+  createWillowFrondGeometry,
+  SCULPT_COLORS,
+} from './sculptHelpers';
 import {
   FRONT_CENTER_Z,
   FRONT_STRAIGHT_HALF_W,
@@ -27,6 +46,7 @@ export interface ArchitectureRefs {
   koiGroup: THREE.Group;
   lanternLights: THREE.PointLight[];
   rainCurtainMeshes: THREE.Mesh[];
+  updateWater: (t: number, nightFactor: number, rainFactor: number) => void;
   dispose: () => void;
 }
 
@@ -229,6 +249,10 @@ export function buildWeilongArchitecture(
   };
 
   const castShadow = !isSoftwareGl;
+  const lanternGeos = createLanternSharedGeos(trackGeo);
+  const animatedWillowFronds: Array<{ mesh: THREE.Object3D; phase: number; baseRx: number; baseRz: number }> = [];
+  const animatedReeds: Array<{ mesh: THREE.Object3D; phase: number }> = [];
+  const animatedKoiTails: Array<{ tail: THREE.Object3D; fin: THREE.Object3D; phase: number }> = [];
 
   // Helper: add a box mesh with optional shadow casting
   const addBox = (
@@ -594,11 +618,12 @@ export function buildWeilongArchitecture(
   );
   root.add(skyDome);
 
-  // Distant layered Meizhou mountains with humid Lingnan aerial-perspective haze gradient!
+  // Layered Shan-Shui Blue-Green Mineral Mountains (refindex.html 60_land.js woodblock brushwork!)
   const attachMountainMistShader = (
     mat: THREE.Material,
     key: string,
     lowHex: string,
+    midHex: string,
     highHex: string,
     maxY: number
   ) => {
@@ -609,63 +634,107 @@ export function buildWeilongArchitecture(
           '#include <common>',
           `#include <common>
           varying float vMtnY;
-          varying float vMtnX;`
+          varying float vMtnX;
+          varying float vMtnZ;`
         )
         .replace(
           '#include <project_vertex>',
           `#include <project_vertex>
           vMtnY = position.y;
-          vMtnX = position.x;`
+          vMtnX = position.x;
+          vMtnZ = position.z;`
         );
       shader.fragmentShader = shader.fragmentShader
         .replace(
           '#include <common>',
           `#include <common>
           varying float vMtnY;
-          varying float vMtnX;`
+          varying float vMtnX;
+          varying float vMtnZ;`
         )
         .replace(
           '#include <color_fragment>',
           `#include <color_fragment>
-          float hT = clamp((vMtnY + 3.0) / ${maxY.toFixed(1)}, 0.0, 1.0);
-          float ridgeVar = 0.5 + 0.5 * sin(vMtnX * 0.045);
+          float hT = clamp((vMtnY + 3.5) / ${maxY.toFixed(1)}, 0.0, 1.0);
+          float angle = atan(vMtnZ, vMtnX);
+          // Vertical gouache brush pleats & sunlit ridge catch
+          float stroke = 0.5 + 0.5 * sin(angle * 48.0 + sin(vMtnY * 0.25) * 1.4);
+          float sunSide = 0.5 + 0.5 * cos(angle - 0.72);
           vec3 mLow = vec3(${lowHex});
+          vec3 mMid = vec3(${midHex});
           vec3 mHigh = vec3(${highHex});
-          diffuseColor.rgb = mix(mLow, mHigh, smoothstep(0.08, 0.92, hT)) * (0.92 + 0.14 * ridgeVar);`
+          vec3 col = mix(mLow, mMid, smoothstep(0.05, 0.55, hT));
+          col = mix(col, mHigh, smoothstep(0.52, 0.96, hT));
+          col *= (0.90 + 0.14 * stroke) * mix(vec3(0.88, 0.94, 1.04), vec3(1.08, 1.04, 0.94), sunSide);
+          diffuseColor.rgb = col;`
         );
     };
   };
 
+  // Far hazy azure-cerulean peaks with misty warm cream bases
   const mtnMatFar = trackMat(
-    new THREE.MeshBasicMaterial({ color: 0xffffff, fog: false, side: THREE.DoubleSide })
+    new THREE.MeshBasicMaterial({ color: 0xffffff, fog: true, side: THREE.DoubleSide })
   );
-  attachMountainMistShader(mtnMatFar, 'mtn_far_v1', '0.16, 0.30, 0.44', '0.07, 0.21, 0.38', 22);
+  attachMountainMistShader(
+    mtnMatFar,
+    'mtn_shanshui_far_v2',
+    '0.56, 0.76, 0.84',
+    '0.24, 0.52, 0.75',
+    '0.12, 0.34, 0.60',
+    28
+  );
 
+  // Mid mineral turquoise-jade & cerulean hills
   const mtnMatMid = trackMat(
-    new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.96, metalness: 0 })
+    new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.92, metalness: 0 })
   );
-  attachMountainMistShader(mtnMatMid, 'mtn_mid_v1', '0.06, 0.13, 0.09', '0.035, 0.095, 0.075', 14);
+  attachMountainMistShader(
+    mtnMatMid,
+    'mtn_shanshui_mid_v2',
+    '0.30, 0.58, 0.52',
+    '0.16, 0.44, 0.54',
+    '0.11, 0.31, 0.46',
+    18
+  );
 
-  for (let layer = 0; layer < 2; layer++) {
-    const segs = 96;
-    const rad = layer === 0 ? 155 : 112;
-    const baseH = layer === 0 ? -4 : -2;
+  // Near verdant sage-pine foothills embracing the valley
+  const mtnMatNear = trackMat(
+    new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.92, metalness: 0 })
+  );
+  attachMountainMistShader(
+    mtnMatNear,
+    'mtn_shanshui_near_v2',
+    '0.22, 0.44, 0.24',
+    '0.15, 0.38, 0.27',
+    '0.26, 0.49, 0.32',
+    11
+  );
+
+  const mtnMats = [mtnMatFar, mtnMatMid, mtnMatNear];
+  const mtnRadii = [166, 128, 96];
+  const mtnBaseY = [-4.2, -2.5, -1.6];
+  const mtnHeights = [19.5, 11.2, 6.2];
+
+  for (let layer = 0; layer < 3; layer++) {
+    const segs = 104;
+    const rad = mtnRadii[layer];
+    const baseH = mtnBaseY[layer];
     const verts: number[] = [];
     const idx: number[] = [];
     for (let i = 0; i <= segs; i++) {
       const a = (i / segs) * Math.PI * 2;
       const x = Math.cos(a) * rad;
       const z = Math.sin(a) * rad - 8;
-      const northBoost = Math.max(0.25, (-Math.sin(a) + 1.1) * 0.62);
+      const northBoost = Math.max(0.32, (-Math.sin(a) + 1.15) * 0.65);
       const peak =
-        (Math.sin(a * 7 + layer * 2) * 5.2 +
-          Math.cos(a * 13 + layer) * 3.1 +
-          Math.sin(a * 23) * 1.4 +
-          Math.cos(a * 37 + layer) * 0.7 +
-          (layer === 0 ? 13.5 : 6.2)) *
+        (Math.sin(a * (6 + layer) + layer * 2.1) * (6.2 - layer * 1.4) +
+          Math.cos(a * (11 + layer * 2) + layer) * (3.6 - layer * 0.8) +
+          Math.sin(a * 21 + layer * 1.7) * (1.5 - layer * 0.3) +
+          Math.cos(a * 33 + layer) * 0.65 +
+          mtnHeights[layer]) *
         northBoost;
       verts.push(x, baseH, z);
-      verts.push(x, baseH + Math.max(2.5, peak), z);
+      verts.push(x, baseH + Math.max(2.6, peak), z);
       if (i < segs) {
         const b = i * 2;
         idx.push(b, b + 1, b + 2, b + 1, b + 3, b + 2);
@@ -675,14 +744,14 @@ export function buildWeilongArchitecture(
     mg.setAttribute('position', new THREE.Float32BufferAttribute(verts, 3));
     mg.setIndex(idx);
     mg.computeVertexNormals();
-    const mMesh = new THREE.Mesh(mg, layer === 0 ? mtnMatFar : mtnMatMid);
+    const mMesh = new THREE.Mesh(mg, mtnMats[layer]);
     root.add(mMesh);
   }
 
   // =========================================================================
   // 1. CONTINUOUS TERRAIN, EXPANSIVE HE-PING FORECOURT & HALF-MOON POND
   // =========================================================================
-  // Lush Lingnan outer ground plane
+  // Lush poetic pastoral outer valley ground
   const outerGround = new THREE.Mesh(
     trackGeo(new THREE.PlaneGeometry(340, 340)),
     mats.forestGround
@@ -692,35 +761,248 @@ export function buildWeilongArchitecture(
   outerGround.receiveShadow = true;
   root.add(outerGround);
 
-  // Expansive weathered concrete / three-lime-earth He-Ping forecourt (禾坪) matching photo!
+  // Expansive sun-warmed He-Ping forecourt (禾坪)
   addBox(74, 0.14, 15.6, 0, -0.06, 29.2, mats.courtyardEarth, 0, root, false);
-  // Low concrete/granite curb dividing He-Ping from front verge & pond (visible in photo!)
+  // Low granite curb dividing He-Ping from front verge & pond
   addBox(74, 0.34, 0.42, 0, 0.12, 36.6, mats.granitePlinth);
-  // Subtle dark drainage verge strip & southern apron beyond the curb
+  // Southern granite apron beyond the curb
   addBox(74, 0.1, 4.2, 0, -0.05, 39.0, mats.graniteSlab, 0, root, false);
-  // Tall slender dark-iron courtyard utility lamp pole on the right of He-Ping (seen in photo!)
-  const poleMesh = new THREE.Mesh(
-    trackGeo(new THREE.CylinderGeometry(0.06, 0.085, 8.8, 8)),
-    mats.roofTileDark
-  );
-  poleMesh.position.set(14.5, 4.4, 34.4);
-  root.add(poleMesh);
-  const lampArm = new THREE.Mesh(trackGeo(new THREE.BoxGeometry(1.1, 0.06, 0.06)), mats.roofTileDark);
-  lampArm.position.set(14.0, 8.75, 34.4);
-  root.add(lampArm);
 
-  // Half-Moon Pond (半月塘) south of the forecourt
+  // Sculpted Hakka Pavilion Lantern Posts (木柱小瓦顶灯柱) flanking He-Ping & Pond promenade
+  for (const [px, pz] of [
+    [-16.5, 35.4],
+    [16.5, 35.4],
+    [-19.5, 24.5],
+    [19.5, 24.5],
+  ] as [number, number][]) {
+    const dir = px < 0 ? 1 : -1;
+    const postGroup = new THREE.Group();
+    postGroup.position.set(px, 0, pz);
+    // Octagonal carved granite plinth base
+    const stoneBase = new THREE.Mesh(
+      trackGeo(new THREE.CylinderGeometry(0.19, 0.24, 0.42, 8)),
+      mats.granitePlinth
+    );
+    stoneBase.position.y = 0.21;
+    postGroup.add(stoneBase);
+    // Tapered timber post shaft
+    const post = new THREE.Mesh(
+      trackGeo(new THREE.CylinderGeometry(0.075, 0.105, 3.45, 10)),
+      mats.darkTimber
+    );
+    post.position.y = 2.02;
+    post.castShadow = castShadow;
+    postGroup.add(post);
+    // Miniature tiled pavilion cap atop post
+    const capRoof = new THREE.Mesh(lanternGeos.miniRoof, mats.roofTile);
+    capRoof.rotation.y = Math.PI * 0.25;
+    capRoof.position.y = 3.84;
+    postGroup.add(capRoof);
+    const capFinial = new THREE.Mesh(trackGeo(new THREE.SphereGeometry(0.055, 8, 6)), mats.gildedGold);
+    capFinial.position.y = 3.98;
+    postGroup.add(capFinial);
+    // Projecting cross-arm with carved bracket (雀替)
+    const cross = new THREE.Mesh(trackGeo(new THREE.BoxGeometry(0.95, 0.085, 0.085)), mats.darkTimber);
+    cross.position.set(dir * 0.36, 3.46, 0);
+    postGroup.add(cross);
+    const armBracket = createCarvedBracket(mats, trackGeo, 0.34, 0.28, 0.065);
+    armBracket.position.set(dir * 0.08, 3.42, 0);
+    if (dir < 0) armBracket.scale.x = -1;
+    postGroup.add(armBracket);
+    // Hanging sculpted melon-ribbed lantern
+    const lantern = createCraftedLantern(mats, lanternGeos, 0.96, 0.24);
+    lantern.position.set(dir * 0.72, 2.98, 0);
+    postGroup.add(lantern);
+    root.add(postGroup);
+  }
+
+  // Half-Moon Pond (半月塘) with deep turquoise-cerulean mineral water & crisp embankment reflections
   const pondShape = new THREE.Shape();
   pondShape.absellipse(0, 0, 16.2, 10.8, 0, Math.PI, false, 0);
   pondShape.closePath();
-  const pondWaterGeo = trackGeo(new THREE.ShapeGeometry(pondShape, 36));
+  const pondWaterGeo = trackGeo(new THREE.ShapeGeometry(pondShape, 56));
   pondWaterGeo.rotateX(Math.PI * 0.5);
+
+  const pondUniforms = {
+    uTime: { value: 0 },
+    uNight: { value: 0 },
+    uRain: { value: 0 },
+    uSunDir: physicalEnvUniforms.uSunDir,
+  };
   const pondWaterMat = trackMat(
-    new THREE.MeshStandardMaterial({
-      color: 0x2a6662,
-      roughness: 0.16,
-      metalness: 0.32,
+    new THREE.ShaderMaterial({
+      uniforms: pondUniforms,
       side: THREE.DoubleSide,
+      vertexShader: /* glsl */ `
+        varying vec3 vWPos;
+        void main() {
+          vec4 wp = modelMatrix * vec4(position, 1.0);
+          vWPos = wp.xyz;
+          gl_Position = projectionMatrix * viewMatrix * wp;
+        }
+      `,
+      fragmentShader: /* glsl */ `
+        uniform float uTime;
+        uniform float uNight;
+        uniform float uRain;
+        uniform vec3 uSunDir;
+        varying vec3 vWPos;
+
+        float wHash(vec2 p) {
+          return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453);
+        }
+        float wNoise(vec2 p) {
+          vec2 i = floor(p);
+          vec2 f = fract(p);
+          vec2 u = f * f * (3.0 - 2.0 * f);
+          return mix(
+            mix(wHash(i), wHash(i + vec2(1.0, 0.0)), u.x),
+            mix(wHash(i + vec2(0.0, 1.0)), wHash(i + vec2(1.0, 1.0)), u.x),
+            u.y
+          );
+        }
+
+        // Physical GGX microfacet specular distribution for crisp sunlit water sparkle
+        float ggxDistribution(float ndh, float alpha) {
+          float a2 = alpha * alpha;
+          float d = ndh * ndh * (a2 - 1.0) + 1.0;
+          return a2 / max(3.14159 * d * d, 0.0005);
+        }
+
+        // Dual-layer refracted water caustic interference pattern
+        float causticPattern(vec2 p, float t) {
+          vec2 uv1 = p * 1.45 + vec2(t * 0.24, -t * 0.18);
+          vec2 uv2 = p * 2.05 + vec2(-t * 0.29, t * 0.21);
+          float c1 = abs(sin(uv1.x * 2.4 + cos(uv1.y * 2.2 + t * 0.8)) + cos(uv1.y * 2.6 - sin(uv1.x * 1.9 - t * 0.6)));
+          float c2 = abs(sin(uv2.x * 2.1 - cos(uv2.y * 2.5 - t * 0.9)) + cos(uv2.y * 2.0 + sin(uv2.x * 2.3 + t * 0.7)));
+          float net = pow(clamp(1.0 - min(c1, c2) * 0.42, 0.0, 1.0), 3.2);
+          return net;
+        }
+
+        void main() {
+          vec2 p = vWPos.xz;
+          float t = uTime;
+
+          // Distance to semicircular pond shore & north granite steps -> physical water depth (0.08m .. 2.35m)
+          float dz = max(0.0, p.y - 38.6);
+          float rimR = length(vec2(p.x / 16.2, dz / 10.8));
+          float shoreCurved = smoothstep(0.68, 1.0, rimR);
+          float shoreNorth = 1.0 - smoothstep(0.0, 2.2, dz);
+          float shore = max(shoreCurved, shoreNorth);
+          float waterDepth = mix(2.25, 0.14, clamp(shore, 0.0, 1.0));
+
+          // Multi-octave capillary + swell wave normals (analytical derivatives for optical reflections)
+          float ph1 = p.x * 1.25 + t * 1.2 + sin(p.y * 0.78 - t * 0.55);
+          float ph2 = p.y * 1.72 - t * 1.05 + cos(p.x * 0.92 + t * 0.65);
+          float ph3 = (p.x * 2.8 - p.y * 2.4) + t * 2.1;
+          float n1 = wNoise(p * 1.05 + vec2(t * 0.22, -t * 0.16));
+          float n2 = wNoise(p * 2.85 + vec2(-t * 0.36, t * 0.31));
+          float capAmp = mix(1.0, 1.45, uRain);
+          vec3 N = normalize(vec3(
+            (cos(ph1) * 0.048 + sin(ph3) * 0.018 + (n1 - 0.5) * 0.085) * capAmp,
+            1.0,
+            (-sin(ph2) * 0.048 - cos(ph3) * 0.018 + (n2 - 0.5) * 0.085) * capAmp
+          ));
+
+          vec3 V = normalize(cameraPosition - vWPos);
+          vec3 L = normalize(uSunDir);
+          float ndv = clamp(dot(N, V), 0.001, 1.0);
+
+          // Pillar 2: Exact Schlick Fresnel for Air -> Water interface (IOR = 1.333, F0 = 0.0204)
+          float F0 = 0.0204;
+          float fresnel = F0 + (1.0 - F0) * pow(1.0 - ndv, 5.0);
+
+          // Pillar 2: Beer-Lambert exponential spectral depth absorption (red absorbs fastest, blue/jade penetrates)
+          vec3 absorptionCoeff = mix(
+            mix(vec3(0.72, 0.24, 0.19), vec3(0.84, 0.42, 0.36), uRain),
+            vec3(1.15, 0.58, 0.38),
+            uNight
+          );
+          vec3 transmittance = exp(-waterDepth * absorptionCoeff);
+
+          // Submerged sunlit warm sandstone/granite pond bed + refracted dual-layer caustics
+          float bedTex = wNoise(p * 1.8 + N.xz * 1.2);
+          vec3 dayBed = mix(vec3(0.36, 0.68, 0.58), vec3(0.58, 0.72, 0.54), bedTex);
+          vec3 rainBed = mix(vec3(0.22, 0.40, 0.42), vec3(0.32, 0.48, 0.44), bedTex);
+          vec3 nightBed = vec3(0.04, 0.12, 0.20);
+          vec3 bedCol = mix(mix(dayBed, rainBed, uRain), nightBed, uNight);
+
+          float caust = causticPattern(p + N.xz * 0.65, t);
+          bedCol += vec3(0.34, 0.48, 0.34) * caust * (1.0 - uNight) * (1.0 - uRain * 0.75) * 0.68;
+
+          // Deep mineral water volumetric scatter color
+          vec3 dayScatter = vec3(0.04, 0.25, 0.44);
+          vec3 rainScatter = vec3(0.07, 0.19, 0.30);
+          vec3 nightScatter = vec3(0.015, 0.055, 0.13);
+          vec3 volumeCol = mix(mix(dayScatter, rainScatter, uRain), nightScatter, uNight);
+
+          // Combined refracted underwater radiance (Beer-Lambert attenuated bed + in-scattered water volume)
+          vec3 refractedCol = mix(volumeCol, bedCol, transmittance);
+
+          // Crisp cool embankment ambient occlusion under stone coping
+          float bankShadow = max(smoothstep(0.92, 1.0, rimR), 1.0 - smoothstep(0.0, 0.55, dz));
+          refractedCol *= mix(1.0, 0.66, bankShadow * 0.68);
+
+          // Physically reflected sky + subtle north Weilongwu architectural & weeping willow mirror gradient
+          vec3 R = reflect(-V, N);
+          float skyGrad = clamp(R.y * 1.4, 0.0, 1.0);
+          vec3 dayZenith = vec3(0.28, 0.62, 0.88);
+          vec3 dayHorizon = vec3(0.76, 0.90, 0.96);
+          vec3 rainZenith = vec3(0.42, 0.54, 0.64);
+          vec3 rainHorizon = vec3(0.66, 0.74, 0.80);
+          vec3 nightZenith = vec3(0.05, 0.10, 0.22);
+          vec3 nightHorizon = vec3(0.16, 0.24, 0.42);
+          vec3 reflSky = mix(
+            mix(mix(dayHorizon, dayZenith, skyGrad), mix(rainHorizon, rainZenith, skyGrad), uRain),
+            mix(nightHorizon, nightZenith, skyGrad),
+            uNight
+          );
+
+          // Reflected white lime facade & cerulean roof silhouette softly mirrored near the north shore
+          float hallMirrorMask = (1.0 - smoothstep(0.4, 7.6, dz)) * (1.0 - smoothstep(6.0, 14.5, abs(p.x)));
+          vec3 hallMirrorCol = mix(vec3(0.84, 0.78, 0.68), vec3(0.28, 0.38, 0.46), smoothstep(2.8, 6.2, dz));
+          hallMirrorCol = mix(hallMirrorCol, vec3(0.48, 0.54, 0.60), uRain * 0.55);
+          reflSky = mix(reflSky, hallMirrorCol, hallMirrorMask * 0.44 * (1.0 - uNight * 0.85));
+
+          // Energy-conserving Fresnel blend (weighted gently so shallow turquoise stays jewel-bright!)
+          float envBlend = clamp(fresnel * 1.35 + 0.06, 0.04, 0.72);
+          vec3 col = mix(refractedCol, reflSky, envBlend);
+
+          // Pillar 2: GGX microfacet sun / moon specular glints
+          vec3 H = normalize(L + V);
+          float ndh = max(dot(N, H), 0.0);
+          float ggxSharp = ggxDistribution(ndh, mix(0.085, 0.18, uRain)) * fresnel * 0.22;
+          float ggxBroad = ggxDistribution(ndh, 0.26) * fresnel * 0.09;
+          vec3 glintCol = mix(vec3(1.0, 0.95, 0.78), vec3(0.76, 0.88, 1.0), uNight);
+          col += glintCol * (ggxSharp + ggxBroad) * (1.0 - uRain * 0.78) * (0.65 + 0.45 * n2);
+
+          // Shimmering crimson-gold lantern reflections dancing on ripples along north shore at night
+          float northGlow = (1.0 - smoothstep(0.0, 8.8, dz)) * (1.0 - smoothstep(4.5, 15.5, abs(p.x)));
+          float lanternRipple = 0.52 + 0.48 * sin(p.x * 2.4 + N.x * 16.0 + t * 2.8);
+          col += vec3(1.0, 0.48, 0.16) * northGlow * uNight * lanternRipple * (0.48 + 0.55 * fresnel);
+
+          // Delicate woodblock lapping foam line along granite coping
+          float foamWave = sin(rimR * 36.0 - t * 2.2 + n1 * 4.0) * 0.5 + 0.5;
+          float foamMask = smoothstep(0.925, 0.996, rimR) * (0.5 + 0.5 * foamWave);
+          foamMask = max(foamMask, (1.0 - smoothstep(0.0, 0.34, dz)) * (0.4 + 0.45 * foamWave));
+          vec3 foamCol = mix(vec3(0.95, 0.97, 0.92), vec3(0.34, 0.45, 0.60), uNight);
+          col = mix(col, foamCol, clamp(foamMask * 0.52, 0.0, 0.52));
+
+          // Expanding physical concentric raindrop rings in rain mode
+          if (uRain > 0.05) {
+            vec2 cell = floor(p * 1.45);
+            vec2 f = fract(p * 1.45) - 0.5;
+            float phase = fract(t * 1.2 + wHash(cell) * 6.28);
+            float ring = abs(length(f) - phase * 0.44);
+            float drop = (1.0 - smoothstep(0.0, 0.042, ring)) * (1.0 - phase);
+            col += vec3(0.45, 0.58, 0.66) * drop * uRain * 0.72;
+          }
+
+          gl_FragColor = vec4(col, 1.0);
+          #include <tonemapping_fragment>
+          #include <colorspace_fragment>
+        }
+      `,
     })
   );
   const pondWater = new THREE.Mesh(pondWaterGeo, pondWaterMat);
@@ -728,31 +1010,319 @@ export function buildWeilongArchitecture(
   pondWater.receiveShadow = true;
   root.add(pondWater);
 
-  // Pond granite rim & curved stone embankment
-  addBox(34, 0.42, 0.65, 0, 0.02, 38.4, mats.graniteSlab);
-  for (let i = 0; i <= 22; i++) {
-    const a = (i / 22) * Math.PI;
+  // Sculpted Floating Jade Lotus Pads (荷叶) & 12-Petal Cupped Lotus Flowers (荷花) with Backlit SSS!
+  const lotusPadMat = attachSubsurfaceShader(
+    trackMat(
+      new THREE.MeshStandardMaterial({
+        color: 0x459664,
+        roughness: 0.64,
+        metalness: 0.01,
+        side: THREE.DoubleSide,
+      })
+    ),
+    { key: 'lotus_pad', tintHex: 0x8de070, backStrength: 0.55, wrapStrength: 0.24, power: 2.3 }
+  );
+  const lotusPadLightMat = attachSubsurfaceShader(
+    trackMat(
+      new THREE.MeshStandardMaterial({
+        color: 0x6cb86e,
+        roughness: 0.62,
+        metalness: 0.01,
+        side: THREE.DoubleSide,
+      })
+    ),
+    { key: 'lotus_pad_light', tintHex: 0xb2ea78, backStrength: 0.6, wrapStrength: 0.26, power: 2.2 }
+  );
+  const lotusStemMat = createPaintedWoodMat(0x3f7f50, trackMat, 0.72);
+  const lotusPetalOuterMat = attachSubsurfaceShader(
+    trackMat(
+      new THREE.MeshStandardMaterial({
+        color: SCULPT_COLORS.blossomCore,
+        roughness: 0.48,
+        side: THREE.DoubleSide,
+      })
+    ),
+    { key: 'lotus_petal_outer', tintHex: 0xffa6b8, backStrength: 0.72, wrapStrength: 0.3, power: 2.1 }
+  );
+  const lotusPetalPinkMat = attachSubsurfaceShader(
+    trackMat(
+      new THREE.MeshStandardMaterial({
+        color: HANDCRAFTED_PAL.pink,
+        roughness: 0.46,
+        side: THREE.DoubleSide,
+      })
+    ),
+    { key: 'lotus_petal_pink', tintHex: 0xffc8d2, backStrength: 0.76, wrapStrength: 0.32, power: 2.0 }
+  );
+  const lotusPetalCreamMat = attachSubsurfaceShader(
+    trackMat(
+      new THREE.MeshStandardMaterial({
+        color: HANDCRAFTED_PAL.blossomLight,
+        roughness: 0.46,
+        side: THREE.DoubleSide,
+      })
+    ),
+    { key: 'lotus_petal_cream', tintHex: 0xffe8de, backStrength: 0.72, wrapStrength: 0.3, power: 2.0 }
+  );
+  const lotusPodMat = createPaintedWoodMat(HANDCRAFTED_PAL.lemon, trackMat, 0.56);
+
+  const padGeo = trackGeo(createSculptedLotusPadGeometry(0.58, 22));
+  const petalOuterGeo = trackGeo(createCuppedPetalGeometry(0.14, 0.28, 0.042));
+  const petalInnerGeo = trackGeo(createCuppedPetalGeometry(0.11, 0.23, 0.036));
+  const lotusPodGeo = trackGeo(
+    createTurnedLatheGeometry(
+      [
+        [0.02, 0.0],
+        [0.085, 0.07],
+        [0.095, 0.11],
+        [0.0, 0.115],
+      ],
+      12
+    )
+  );
+  const lotusStemGeo = trackGeo(
+    createTaperedCurveGeometry(
+      [
+        new THREE.Vector3(0, -0.18, 0),
+        new THREE.Vector3(0.02, 0.02, 0.015),
+        new THREE.Vector3(0.0, 0.24, 0),
+      ],
+      0.018,
+      0.014,
+      6,
+      6,
+      false
+    )
+  );
+
+  const lotusSpots: Array<[number, number, number, boolean]> = [
+    // West lotus cluster
+    [-11.8, 41.0, 1.15, true],
+    [-10.4, 42.1, 0.92, false],
+    [-12.6, 42.4, 1.05, true],
+    [-9.5, 40.6, 0.82, false],
+    [-11.1, 43.4, 1.1, true],
+    [-8.9, 44.2, 0.88, false],
+    [-10.2, 44.8, 0.98, true],
+    [-13.0, 40.5, 0.84, false],
+    [-7.8, 46.2, 1.05, true],
+    [-6.6, 46.8, 0.86, false],
+    // East lotus cluster
+    [11.4, 41.2, 1.12, true],
+    [10.1, 42.3, 0.9, false],
+    [12.4, 42.6, 1.04, true],
+    [9.4, 40.4, 0.84, false],
+    [10.8, 43.6, 1.08, true],
+    [8.8, 44.6, 0.9, false],
+    [12.8, 40.8, 0.86, false],
+    [7.6, 46.3, 1.02, true],
+    [6.4, 47.0, 0.85, false],
+    // Gentle southern edge accents
+    [-3.6, 47.6, 0.92, true],
+    [3.8, 47.5, 0.94, true],
+    [-2.4, 47.9, 0.76, false],
+    [2.5, 47.8, 0.78, false],
+  ];
+
+  lotusSpots.forEach(([lx, lz, sc, hasBloom], idx) => {
+    const pad = new THREE.Mesh(padGeo, idx % 2 === 0 ? lotusPadMat : lotusPadLightMat);
+    pad.position.set(lx, -0.2, lz);
+    pad.rotation.y = idx * 1.7;
+    pad.scale.setScalar(sc);
+    root.add(pad);
+
+    if (hasBloom) {
+      const bloom = new THREE.Group();
+      const stemLift = idx % 3 === 1 ? 0.16 : 0.04;
+      bloom.position.set(lx + 0.08, -0.18, lz - 0.06);
+      const stem = new THREE.Mesh(lotusStemGeo, lotusStemMat);
+      stem.scale.y = 0.7 + stemLift * 2.4;
+      bloom.add(stem);
+
+      const flowerHead = new THREE.Group();
+      flowerHead.position.y = 0.06 + stemLift;
+      const isBud = idx % 4 === 3;
+      const outerMat = idx % 3 === 0 ? lotusPetalPinkMat : lotusPetalOuterMat;
+      const innerMat = idx % 3 === 0 ? lotusPetalCreamMat : lotusPetalPinkMat;
+
+      // 6 outer cupped petals + 6 staggered inner cupped petals (12 petals total!)
+      for (let p = 0; p < 6; p++) {
+        const a = (p / 6) * Math.PI * 2 + idx * 0.4;
+        const outerP = new THREE.Mesh(petalOuterGeo, outerMat);
+        outerP.rotation.y = a;
+        outerP.rotation.x = isBud ? 0.34 : 0.86;
+        flowerHead.add(outerP);
+
+        const innerP = new THREE.Mesh(petalInnerGeo, innerMat);
+        innerP.rotation.y = a + Math.PI / 6;
+        innerP.rotation.x = isBud ? 0.18 : 0.46;
+        innerP.position.y = 0.015;
+        flowerHead.add(innerP);
+      }
+
+      if (!isBud) {
+        const pod = new THREE.Mesh(lotusPodGeo, lotusPodMat);
+        pod.position.y = 0.02;
+        flowerHead.add(pod);
+      }
+      bloom.add(flowerHead);
+      bloom.scale.setScalar(0.9 + (idx % 3) * 0.14);
+      root.add(bloom);
+    }
+  });
+
+  // 12 Graceful Shoreline Reed & Cattail Clusters (半月塘芦苇/菖蒲丛) softening the stone pond bank!
+  const reedBladeGeo = trackGeo(createWillowFrondGeometry(1.15, 0.18, 0.055, 5));
+  // Flip upward so reed blades arch skyward from water edge
+  reedBladeGeo.scale(1, -1, 1);
+  const reedMat = attachSubsurfaceShader(
+    trackMat(
+      new THREE.MeshStandardMaterial({
+        color: SCULPT_COLORS.reedGreen,
+        roughness: 0.72,
+        side: THREE.DoubleSide,
+      })
+    ),
+    { key: 'pond_reed', tintHex: 0xaee076, backStrength: 0.62, wrapStrength: 0.25, power: 2.2 }
+  );
+  const cattailStalkGeo = trackGeo(new THREE.CylinderGeometry(0.012, 0.016, 1.05, 5));
+  const cattailHeadGeo = trackGeo(new THREE.CapsuleGeometry(0.032, 0.18, 4, 7));
+  const cattailMat = createPaintedWoodMat(HANDCRAFTED_PAL.umber, trackMat, 0.82);
+
+  const reedAngles = [
+    0.05, 0.12, 0.21, 0.31, 0.42, 0.58, 0.69, 0.79, 0.88, 0.95, 0.16, 0.84,
+  ];
+  reedAngles.forEach((f, idx) => {
+    const a = f * Math.PI;
+    const rFactor = idx >= 10 ? 0.93 : 0.975;
+    const rx = Math.cos(a) * 16.0 * rFactor;
+    const rz = 38.6 + Math.sin(a) * 10.6 * rFactor;
+    const cluster = new THREE.Group();
+    cluster.position.set(rx, -0.22, rz);
+    const sc = 0.82 + (idx % 3) * 0.16;
+
+    for (let b = 0; b < 7; b++) {
+      const blade = new THREE.Mesh(reedBladeGeo, reedMat);
+      const ba = (b / 7) * Math.PI * 2 + idx * 0.7;
+      blade.rotation.y = ba;
+      blade.rotation.x = 0.1 + (b % 3) * 0.08;
+      blade.scale.setScalar((0.75 + (b % 4) * 0.14) * sc);
+      cluster.add(blade);
+    }
+    // 2 sculpted cattail plumes per clump
+    for (let c = 0; c < 2; c++) {
+      const stalk = new THREE.Mesh(cattailStalkGeo, lotusStemMat);
+      const ca = c * 2.2 + idx;
+      stalk.position.set(Math.cos(ca) * 0.12 * sc, 0.52 * sc, Math.sin(ca) * 0.12 * sc);
+      stalk.rotation.z = (c === 0 ? 1 : -1) * 0.08;
+      cluster.add(stalk);
+      const head = new THREE.Mesh(cattailHeadGeo, cattailMat);
+      head.position.set(Math.cos(ca) * 0.12 * sc - (c === 0 ? 0.04 : -0.04), 0.92 * sc, Math.sin(ca) * 0.12 * sc);
+      cluster.add(head);
+    }
+    root.add(cluster);
+    animatedReeds.push({ mesh: cluster, phase: idx * 0.85 });
+  });
+
+  // Pond granite rim & curved stone embankment with stepped coping stones
+  addBox(34, 0.42, 0.68, 0, 0.02, 38.4, mats.graniteSlab);
+  addBox(34.2, 0.1, 0.76, 0, 0.25, 38.4, mats.granitePlinth);
+  for (let i = 0; i <= 24; i++) {
+    const a = (i / 24) * Math.PI;
     const rx = Math.cos(a) * 16.5;
     const rz = 38.6 + Math.sin(a) * 11.1;
-    addBox(2.5, 0.46, 0.65, rx, 0.02, rz, mats.graniteSlab, -a + Math.PI * 0.5);
+    addBox(2.35, 0.46, 0.68, rx, 0.02, rz, mats.graniteSlab, -a + Math.PI * 0.5);
+    addBox(2.42, 0.1, 0.76, rx, 0.27, rz, mats.granitePlinth, -a + Math.PI * 0.5);
   }
   // Stone jetty steps dipping into Half-Moon Pond
   for (let s = 0; s < 4; s++) {
     addBox(6.8, 0.16, 0.72, 0, -0.04 - s * 0.1, 36.9 + s * 0.68, mats.graniteSlab);
   }
-  // Swimming Koi & Grass Carp
+
+  // 12 Sculpted Articulated Swimming Koi & Grass Carp (流线鱼身 + 三段柔性摆尾 + 飘逸扇尾鳍!)
   const koiGroup = new THREE.Group();
-  const koiColors = [0xe85a2a, 0xf2f0eb, 0xeb9b2d, 0xd43b24, 0x3f4c4a];
+  const koiBodyGeo = trackGeo(
+    createTurnedLatheGeometry(
+      [
+        [0.0, 0.24],
+        [0.055, 0.19],
+        [0.088, 0.10],
+        [0.084, 0.0],
+        [0.058, -0.10],
+        [0.028, -0.18],
+      ],
+      10
+    )
+  );
+  koiBodyGeo.rotateX(Math.PI * 0.5);
+  koiBodyGeo.scale(0.86, 1.0, 1.0);
+
+  const koiPeduncleGeo = trackGeo(new THREE.ConeGeometry(0.036, 0.16, 7));
+  koiPeduncleGeo.rotateX(-Math.PI * 0.5);
+  koiPeduncleGeo.translate(0, 0, -0.07);
+
+  const koiFanFinGeo = trackGeo(createCuppedPetalGeometry(0.16, 0.2, 0.015));
+  koiFanFinGeo.rotateX(-Math.PI * 0.5);
+
+  const koiPecFinGeo = trackGeo(createCuppedPetalGeometry(0.07, 0.11, 0.008));
+  koiPecFinGeo.rotateX(Math.PI * 0.5);
+
+  const koiSpecs: Array<[number, number]> = [
+    [0xea5628, 0xf8f3ea], // Kohaku red-white
+    [0xf7f2e8, 0xd83b24], // Tancho white-red
+    [0xf2a72e, 0xfff0b2], // Yamabuki gold
+    [0xdc3e24, 0x262e36], // Showa vermilion-ink
+    [0xf5efe6, 0xe86c2c], // Sanke cream-orange
+    [0x4b6a64, 0x7ea194], // Jade grass carp
+  ];
+
   for (let k = 0; k < 12; k++) {
     const fish = new THREE.Group();
-    const fMat = trackMat(new THREE.MeshStandardMaterial({ color: koiColors[k % koiColors.length], roughness: 0.3 }));
-    const body = new THREE.Mesh(trackGeo(new THREE.CapsuleGeometry(0.08, 0.28, 4, 6)), fMat);
-    body.rotation.x = Math.PI * 0.5;
+    const [mainHex, accentHex] = koiSpecs[k % koiSpecs.length];
+    const mainMat = createPaintedWoodMat(mainHex, trackMat, 0.28, 0.05);
+    const finMat = trackMat(
+      new THREE.MeshStandardMaterial({
+        color: accentHex,
+        roughness: 0.32,
+        transparent: true,
+        opacity: 0.88,
+        side: THREE.DoubleSide,
+      })
+    );
+
+    const body = new THREE.Mesh(koiBodyGeo, mainMat);
     fish.add(body);
-    const tail = new THREE.Mesh(trackGeo(new THREE.ConeGeometry(0.09, 0.18, 4)), fMat);
-    tail.rotation.x = -Math.PI * 0.5;
-    tail.position.z = -0.22;
-    fish.add(tail);
+    // Decorative dorsal koi saddle patch
+    const patch = new THREE.Mesh(trackGeo(new THREE.SphereGeometry(0.068, 8, 6)), finMat);
+    patch.scale.set(0.95, 0.65, 1.5);
+    patch.position.set(0, 0.042, 0.03);
+    fish.add(patch);
+
+    // Pectoral fins
+    for (const side of [-1, 1]) {
+      const pFin = new THREE.Mesh(koiPecFinGeo, finMat);
+      pFin.position.set(side * 0.065, -0.01, 0.08);
+      pFin.rotation.y = side * 0.72;
+      fish.add(pFin);
+    }
+
+    // Articulated tail peduncle + flowing caudal fan fin
+    const tailPivot = new THREE.Group();
+    tailPivot.position.set(0, 0, -0.16);
+    const peduncle = new THREE.Mesh(koiPeduncleGeo, mainMat);
+    tailPivot.add(peduncle);
+
+    const finPivot = new THREE.Group();
+    finPivot.position.set(0, 0, -0.13);
+    const fanFin = new THREE.Mesh(koiFanFinGeo, finMat);
+    fanFin.rotation.z = Math.PI * 0.5;
+    finPivot.add(fanFin);
+    tailPivot.add(finPivot);
+    fish.add(tailPivot);
+
+    const fScale = 0.92 + (k % 4) * 0.14;
+    fish.scale.setScalar(fScale);
+
     fish.userData = {
       orbitRadiusX: 3.5 + (k % 5) * 2.1,
       orbitRadiusZ: 1.8 + (k % 4) * 1.4,
@@ -761,8 +1331,9 @@ export function buildWeilongArchitecture(
       centerX: (k % 3 - 1) * 3.8,
       centerZ: 42.8 + (k % 3) * 1.2,
     };
-    fish.position.set(fish.userData.centerX, -0.18, fish.userData.centerZ);
+    fish.position.set(fish.userData.centerX, -0.19, fish.userData.centerZ);
     koiGroup.add(fish);
+    animatedKoiTails.push({ tail: tailPivot, fin: finPivot, phase: k * 0.95 });
   }
   root.add(koiGroup);
 
@@ -844,29 +1415,63 @@ export function buildWeilongArchitecture(
   // Right Doumen opening at x in [+14.8, +17.4]
   addCraftedWall(2.2, frontWallH, 0.46, 18.5, 0.0, 21.65);
 
-  // Recessed central main portal alcove (凹肚大门) + granite doorjambs + 25cm high wooden threshold + golden plaque
+  // Recessed central main portal alcove (凹肚大门) + carved granite drum stones (抱鼓石), gilded knockers & carved brackets (雀替)!
   addCraftedWall(1.4, frontWallH, 0.36, -2.0, 0.0, 20.95, Math.PI * 0.5);
   addCraftedWall(1.4, frontWallH, 0.36, 2.0, 0.0, 20.95, Math.PI * 0.5);
-  // Granite lintel & jambs
-  addBox(4.3, 0.36, 0.52, 0, 3.02, 21.65, mats.granitePlinth);
-  addBox(0.38, 3.1, 0.5, -1.9, 1.55, 21.65, mats.granitePlinth);
-  addBox(0.38, 3.1, 0.5, 1.9, 1.55, 21.65, mats.granitePlinth);
+  // Carved granite lintel, jambs & sculpted drum stones flanking main entrance
+  addBox(4.45, 0.38, 0.56, 0, 3.04, 21.65, mats.granitePlinth);
+  addBox(0.38, 3.1, 0.52, -1.9, 1.55, 21.65, mats.granitePlinth);
+  addBox(0.38, 3.1, 0.52, 1.9, 1.55, 21.65, mats.granitePlinth);
+  for (const side of [-1, 1]) {
+    const drumStone = createDrumStone(mats, trackGeo, 0.92);
+    drumStone.position.set(side * 1.92, 0.0, 22.02);
+    root.add(drumStone);
+    // Carved wooden Que-Ti corner brackets under the main portal lintel
+    const portalBracket = createCarvedBracket(mats, trackGeo, 0.55, 0.38, 0.12);
+    portalBracket.position.set(side * 1.72, 2.86, 21.74);
+    if (side > 0) portalBracket.scale.x = -1;
+    root.add(portalBracket);
+  }
   // High wooden threshold ("忌踩门槛")
   addBox(3.7, 0.24, 0.32, 0, 0.18, 21.58, mats.darkTimber);
-  // Open dark-timber door leaves swung neatly inward inside the alcove
-  addBox(0.14, 2.65, 1.25, -1.72, 1.58, 20.85, mats.weatheredWoodDoor);
-  addBox(0.14, 2.65, 1.25, 1.72, 1.58, 20.85, mats.weatheredWoodDoor);
-  // Red spring couplets flanking the main portal & secondary portals (just like the photo!)
+  // Open dark-timber door leaves with gilded brass knockers swung neatly inward inside the alcove
+  for (const side of [-1, 1]) {
+    addBox(0.14, 2.65, 1.25, side * 1.72, 1.58, 20.85, mats.weatheredWoodDoor);
+    const knockerPlate = new THREE.Mesh(
+      trackGeo(new THREE.CylinderGeometry(0.085, 0.09, 0.04, 10)),
+      mats.gildedGold
+    );
+    knockerPlate.rotation.z = Math.PI * 0.5;
+    knockerPlate.position.set(side * 1.64, 1.48, 21.12);
+    root.add(knockerPlate);
+    const knockerRing = new THREE.Mesh(
+      trackGeo(new THREE.TorusGeometry(0.068, 0.014, 6, 12)),
+      mats.gildedGold
+    );
+    knockerRing.rotation.y = Math.PI * 0.5;
+    knockerRing.position.set(side * 1.62, 1.4, 21.12);
+    root.add(knockerRing);
+  }
+  // Red spring couplets flanking the main portal & secondary portals
   for (const cx of [-2.35, 2.35, -14.45, 14.45]) {
     addBox(0.32, 1.85, 0.04, cx, 1.75, 21.91, mats.redCouplet, 0, root, false);
   }
-  // Golden calligraphy clan plaque "陇西世泽" mounted cleanly below the front eave & inside Lower Hall
+  // Golden calligraphy clan plaque "陇西世泽" with carved gilded frame
+  addBox(2.58, 0.72, 0.08, 0, 2.68, 21.88, mats.gildedGold, 0, root, false);
   addBox(2.45, 0.62, 0.1, 0, 2.68, 21.92, mats.plaqueLongxi, 0, root, false);
+  addBox(2.74, 0.88, 0.1, 0, 3.38, 17.56, mats.gildedGold, 0, root, false);
   addBox(2.6, 0.78, 0.12, 0, 3.38, 17.6, mats.plaqueLongxi, 0, root, false);
 
-  // Horizontal dark-framed windows along the front white facade (exact rhythm from photo!)
+  // Horizontal dark-framed windows along the front white facade
   for (const wx of [-12.6, -10.2, -7.2, -4.6, 4.6, 7.2, 10.2, 12.6]) {
     addWindow(1.45, 0.92, wx, 2.05, 21.88, 0);
+  }
+
+  // 8 Sculpted Melon-Ribbed Hakka Vermilion-and-Gold Lanterns strung across the front eave!
+  for (const lx of [-17.5, -13.8, -8.8, -3.2, 3.2, 8.8, 13.8, 17.5]) {
+    const lg = createCraftedLantern(mats, lanternGeos, 0.96, 0.34);
+    lg.position.set(lx, 2.86, 22.28);
+    root.add(lg);
   }
 
   // Front Straight Wing inner corridor wall at z = 16.55 (wide open central & wing passages)
@@ -1381,16 +1986,11 @@ export function buildWeilongArchitecture(
     [0.0, 4.6, -20.5],
     [12.0, 4.1, -18.5],
   ];
-  const lanternGeo = trackGeo(new THREE.SphereGeometry(0.24, 10, 8));
-  const lanternCapGeo = trackGeo(new THREE.CylinderGeometry(0.12, 0.14, 0.09, 8));
+  // 11 Courtyard & Hall Sculpted Melon-Ribbed Lanterns
   lanternSpots.forEach(([lx, ly, lz], idx) => {
-    const body = new THREE.Mesh(lanternGeo, mats.lanternPaper);
-    body.scale.set(1, 1.28, 1);
-    body.position.set(lx, ly, lz);
-    root.add(body);
-    const cap = new THREE.Mesh(lanternCapGeo, mats.gildedGold);
-    cap.position.set(lx, ly + 0.32, lz);
-    root.add(cap);
+    const lg = createCraftedLantern(mats, lanternGeos, 1.02, 0.36);
+    lg.position.set(lx, ly, lz);
+    root.add(lg);
     // Keep active point lights budget disciplined (max 4 non-shadow warm pools)
     if (idx === 0 || idx === 3 || idx === 6 || idx === 9) {
       const pt = new THREE.PointLight(0xff8c42, 0.25, 20, 1.7);
@@ -1494,162 +2094,617 @@ export function buildWeilongArchitecture(
     gableBaseY: 5.2,
   });
 
-  // 8B. Central-North 2-story weathered rural Lingnan house with sky-blue parapet trim (directly behind outer ring in photo!)
-  const blueTrimMat = trackMat(new THREE.MeshStandardMaterial({ color: 0x3575a6, roughness: 0.72 }));
+  // 8B-8D. Harmonized Sculpted Hakka Pitched-Tile Neighbor Cottages (告别平顶方块，全部精雕悬山青瓦顶 + 木阳台 + 院墙!)
+  const blueTrimMat = trackMat(new THREE.MeshStandardMaterial({ color: HANDCRAFTED_PAL.cer, roughness: 0.65 }));
   const ruralWhiteMat = trackMat(
     new THREE.MeshStandardMaterial({
-      color: 0xd9ddd9,
+      color: HANDCRAFTED_PAL.cream,
       map: mats.limeWall.map,
       normalMap: mats.limeWall.normalMap,
-      normalScale: new THREE.Vector2(0.55, 0.55),
-      roughness: 0.9,
+      normalScale: new THREE.Vector2(0.4, 0.4),
+      roughness: 0.86,
     })
   );
-  const houseN = new THREE.Group();
-  houseN.position.set(5.5, 2.4, -40.5);
-  houseN.rotation.y = 0.08;
-  addBox(12.5, 8.2, 8.5, 0, 4.1, 0, ruralWhiteMat, 0, houseN);
-  addBox(12.9, 0.45, 8.9, 0, 8.3, 0, blueTrimMat, 0, houseN);
-  addBox(4.8, 2.4, 4.2, 3.6, 9.4, -1.6, ruralWhiteMat, 0, houseN); // rooftop stair penthouse
-  addWindow(2.4, 1.5, -2.5, 5.6, 4.28, 0, houseN);
-  addWindow(3.2, 1.6, 2.0, 5.6, 4.28, 0, houseN);
-  addWindow(2.4, 1.5, -2.5, 2.4, 4.28, 0, houseN);
-  root.add(houseN);
-
-  // 8C. NE Red-Brick & Plaster rural house to the right (directly matching right-rear house in photo!)
   const redBrickMat = trackMat(
     new THREE.MeshStandardMaterial({
-      color: 0x874534,
+      color: HANDCRAFTED_PAL.brown,
       normalMap: mats.granitePlinth.normalMap,
-      normalScale: new THREE.Vector2(0.75, 0.75),
-      roughness: 0.9,
+      normalScale: new THREE.Vector2(0.55, 0.55),
+      roughness: 0.84,
     })
   );
-  const houseNE = new THREE.Group();
-  houseNE.position.set(27.5, 2.2, -37.5);
-  houseNE.rotation.y = -0.15;
-  addBox(10.8, 6.2, 7.6, 0, 3.1, 0, redBrickMat, 0, houseNE);
-  addBox(11.1, 1.1, 7.9, 0, 6.4, 0, mats.granitePlinth, 0, houseNE);
-  addWindow(2.0, 1.4, -2.2, 4.0, 3.84, 0, houseNE);
-  addWindow(2.0, 1.4, 2.2, 4.0, 3.84, 0, houseNE);
-  root.add(houseNE);
 
-  // 8D. Distant Meizhou Village Houses dotted across the lush northern valley (matching photo horizon!)
-  for (const [hx, hz, w, h, d, ry, isBrick] of [
-    [-38, -62, 10.0, 6.2, 7.5, 0.12, false],
-    [32, -68, 9.5, 6.8, 7.2, -0.18, true],
-    [-12, -78, 11.2, 5.8, 7.8, 0.05, false],
-    [54, -48, 9.0, 5.6, 6.8, -0.24, false],
-  ] as [number, number, number, number, number, number, boolean][]) {
+  // Reusable sculpted Hakka pitched-tile courtyard cottage builder
+  const buildHakkaCottage = (opts: {
+    x: number;
+    y: number;
+    z: number;
+    w: number;
+    h: number;
+    d: number;
+    rotY: number;
+    isBrick: boolean;
+    hasBalcony?: boolean;
+    hasYardWall?: boolean;
+  }) => {
     const hg = new THREE.Group();
-    hg.position.set(hx, 0.2, hz);
-    hg.rotation.y = ry;
-    addBox(w, h, d, 0, h * 0.5, 0, isBrick ? redBrickMat : ruralWhiteMat, 0, hg, false);
-    addBox(w + 0.4, 0.38, d + 0.4, 0, h + 0.18, 0, isBrick ? mats.granitePlinth : blueTrimMat, 0, hg, false);
-    root.add(hg);
-  }
+    hg.position.set(opts.x, opts.y, opts.z);
+    hg.rotation.y = opts.rotY;
+    const wallMat = opts.isBrick ? redBrickMat : ruralWhiteMat;
 
-  // 8E. Lush Dense Tropical Green Camphor / Lychee Trees & Bamboo Groves tightly framing the Outer Oval & Valley!
-  const treePositions: [number, number, number, number][] = [];
-  // Dense hugging ring around West, North, and East outer perimeter + wider valley woodland backdrop
+    // Granite foundation plinth + plaster/brick main body
+    addBox(opts.w + 0.2, 0.55, opts.d + 0.2, 0, 0.275, 0, mats.granitePlinth, 0, hg, false);
+    addBox(opts.w, opts.h - 0.55, opts.d, 0, 0.55 + (opts.h - 0.55) * 0.5, 0, wallMat, 0, hg, false);
+    // Decorative ceramic-cerulean or timber frieze band
+    addBox(opts.w + 0.24, 0.28, opts.d + 0.24, 0, opts.h - 0.08, 0, opts.isBrick ? mats.darkTimber : blueTrimMat, 0, hg, false);
+
+    // Pitched Qing-tile double-slope roof with projecting eaves & pale lime ridge
+    const roofOver = 0.85;
+    const halfSpan = opts.d * 0.5 + roofOver;
+    const ridgeRise = 2.35;
+    const slopeLen = Math.hypot(halfSpan, ridgeRise);
+    const pitch = Math.atan2(ridgeRise, halfSpan);
+    for (const side of [-1, 1]) {
+      const slope = new THREE.Mesh(
+        trackGeo(new THREE.BoxGeometry(opts.w + roofOver * 1.8, 0.16, slopeLen)),
+        mats.roofTile
+      );
+      slope.position.set(0, opts.h + ridgeRise * 0.5, side * halfSpan * 0.5);
+      slope.rotation.x = side * pitch;
+      hg.add(slope);
+    }
+    // White gable end triangles
+    const gL1 = new THREE.Vector3(-opts.w * 0.5, opts.h, opts.d * 0.5);
+    const gL2 = new THREE.Vector3(-opts.w * 0.5, opts.h, -opts.d * 0.5);
+    const gLT = new THREE.Vector3(-opts.w * 0.5, opts.h + ridgeRise, 0);
+    hg.add(new THREE.Mesh(trackGeo(createWorldUvTri(gL1, gL2, gLT, 3.0)), wallMat));
+    const gR1 = new THREE.Vector3(opts.w * 0.5, opts.h, -opts.d * 0.5);
+    const gR2 = new THREE.Vector3(opts.w * 0.5, opts.h, opts.d * 0.5);
+    const gRT = new THREE.Vector3(opts.w * 0.5, opts.h + ridgeRise, 0);
+    hg.add(new THREE.Mesh(trackGeo(createWorldUvTri(gR1, gR2, gRT, 3.0)), wallMat));
+
+    // Pale lime roof ridge + upturned end finials
+    addBox(opts.w + roofOver * 1.85, 0.26, 0.34, 0, opts.h + ridgeRise + 0.08, 0, mats.limeRidge, 0, hg, false);
+    for (const ex of [-(opts.w * 0.5 + roofOver * 0.85), opts.w * 0.5 + roofOver * 0.85]) {
+      addBox(0.32, 0.42, 0.36, ex, opts.h + ridgeRise + 0.24, 0, mats.limeRidge, 0, hg, false);
+    }
+
+    // Timber-framed windows & front doorway
+    const winZ = opts.d * 0.5 + 0.04;
+    addWindow(1.55, 1.15, -opts.w * 0.26, opts.h * 0.68, winZ, 0, hg);
+    addWindow(1.55, 1.15, opts.w * 0.26, opts.h * 0.68, winZ, 0, hg);
+    if (opts.h > 5.0) {
+      addWindow(1.45, 1.15, -opts.w * 0.26, 2.2, winZ, 0, hg);
+      addBox(1.5, 2.35, 0.16, opts.w * 0.24, 1.45, winZ, mats.weatheredWoodDoor, 0, hg, false);
+    }
+    // Optional projecting timber balcony railing on 2-story Hakka houses
+    if (opts.hasBalcony) {
+      addBox(opts.w * 0.72, 0.16, 1.1, 0, opts.h * 0.52, opts.d * 0.5 + 0.55, mats.darkTimber, 0, hg, false);
+      addBox(opts.w * 0.72, 0.08, 0.08, 0, opts.h * 0.52 + 0.85, opts.d * 0.5 + 1.04, mats.darkTimber, 0, hg, false);
+      for (let bp = -3; bp <= 3; bp++) {
+        addBox(0.08, 0.85, 0.08, bp * (opts.w * 0.1), opts.h * 0.52 + 0.42, opts.d * 0.5 + 1.04, mats.darkTimber, 0, hg, false);
+      }
+    }
+    // Optional low whitewashed courtyard wall with tiled coping
+    if (opts.hasYardWall) {
+      addBox(opts.w + 2.4, 1.55, 0.32, 0, 0.78, opts.d * 0.5 + 3.2, ruralWhiteMat, 0, hg, false);
+      addBox(opts.w + 2.55, 0.18, 0.48, 0, 1.62, opts.d * 0.5 + 3.2, mats.roofTile, 0, hg, false);
+    }
+    root.add(hg);
+  };
+
+  buildHakkaCottage({ x: 5.5, y: 2.2, z: -40.5, w: 12.4, h: 6.4, d: 8.2, rotY: 0.08, isBrick: false, hasBalcony: true, hasYardWall: true });
+  buildHakkaCottage({ x: 27.5, y: 2.0, z: -37.5, w: 10.6, h: 5.6, d: 7.4, rotY: -0.15, isBrick: true, hasBalcony: true });
+  buildHakkaCottage({ x: -38, y: 0.2, z: -62, w: 10.2, h: 5.4, d: 7.4, rotY: 0.12, isBrick: false });
+  buildHakkaCottage({ x: 32, y: 0.2, z: -68, w: 9.6, h: 5.8, d: 7.0, rotY: -0.18, isBrick: true });
+  buildHakkaCottage({ x: -12, y: 0.2, z: -78, w: 11.0, h: 5.2, d: 7.6, rotY: 0.05, isBrick: false });
+  buildHakkaCottage({ x: 54, y: 0.2, z: -48, w: 9.2, h: 5.0, d: 6.8, rotY: -0.24, isBrick: false });
+
+  // 8E. Sculpted Camphor & Lychee Groves (145 Instanced Smooth-Pillow Trees + 6 Near Gnarled Hero Camphor Trees!)
+  const forestTreePositions: [number, number, number, number][] = [];
   for (let i = 0; i < 145; i++) {
     const phi = -0.22 * Math.PI + (i / 144) * 1.44 * Math.PI;
     const band = i % 4;
     const rAdd = 7.2 + band * 12.5 + ((i * 17) % 8);
     const tx = Math.cos(phi) * (OUTER_RING_RX + rAdd);
     const tz = OVAL_CENTER_Z - Math.sin(phi) * (OUTER_RING_RZ + rAdd);
-    // Keep the northern village house footprints & Bogong shrine path clear
-    if (Math.hypot(tx - 5.5, tz + 40.5) < 8.5) continue;
-    if (Math.hypot(tx - 27.5, tz + 37.5) < 7.5) continue;
+    if (Math.hypot(tx - 5.5, tz + 40.5) < 9.5) continue;
+    if (Math.hypot(tx - 27.5, tz + 37.5) < 8.5) continue;
     if (Math.hypot(tx, tz + 46.5) < 4.5) continue;
-    if (Math.hypot(tx + 38, tz + 62) < 8.5) continue;
-    if (Math.hypot(tx - 32, tz + 68) < 8.5) continue;
-    const scale = 0.9 + ((i * 29) % 10) * 0.12 + (band >= 2 ? 0.35 : 0);
-    treePositions.push([tx, groundHeightAt(tx, tz, 0), tz, scale]);
-  }
-  // Extra lush foreground right-side trees (matching the bright green foliage entering from right edge of photo!)
-  for (const [tx, tz, sc] of [
-    [39.5, 16.5, 1.45],
-    [43.0, 9.5, 1.6],
-    [44.5, 2.5, 1.55],
-    [42.0, 22.0, 1.25],
-    [-42.5, 15.0, 1.35],
-    [-45.0, 6.0, 1.5],
-  ]) {
-    treePositions.push([tx, groundHeightAt(tx, tz, 0), tz, sc]);
+    if (Math.hypot(tx + 38, tz + 62) < 9.0) continue;
+    if (Math.hypot(tx - 32, tz + 68) < 9.0) continue;
+    const scale = 0.92 + ((i * 29) % 10) * 0.12 + (band >= 2 ? 0.35 : 0);
+    forestTreePositions.push([tx, groundHeightAt(tx, tz, 0), tz, scale]);
   }
 
-  // Helper: organically perturb icosahedron vertices so canopies read as natural bumpy Lingnan crowns, never smooth balls!
-  const makeOrganicCrownGeo = (radius: number, seed: number): THREE.BufferGeometry => {
-    const g = new THREE.IcosahedronGeometry(radius, 2);
-    const pos = g.attributes.position as THREE.BufferAttribute;
-    const v = new THREE.Vector3();
-    for (let i = 0; i < pos.count; i++) {
-      v.fromBufferAttribute(pos, i);
-      const dir = v.clone().normalize();
-      const bump =
-        1.0 +
-        0.22 * Math.sin(dir.x * 5.2 + seed) * Math.cos(dir.z * 4.7 + seed * 0.7) +
-        0.16 * Math.sin(dir.y * 6.5 - dir.x * 3.8 + seed * 1.3) +
-        0.09 * Math.cos((dir.x + dir.y + dir.z) * 9.0 + seed);
-      // Flatten underside slightly like real camphor/lychee crowns
-      const ySquash = dir.y < 0 ? 0.72 : 0.94;
-      pos.setXYZ(i, v.x * bump, v.y * bump * ySquash, v.z * bump);
-    }
-    g.computeVertexNormals();
-    return trackGeo(g);
-  };
+  // Smooth velvety rounded woodcarved foliage pillows (ZERO faceted origami edges!)
+  const pillowGeoA = trackGeo(createSoftPillowGeometry(2.3, 1.3, 0.76, 14, 10));
+  const pillowGeoB = trackGeo(createSoftPillowGeometry(1.85, 3.9, 0.74, 14, 10));
+  const pillowGeoC = trackGeo(createSoftPillowGeometry(1.48, 6.2, 0.72, 12, 9));
 
-  const trunkGeo = trackGeo(new THREE.CylinderGeometry(0.22, 0.36, 3.8, 7));
-  const crownGeoA = makeOrganicCrownGeo(2.35, 1.1);
-  const crownGeoB = makeOrganicCrownGeo(1.9, 3.7);
-  const crownGeoC = makeOrganicCrownGeo(1.55, 6.4);
+  // Gently curving tapered trunk template for instanced forest trees
+  const instTrunkGeo = trackGeo(
+    createTaperedCurveGeometry(
+      [
+        new THREE.Vector3(0, 0, 0),
+        new THREE.Vector3(0.12, 1.4, 0.06),
+        new THREE.Vector3(-0.08, 3.0, -0.05),
+        new THREE.Vector3(0.05, 4.1, 0.04),
+      ],
+      0.34,
+      0.16,
+      8,
+      7
+    )
+  );
 
-  const trunkInst = new THREE.InstancedMesh(trunkGeo, mats.darkTimber, treePositions.length);
-  const crownInstDeep = new THREE.InstancedMesh(crownGeoA, mats.foliageDeep, treePositions.length);
-  const crownInstMid = new THREE.InstancedMesh(crownGeoB, mats.foliageMid, treePositions.length * 2);
-  const crownInstBright = new THREE.InstancedMesh(crownGeoC, mats.foliageBright, treePositions.length);
+  const trunkInst = new THREE.InstancedMesh(instTrunkGeo, mats.darkTimber, forestTreePositions.length);
+  const crownInstDeep = new THREE.InstancedMesh(pillowGeoA, mats.foliageDeep, forestTreePositions.length);
+  const crownInstMid = new THREE.InstancedMesh(pillowGeoB, mats.foliageMid, forestTreePositions.length * 2);
+  const crownInstBright = new THREE.InstancedMesh(pillowGeoC, mats.foliageBright, forestTreePositions.length);
 
-  treePositions.forEach(([tx, ty, tz, sc], idx) => {
-    const yaw = idx * 1.31;
-    dummy.position.set(tx, ty + 1.8 * sc, tz);
+  const tintPalette = [
+    new THREE.Color(0xffffff),
+    new THREE.Color(0xf2f7e4),
+    new THREE.Color(0xe6f2ee),
+    new THREE.Color(0xf8f0d8),
+  ];
+
+  forestTreePositions.forEach(([tx, ty, tz, sc], idx) => {
+    const yaw = idx * 1.37;
+    const tint = tintPalette[idx % tintPalette.length];
+
+    dummy.position.set(tx, ty, tz);
     dummy.rotation.set(0, yaw, 0);
     dummy.scale.set(sc, sc, sc);
     dummy.updateMatrix();
     trunkInst.setMatrixAt(idx, dummy.matrix);
 
-    // Base deep canopy body
-    dummy.position.set(tx, ty + 4.0 * sc, tz);
-    dummy.rotation.set((idx % 3 - 1) * 0.14, yaw, (idx % 2) * 0.12);
-    dummy.scale.set(sc * 1.25, sc * 0.88, sc * 1.18);
+    dummy.position.set(tx, ty + 4.1 * sc, tz);
+    dummy.rotation.set(0, yaw, 0);
+    dummy.scale.set(sc * 1.24, sc * 0.92, sc * 1.18);
     dummy.updateMatrix();
     crownInstDeep.setMatrixAt(idx, dummy.matrix);
+    crownInstDeep.setColorAt(idx, tint);
 
-    // Two offset mid-tone irregular crown lobes for rich branching silhouette
-    dummy.position.set(tx + Math.cos(yaw) * 1.15 * sc, ty + 4.7 * sc, tz + Math.sin(yaw) * 1.15 * sc);
-    dummy.rotation.set(0.18, yaw + 1.1, -0.14);
-    dummy.scale.set(sc * 0.96, sc * 0.82, sc * 0.92);
+    dummy.position.set(tx + Math.cos(yaw) * 1.2 * sc, ty + 4.8 * sc, tz + Math.sin(yaw) * 1.2 * sc);
+    dummy.rotation.set(0.08, yaw + 1.1, -0.08);
+    dummy.scale.set(sc * 0.98, sc * 0.84, sc * 0.94);
     dummy.updateMatrix();
     crownInstMid.setMatrixAt(idx * 2, dummy.matrix);
+    crownInstMid.setColorAt(idx * 2, tint);
 
-    dummy.position.set(tx - Math.sin(yaw) * 1.05 * sc, ty + 4.35 * sc, tz + Math.cos(yaw) * 1.05 * sc);
-    dummy.rotation.set(-0.15, yaw + 2.4, 0.16);
-    dummy.scale.set(sc * 0.88, sc * 0.76, sc * 0.94);
+    dummy.position.set(tx - Math.sin(yaw) * 1.1 * sc, ty + 4.45 * sc, tz + Math.cos(yaw) * 1.1 * sc);
+    dummy.rotation.set(-0.08, yaw + 2.4, 0.1);
+    dummy.scale.set(sc * 0.9, sc * 0.8, sc * 0.96);
     dummy.updateMatrix();
     crownInstMid.setMatrixAt(idx * 2 + 1, dummy.matrix);
+    crownInstMid.setColorAt(idx * 2 + 1, tint);
 
-    // Sunlit upper-crown foliage crest
-    dummy.position.set(tx - Math.cos(yaw) * 0.65 * sc, ty + 5.25 * sc, tz - Math.sin(yaw) * 0.65 * sc);
-    dummy.rotation.set(0.12, yaw + 3.8, 0.1);
-    dummy.scale.set(sc * 0.85, sc * 0.72, sc * 0.85);
+    dummy.position.set(tx - Math.cos(yaw) * 0.65 * sc, ty + 5.35 * sc, tz - Math.sin(yaw) * 0.65 * sc);
+    dummy.rotation.set(0.06, yaw + 3.8, 0.06);
+    dummy.scale.set(sc * 0.88, sc * 0.76, sc * 0.88);
     dummy.updateMatrix();
     crownInstBright.setMatrixAt(idx, dummy.matrix);
+    crownInstBright.setColorAt(idx, tint);
   });
   trunkInst.instanceMatrix.needsUpdate = true;
   crownInstDeep.instanceMatrix.needsUpdate = true;
   crownInstMid.instanceMatrix.needsUpdate = true;
   crownInstBright.instanceMatrix.needsUpdate = true;
+  if (crownInstDeep.instanceColor) crownInstDeep.instanceColor.needsUpdate = true;
+  if (crownInstMid.instanceColor) crownInstMid.instanceColor.needsUpdate = true;
+  if (crownInstBright.instanceColor) crownInstBright.instanceColor.needsUpdate = true;
+  trunkInst.computeBoundingSphere();
+  crownInstDeep.computeBoundingSphere();
+  crownInstMid.computeBoundingSphere();
+  crownInstBright.computeBoundingSphere();
   root.add(trunkInst, crownInstDeep, crownInstMid, crownInstBright);
+
+  // 6 Near Foreground Hero Camphor Trees (苍劲多叉古樟树: 盘根 + 分叉主枝 + 7层圆润青绿云团叶冠!)
+  const barkMat = createPaintedWoodMat(0x6d4732, trackMat, 0.84);
+  const heroTrunkGeo = trackGeo(
+    createTaperedCurveGeometry(
+      [
+        new THREE.Vector3(0, -0.05, 0),
+        new THREE.Vector3(0.18, 1.3, 0.08),
+        new THREE.Vector3(-0.1, 2.7, -0.08),
+        new THREE.Vector3(0.12, 3.8, 0.1),
+      ],
+      0.42,
+      0.16,
+      10,
+      8
+    )
+  );
+  const heroBranchLGeo = trackGeo(
+    createTaperedCurveGeometry(
+      [
+        new THREE.Vector3(0.02, 2.15, 0.0),
+        new THREE.Vector3(-0.85, 3.05, 0.35),
+        new THREE.Vector3(-1.65, 3.75, 0.55),
+      ],
+      0.2,
+      0.08,
+      8,
+      7
+    )
+  );
+  const heroBranchRGeo = trackGeo(
+    createTaperedCurveGeometry(
+      [
+        new THREE.Vector3(-0.02, 2.45, -0.02),
+        new THREE.Vector3(0.95, 3.3, -0.45),
+        new THREE.Vector3(1.72, 4.05, -0.62),
+      ],
+      0.18,
+      0.075,
+      8,
+      7
+    )
+  );
+  for (const [tx, tz, sc, idx] of [
+    [39.5, 16.5, 1.35, 0],
+    [43.0, 9.5, 1.5, 1],
+    [44.5, 2.5, 1.45, 2],
+    [42.0, 22.0, 1.2, 3],
+    [-42.5, 15.0, 1.3, 4],
+    [-45.0, 6.0, 1.42, 5],
+  ] as Array<[number, number, number, number]>) {
+    const ty = groundHeightAt(tx, tz, 0);
+    const cg = new THREE.Group();
+    cg.position.set(tx, ty, tz);
+    cg.rotation.y = idx * 1.15;
+    cg.scale.setScalar(sc);
+    cg.add(new THREE.Mesh(heroTrunkGeo, barkMat));
+    cg.add(new THREE.Mesh(heroBranchLGeo, barkMat));
+    cg.add(new THREE.Mesh(heroBranchRGeo, barkMat));
+    const puffs: Array<[number, number, number, number, THREE.Material, THREE.BufferGeometry]> = [
+      [0.0, 4.25, 0.0, 1.15, mats.foliageDeep, pillowGeoA],
+      [-1.55, 4.15, 0.52, 0.92, mats.foliageMid, pillowGeoB],
+      [1.62, 4.35, -0.58, 0.9, mats.foliageMid, pillowGeoB],
+      [0.35, 4.85, 1.05, 0.85, mats.foliageMid, pillowGeoB],
+      [-0.55, 5.1, -0.82, 0.86, mats.foliageBright, pillowGeoC],
+      [0.85, 5.28, 0.25, 0.82, mats.foliageBright, pillowGeoC],
+      [-0.9, 4.78, -0.1, 0.78, mats.foliageBright, pillowGeoC],
+    ];
+    for (const [px, py, pz, psc, pmat, pgeo] of puffs) {
+      const m = new THREE.Mesh(pgeo, pmat);
+      m.position.set(px, py, pz);
+      m.scale.setScalar(psc);
+      m.castShadow = castShadow;
+      cg.add(m);
+    }
+    root.add(cg);
+  }
+
+  // 8F. 14 Exquisitely Sculpted Spring Peach Blossom Trees with backlit Subsurface Scattering (SSS)!
+  const blossomMatCore = attachSubsurfaceShader(
+    createPaintedWoodMat(SCULPT_COLORS.blossomCore, trackMat, 0.72),
+    { key: 'peach_core', tintHex: 0xff9eb2, backStrength: 0.62, wrapStrength: 0.28, power: 2.2 }
+  );
+  const blossomMatMid = attachSubsurfaceShader(
+    createPaintedWoodMat(SCULPT_COLORS.blossomMid, trackMat, 0.7),
+    { key: 'peach_mid', tintHex: 0xffc6d2, backStrength: 0.68, wrapStrength: 0.3, power: 2.1 }
+  );
+  const blossomMatLight = attachSubsurfaceShader(
+    createPaintedWoodMat(SCULPT_COLORS.blossomHighlight, trackMat, 0.68),
+    { key: 'peach_light', tintHex: 0xffe4df, backStrength: 0.72, wrapStrength: 0.3, power: 2.0 }
+  );
+  const blossomMatApricot = attachSubsurfaceShader(
+    createPaintedWoodMat(SCULPT_COLORS.blossomApricot, trackMat, 0.7),
+    { key: 'peach_apricot', tintHex: 0xffe5c4, backStrength: 0.66, wrapStrength: 0.28, power: 2.1 }
+  );
+  const blossomTwigLeafMat = attachSubsurfaceShader(
+    createPaintedWoodMat(HANDCRAFTED_PAL.sage, trackMat, 0.74),
+    { key: 'peach_leaf', tintHex: 0xbfe882, backStrength: 0.56, wrapStrength: 0.24, power: 2.3 }
+  );
+
+  const peachTrunkGeo = trackGeo(
+    createTaperedCurveGeometry(
+      [
+        new THREE.Vector3(0, -0.04, 0),
+        new THREE.Vector3(0.16, 0.95, 0.08),
+        new THREE.Vector3(-0.14, 2.05, -0.06),
+        new THREE.Vector3(0.08, 3.05, 0.12),
+      ],
+      0.28,
+      0.11,
+      10,
+      8
+    )
+  );
+  const peachBranch1Geo = trackGeo(
+    createTaperedCurveGeometry(
+      [
+        new THREE.Vector3(0.02, 1.55, 0.02),
+        new THREE.Vector3(0.75, 2.35, 0.32),
+        new THREE.Vector3(1.48, 2.95, 0.56),
+      ],
+      0.14,
+      0.045,
+      8,
+      7
+    )
+  );
+  const peachBranch2Geo = trackGeo(
+    createTaperedCurveGeometry(
+      [
+        new THREE.Vector3(-0.08, 1.88, -0.04),
+        new THREE.Vector3(-0.78, 2.65, -0.28),
+        new THREE.Vector3(-1.42, 3.22, -0.52),
+      ],
+      0.13,
+      0.045,
+      8,
+      7
+    )
+  );
+  const peachBranch3Geo = trackGeo(
+    createTaperedCurveGeometry(
+      [
+        new THREE.Vector3(0.0, 2.25, 0.0),
+        new THREE.Vector3(-0.22, 2.95, 0.65),
+        new THREE.Vector3(-0.36, 3.45, 1.18),
+      ],
+      0.11,
+      0.04,
+      7,
+      6
+    )
+  );
+  const peachPuffBigGeo = trackGeo(createSoftPillowGeometry(0.95, 2.1, 0.72, 14, 10));
+  const peachPuffSmallGeo = trackGeo(createSoftPillowGeometry(0.68, 5.3, 0.75, 12, 9));
+
+  const blossomTrees: Array<[number, number, number]> = [
+    [-26.5, 25.2, 1.08],
+    [26.2, 25.8, 1.12],
+    [-29.2, 32.5, 0.96],
+    [29.8, 31.8, 1.02],
+    [-21.5, 36.2, 0.94],
+    [21.8, 36.0, 0.96],
+    [-16.2, 46.8, 0.94],
+    [16.5, 46.2, 0.98],
+    [-19.5, -24.5, 1.15],
+    [20.2, -23.8, 1.18],
+    [-8.5, -36.5, 1.24],
+    [14.0, -35.8, 1.2],
+    [-34.0, 2.0, 1.16],
+    [35.2, 4.5, 1.18],
+  ];
+
+  const blossomPuffLayout: Array<[number, number, number, number, number]> = [
+    // [x, y, z, scale, matIdx: 0=core, 1=mid, 2=light, 3=apricot, 4=leaf]
+    [0.0, 3.35, 0.0, 1.12, 0],
+    [1.38, 3.05, 0.52, 1.04, 1],
+    [-1.32, 3.32, -0.48, 1.02, 1],
+    [-0.36, 3.55, 1.12, 0.92, 2],
+    [0.52, 3.85, -0.68, 0.94, 2],
+    [-0.65, 3.92, 0.25, 0.96, 3],
+    [0.85, 3.68, 0.92, 0.78, 2],
+    [-1.55, 3.02, 0.36, 0.76, 0],
+    [1.62, 2.86, -0.25, 0.74, 3],
+    [0.12, 4.22, -0.05, 0.85, 2],
+    [-0.95, 2.88, -0.82, 0.56, 4],
+    [0.98, 2.78, 0.12, 0.52, 4],
+  ];
+  const bMats = [blossomMatCore, blossomMatMid, blossomMatLight, blossomMatApricot, blossomTwigLeafMat];
+
+  blossomTrees.forEach(([bx, bz, sc], idx) => {
+    const by = groundHeightAt(bx, bz, 0);
+    const tg = new THREE.Group();
+    tg.position.set(bx, by, bz);
+    tg.rotation.y = idx * 1.47;
+    tg.scale.setScalar(sc);
+
+    const trunk = new THREE.Mesh(peachTrunkGeo, barkMat);
+    trunk.castShadow = castShadow;
+    tg.add(trunk);
+    tg.add(new THREE.Mesh(peachBranch1Geo, barkMat));
+    tg.add(new THREE.Mesh(peachBranch2Geo, barkMat));
+    tg.add(new THREE.Mesh(peachBranch3Geo, barkMat));
+
+    blossomPuffLayout.forEach(([px, py, pz, psc, mIdx], pIdx) => {
+      const geo = pIdx < 6 ? peachPuffBigGeo : peachPuffSmallGeo;
+      const puff = new THREE.Mesh(geo, bMats[mIdx]);
+      puff.position.set(px, py, pz);
+      puff.scale.setScalar(psc);
+      puff.rotation.y = pIdx * 0.9 + idx;
+      puff.castShadow = castShadow && pIdx < 4;
+      tg.add(puff);
+    });
+    root.add(tg);
+  });
+
+  // 8G. 5 Gracefully Leaning Sculpted Weeping Willows with translucent sunlit SSS fronds!
+  const willowDeepMat = attachSubsurfaceShader(
+    createPaintedWoodMat(SCULPT_COLORS.willowLeafDeep, trackMat, 0.74),
+    { key: 'willow_deep', tintHex: 0xa2df6c, backStrength: 0.56, wrapStrength: 0.25, power: 2.3 }
+  );
+  const willowTopMat = attachSubsurfaceShader(
+    createPaintedWoodMat(SCULPT_COLORS.willowLeafMid, trackMat, 0.72),
+    { key: 'willow_top', tintHex: 0xc8eb78, backStrength: 0.64, wrapStrength: 0.28, power: 2.1 }
+  );
+  const willowCurtainMat = attachSubsurfaceShader(
+    trackMat(
+      new THREE.MeshStandardMaterial({
+        color: SCULPT_COLORS.willowLeafTip,
+        roughness: 0.74,
+        side: THREE.DoubleSide,
+      })
+    ),
+    { key: 'willow_curtain', tintHex: 0xdff584, backStrength: 0.78, wrapStrength: 0.32, power: 1.9 }
+  );
+  const willowCurtainInnerMat = attachSubsurfaceShader(
+    trackMat(
+      new THREE.MeshStandardMaterial({
+        color: SCULPT_COLORS.willowLeafMid,
+        roughness: 0.74,
+        side: THREE.DoubleSide,
+      })
+    ),
+    { key: 'willow_curtain_in', tintHex: 0xc2ea74, backStrength: 0.68, wrapStrength: 0.28, power: 2.0 }
+  );
+
+  const willowTrunkGeo = trackGeo(
+    createTaperedCurveGeometry(
+      [
+        new THREE.Vector3(0, -0.05, 0),
+        new THREE.Vector3(0.28, 1.35, 0.08),
+        new THREE.Vector3(0.62, 2.75, 0.14),
+        new THREE.Vector3(0.92, 3.85, 0.18),
+      ],
+      0.34,
+      0.13,
+      10,
+      8
+    )
+  );
+  const willowBoughGeo = trackGeo(
+    createTaperedCurveGeometry(
+      [
+        new THREE.Vector3(0.45, 2.4, 0.08),
+        new THREE.Vector3(0.15, 3.2, -0.58),
+        new THREE.Vector3(-0.35, 3.65, -1.05),
+      ],
+      0.15,
+      0.055,
+      8,
+      7
+    )
+  );
+  const willowFrondLongGeo = trackGeo(createWillowFrondGeometry(2.55, 0.52, 0.085, 7));
+  const willowFrondMedGeo = trackGeo(createWillowFrondGeometry(1.92, 0.42, 0.075, 6));
+
+  const willowPositions: Array<[number, number, number]> = [
+    [-17.4, 39.2, 1.06],
+    [17.4, 39.6, 1.08],
+    [-13.8, 49.4, 0.96],
+    [13.4, 49.6, 0.98],
+    [0.8, 50.8, 1.04],
+  ];
+  willowPositions.forEach(([wx, wz, sc], idx) => {
+    const wy = groundHeightAt(wx, wz, 0);
+    const wg = new THREE.Group();
+    wg.position.set(wx, wy, wz);
+    // Orient trunk gracefully leaning inward toward the Half-Moon Pond water center (0, 43.2)!
+    const toPondYaw = Math.atan2(0 - wx, 43.2 - wz);
+    wg.rotation.y = toPondYaw - Math.PI * 0.5;
+    wg.scale.setScalar(sc);
+
+    const wTrunk = new THREE.Mesh(willowTrunkGeo, barkMat);
+    wTrunk.castShadow = castShadow;
+    wg.add(wTrunk);
+    wg.add(new THREE.Mesh(willowBoughGeo, barkMat));
+
+    // Lush layered soft cloud-like weeping willow crown canopy (8 pillows)
+    const crownCenters: Array<[number, number, number, number, THREE.Material]> = [
+      [0.95, 4.02, 0.14, 0.98, willowDeepMat],
+      [1.62, 3.82, 0.68, 0.78, willowTopMat],
+      [1.48, 3.88, -0.52, 0.76, willowTopMat],
+      [0.25, 4.16, -0.46, 0.82, willowTopMat],
+      [-0.36, 3.74, -0.96, 0.72, willowDeepMat],
+      [0.86, 4.56, 0.06, 0.76, willowTopMat],
+      [0.45, 3.86, 0.92, 0.74, willowDeepMat],
+      [1.75, 4.18, 0.08, 0.68, willowTopMat],
+    ];
+    for (const [cx, cy, cz, csc, cmat] of crownCenters) {
+      const dome = new THREE.Mesh(peachPuffBigGeo, cmat);
+      dome.position.set(cx, cy, cz);
+      dome.scale.set(csc * 1.18, csc * 0.76, csc * 1.18);
+      wg.add(dome);
+    }
+
+    // 24 Graceful fine arched weeping willow frond curtains swaying softly in the breeze!
+    for (let s = 0; s < 24; s++) {
+      const a = (s / 24) * Math.PI * 2;
+      const isOuter = s % 2 === 0;
+      const rad = isOuter ? 1.44 + (s % 3) * 0.08 : 0.98 + (s % 3) * 0.06;
+      const frondPivot = new THREE.Group();
+      frondPivot.position.set(0.88 + Math.cos(a) * rad, isOuter ? 3.82 : 3.98, 0.05 + Math.sin(a) * rad);
+      frondPivot.rotation.y = -a + Math.PI * 0.5;
+      const frondMesh = new THREE.Mesh(
+        isOuter ? willowFrondLongGeo : willowFrondMedGeo,
+        isOuter ? willowCurtainMat : willowCurtainInnerMat
+      );
+      frondMesh.scale.y = 0.82 + (s % 4) * 0.12;
+      frondPivot.add(frondMesh);
+      wg.add(frondPivot);
+      animatedWillowFronds.push({
+        mesh: frondPivot,
+        phase: idx * 1.4 + s * 0.38,
+        baseRx: 0.04,
+        baseRz: 0,
+      });
+    }
+    root.add(wg);
+  });
+
+  // 8H. 14 Multi-Cluster Sculpted Courtyard Flowering Shrubs with sunlit SSS foliage
+  const shrubLeafDeepMat = attachSubsurfaceShader(
+    createPaintedWoodMat(HANDCRAFTED_PAL.pine, trackMat, 0.8),
+    { key: 'shrub_deep', tintHex: 0x76c86e, backStrength: 0.48, wrapStrength: 0.22, power: 2.4 }
+  );
+  const shrubLeafLightMat = attachSubsurfaceShader(
+    createPaintedWoodMat(HANDCRAFTED_PAL.leaf, trackMat, 0.76),
+    { key: 'shrub_light', tintHex: 0xa6de72, backStrength: 0.56, wrapStrength: 0.25, power: 2.2 }
+  );
+  const flowerAccentMats = [
+    createPaintedWoodMat(HANDCRAFTED_PAL.verm, trackMat, 0.58),
+    createPaintedWoodMat(HANDCRAFTED_PAL.lilac, trackMat, 0.58),
+    createPaintedWoodMat(HANDCRAFTED_PAL.lemon, trackMat, 0.58),
+    createPaintedWoodMat(HANDCRAFTED_PAL.pink, trackMat, 0.58),
+  ];
+  const shrubPuffGeo = trackGeo(createSoftPillowGeometry(0.46, 7.1, 0.78, 12, 8));
+  const flowerClusterGeo = trackGeo(createSoftPillowGeometry(0.11, 2.5, 0.85, 8, 6));
+  const shrubSpots: Array<[number, number, number]> = [
+    [-19.8, 22.8, 1.0],
+    [19.8, 22.8, 1.05],
+    [-23.2, 23.4, 1.15],
+    [23.2, 23.4, 1.12],
+    [-14.2, 36.1, 0.92],
+    [14.2, 36.1, 0.94],
+    [-17.8, 37.2, 1.08],
+    [17.8, 37.2, 1.05],
+    [-8.5, -16.8, 0.95],
+    [8.5, -16.8, 0.95],
+    [-13.5, -14.2, 1.02],
+    [13.5, -14.2, 1.02],
+    [-20.8, 18.2, 0.95],
+    [20.8, 18.2, 0.95],
+  ];
+  shrubSpots.forEach(([sx, sz, sc], idx) => {
+    const sy = groundHeightAt(sx, sz, 0);
+    const sg = new THREE.Group();
+    sg.position.set(sx, sy, sz);
+    sg.rotation.y = idx * 1.25;
+    sg.scale.setScalar(sc);
+
+    // 4 overlapping soft foliage mounds per bush
+    for (const [bx, by, bz, bsc, isLight] of [
+      [0, 0.34, 0, 1.15, false],
+      [0.36, 0.28, 0.22, 0.82, true],
+      [-0.34, 0.3, -0.18, 0.85, true],
+      [0.05, 0.46, -0.14, 0.72, true],
+    ] as Array<[number, number, number, number, boolean]>) {
+      const m = new THREE.Mesh(shrubPuffGeo, isLight ? shrubLeafLightMat : shrubLeafDeepMat);
+      m.position.set(bx, by, bz);
+      m.scale.setScalar(bsc);
+      sg.add(m);
+    }
+
+    // 8 delicate blossom florets dotted across the foliage pillows
+    const fMat = flowerAccentMats[idx % flowerAccentMats.length];
+    for (let f = 0; f < 8; f++) {
+      const a = (f / 8) * Math.PI * 2 + idx * 0.7;
+      const rad = 0.26 + (f % 3) * 0.14;
+      const dot = new THREE.Mesh(flowerClusterGeo, fMat);
+      dot.position.set(Math.cos(a) * rad, 0.48 + (f % 3) * 0.11, Math.sin(a) * rad);
+      dot.scale.setScalar(0.85 + (f % 2) * 0.35);
+      sg.add(dot);
+    }
+    root.add(sg);
+  });
 
   return {
     root,
@@ -1661,6 +2716,31 @@ export function buildWeilongArchitecture(
     koiGroup,
     lanternLights,
     rainCurtainMeshes,
+    updateWater: (t: number, nightFactor: number, rainFactor: number) => {
+      pondUniforms.uTime.value = t;
+      pondUniforms.uNight.value = nightFactor;
+      pondUniforms.uRain.value = rainFactor;
+
+      // Graceful gentle breeze sway on weeping willow frond curtains
+      for (let i = 0; i < animatedWillowFronds.length; i++) {
+        const wf = animatedWillowFronds[i];
+        wf.mesh.rotation.x = wf.baseRx + Math.sin(t * 1.35 + wf.phase) * 0.065;
+        wf.mesh.rotation.z = wf.baseRz + Math.cos(t * 1.1 + wf.phase * 0.7) * 0.045;
+      }
+
+      // Soft lakeside reed sway
+      for (let i = 0; i < animatedReeds.length; i++) {
+        const rd = animatedReeds[i];
+        rd.mesh.rotation.z = Math.sin(t * 1.6 + rd.phase) * 0.055;
+      }
+
+      // Articulated S-wave swimming wag for all 12 Koi fish
+      for (let i = 0; i < animatedKoiTails.length; i++) {
+        const kt = animatedKoiTails[i];
+        kt.tail.rotation.y = Math.sin(t * 5.2 + kt.phase) * 0.34;
+        kt.fin.rotation.y = Math.sin(t * 5.2 + kt.phase - 0.8) * 0.42;
+      }
+    },
     dispose: () => {
       geometries.forEach((g) => g.dispose());
       localMaterials.forEach((m) => m.dispose());

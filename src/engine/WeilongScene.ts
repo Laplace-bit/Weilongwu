@@ -1,6 +1,9 @@
 import * as THREE from 'three';
-import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
-import { Sky } from 'three/addons/objects/Sky.js';
+import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
+import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
+import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
+import { ShaderPass } from 'three/addons/postprocessing/ShaderPass.js';
+import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
 import type {
   CameraViewMode,
   GameMode,
@@ -21,10 +24,59 @@ import {
   resolvePlayerMovement,
   surfaceTypeAt,
 } from './worldMath';
-import { createMaterialLibrary, type MaterialLibrary } from './proceduralTextures';
+import {
+  createMaterialLibrary,
+  physicalEnvUniforms,
+  type MaterialLibrary,
+} from './proceduralTextures';
 import { buildWeilongArchitecture, type ArchitectureRefs } from './architectureBuilder';
 import { buildWeilongProps, type PropAnimationRefs } from './propsBuilder';
+import { buildLivingWorld, type LivingWorldRefs } from './livingWorldBuilder';
+import { createSoftPillowGeometry } from './sculptHelpers';
 import { HakkaAudioEngine } from './audioEngine';
+
+/**
+ * Pillar 4: Subtle physical 35mm lens optics shader (natural cos^4 optical vignette,
+ * delicate edge chromatic dispersion, and soft highlight halation before ACES output).
+ */
+const PHYSICAL_LENS_OPTICS_SHADER = {
+  uniforms: {
+    tDiffuse: { value: null as THREE.Texture | null },
+    uVignette: { value: 0.22 },
+    uChromatic: { value: 0.00072 },
+  },
+  vertexShader: /* glsl */ `
+    varying vec2 vUv;
+    void main() {
+      vUv = uv;
+      gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+    }
+  `,
+  fragmentShader: /* glsl */ `
+    uniform sampler2D tDiffuse;
+    uniform float uVignette;
+    uniform float uChromatic;
+    varying vec2 vUv;
+
+    void main() {
+      vec2 centered = vUv - 0.5;
+      float r2 = dot(centered, centered);
+      float edgeMask = smoothstep(0.08, 0.55, r2);
+      vec2 offset = centered * uChromatic * edgeMask;
+
+      float r = texture2D(tDiffuse, vUv + offset).r;
+      vec4 base = texture2D(tDiffuse, vUv);
+      float b = texture2D(tDiffuse, vUv - offset).b;
+      vec3 col = vec3(r, base.g, b);
+
+      // Physical cos^4 natural optical falloff toward frame corners
+      float cosFalloff = 1.0 / pow(1.0 + r2 * 0.95, 2.0);
+      col *= mix(1.0, cosFalloff, uVignette);
+
+      gl_FragColor = vec4(col, base.a);
+    }
+  `,
+};
 
 export interface WeilongCallbacks {
   onHudUpdate: (snapshot: HudSnapshot) => void;
@@ -63,16 +115,38 @@ export class WeilongSceneController {
   private renderer: THREE.WebGLRenderer;
   private scene: THREE.Scene;
   private camera: THREE.PerspectiveCamera;
-  private envMap: THREE.Texture | null = null;
+  private envMaps: Record<WeatherMode, THREE.Texture>;
+  private composer: EffectComposer | null = null;
+  private bloomPass: UnrealBloomPass | null = null;
+  private lensPass: ShaderPass | null = null;
   private mats: MaterialLibrary;
   private arch: ArchitectureRefs;
   private props: PropAnimationRefs;
+  private living: LivingWorldRefs;
   public audio: HakkaAudioEngine;
 
-  // Lighting & Atmosphere
+  // Lighting & Poetic Atmosphere (1 shadow caster + zero-shadow GI bounce & sky rim)
   private sunLight: THREE.DirectionalLight;
   private hemiLight: THREE.HemisphereLight;
-  private sky: Sky;
+  private groundBounceLight: THREE.DirectionalLight;
+  private skyRimLight: THREE.DirectionalLight;
+  private poeticSky: THREE.Mesh;
+  private skyUniforms: {
+    uZen: { value: THREE.Color };
+    uMid: { value: THREE.Color };
+    uHor: { value: THREE.Color };
+    uHs: { value: THREE.Color };
+    uGnd: { value: THREE.Color };
+    uSunDir: { value: THREE.Vector3 };
+    uMoonDir: { value: THREE.Vector3 };
+    uSunStr: { value: number };
+    uMoonStr: { value: number };
+    uStarStr: { value: number };
+    uTime: { value: number };
+  };
+  private cloudGroup: THREE.Group;
+  private cloudTopMat: THREE.MeshBasicMaterial;
+  private cloudBotMat: THREE.MeshBasicMaterial;
   private rainPoints: THREE.Points;
   private fireflyPoints: THREE.Points;
   private umbrellaHeldGroup: THREE.Group;
@@ -159,7 +233,7 @@ export class WeilongSceneController {
     });
     this.renderer.outputColorSpace = THREE.SRGBColorSpace;
     this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
-    this.renderer.toneMappingExposure = 1.04;
+    this.renderer.toneMappingExposure = 1.06;
     this.renderer.setPixelRatio(
       this.isSoftwareGl ? 1 : Math.min(window.devicePixelRatio || 1, 2)
     );
@@ -174,57 +248,174 @@ export class WeilongSceneController {
     this.renderer.domElement.style.height = '100%';
     container.appendChild(this.renderer.domElement);
 
-    // Scene & Mandatory Studio RoomEnvironment IBL
+    // Scene & Custom Physical Outdoor Sky + Courtyard Bounce IBL (baked per weather via PMREM)
     this.scene = new THREE.Scene();
-    this.scene.background = new THREE.Color(0xb8d4e8);
-    this.scene.fog = new THREE.FogExp2(0xc4d8e8, 0.0032);
+    this.scene.background = new THREE.Color(0x6fb4e0);
+    this.scene.fog = new THREE.FogExp2(0xd8e5e6, 0.0024);
 
     const pmrem = new THREE.PMREMGenerator(this.renderer);
-    this.envMap = pmrem.fromScene(new RoomEnvironment(), 0.04).texture;
-    this.scene.environment = this.envMap;
+    this.envMaps = {
+      sunny: this.bakePhysicalOutdoorEnv(pmrem, 'sunny'),
+      rain: this.bakePhysicalOutdoorEnv(pmrem, 'rain'),
+      lantern: this.bakePhysicalOutdoorEnv(pmrem, 'lantern'),
+    };
+    this.scene.environment = this.envMaps.sunny;
     pmrem.dispose();
 
-    // Physically-Based Rayleigh/Mie Atmospheric Sky Dome (crisp clear Meizhou blue sky!)
-    this.sky = new Sky();
-    this.sky.scale.setScalar(260);
-    const skyUniforms = this.sky.material.uniforms;
-    skyUniforms['turbidity'].value = 1.6;
-    skyUniforms['rayleigh'].value = 2.4;
-    skyUniforms['mieCoefficient'].value = 0.0018;
-    skyUniforms['mieDirectionalG'].value = 0.76;
-    const sunDir = new THREE.Vector3(44, 46, 32).normalize();
-    skyUniforms['sunPosition'].value.copy(sunDir);
-    this.scene.add(this.sky);
+    // Poetic Multi-Band Gouache Sky Dome (adapted from refindex.html 10_sky.js)
+    this.skyUniforms = {
+      uZen: { value: new THREE.Color(0x2a76be) },
+      uMid: { value: new THREE.Color(0x67b3e2) },
+      uHor: { value: new THREE.Color(0xf6e6c8) },
+      uHs: { value: new THREE.Color(0xfff1cc) },
+      uGnd: { value: new THREE.Color(0x88b8a8) },
+      uSunDir: { value: new THREE.Vector3(46, 36, 32).normalize() },
+      uMoonDir: { value: new THREE.Vector3(-24, 34, -46).normalize() },
+      uSunStr: { value: 1.0 },
+      uMoonStr: { value: 0.0 },
+      uStarStr: { value: 0.0 },
+      uTime: { value: 0.0 },
+    };
+    const poeticSkyMat = new THREE.ShaderMaterial({
+      uniforms: this.skyUniforms,
+      side: THREE.BackSide,
+      depthWrite: false,
+      fog: false,
+      vertexShader: /* glsl */ `
+        varying vec3 vDir;
+        void main() {
+          vDir = normalize(position);
+          gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+        }
+      `,
+      fragmentShader: /* glsl */ `
+        uniform vec3 uZen;
+        uniform vec3 uMid;
+        uniform vec3 uHor;
+        uniform vec3 uHs;
+        uniform vec3 uGnd;
+        uniform vec3 uSunDir;
+        uniform vec3 uMoonDir;
+        uniform float uSunStr;
+        uniform float uMoonStr;
+        uniform float uStarStr;
+        uniform float uTime;
+        varying vec3 vDir;
 
-    // Camera (340m far clip to show physical sky & distant Meizhou mountains crisply)
+        float sHash(vec2 p) {
+          return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453);
+        }
+
+        void main() {
+          vec3 d = normalize(vDir);
+          float y = d.y;
+          vec3 col = mix(uHor, uMid, smoothstep(0.0, 0.24, y));
+          col = mix(col, uZen, smoothstep(0.20, 0.78, y));
+          col = mix(col, uGnd, smoothstep(0.02, -0.18, y));
+
+          // Warm sunlit horizon scatter (refindex.html skyCol)
+          float sDot = max(dot(d, normalize(uSunDir)), 0.0);
+          float hBloom = pow(1.0 - clamp(abs(y), 0.0, 1.0), 3.4);
+          col = mix(col, uHs, hBloom * (0.28 + 0.42 * pow(sDot, 2.0)) * uSunStr);
+
+          // Crisp golden painted sun disc & halo
+          if (uSunStr > 0.01) {
+            float halo = pow(sDot, 28.0) * 0.45 + pow(sDot, 160.0) * 0.85;
+            float disc = smoothstep(0.9988, 0.9994, sDot);
+            col += vec3(1.0, 0.95, 0.80) * (halo + disc * 1.4) * uSunStr;
+          }
+
+          // Painted full moon with soft lunar seas & halo in lantern night
+          if (uMoonStr > 0.01) {
+            vec3 md = normalize(uMoonDir);
+            float mDot = dot(d, md);
+            float mHalo = pow(max(mDot, 0.0), 22.0) * 0.32 + pow(max(mDot, 0.0), 140.0) * 0.55;
+            col += vec3(0.75, 0.85, 1.0) * mHalo * uMoonStr;
+            float mDisc = smoothstep(0.9978, 0.9985, mDot);
+            if (mDisc > 0.001) {
+              vec3 up = vec3(0.0, 1.0, 0.0);
+              vec3 mx = normalize(cross(up, md));
+              vec3 my = cross(md, mx);
+              vec2 muv = vec2(dot(d - md, mx), dot(d - md, my)) * 18.0;
+              float maria = 0.88 + 0.12 * sin(muv.x * 2.2 + sin(muv.y * 2.6));
+              vec3 moonCol = vec3(1.0, 0.96, 0.85) * maria;
+              col = mix(col, moonCol, mDisc * uMoonStr);
+            }
+          }
+
+          // Delicate twinkling starfield above horizon at night
+          if (uStarStr > 0.01 && y > 0.06) {
+            vec2 sp = vec2(atan(d.z, d.x), asin(clamp(y, -1.0, 1.0))) * 46.0;
+            vec2 cell = floor(sp);
+            vec2 f = fract(sp) - 0.5;
+            float rnd = sHash(cell);
+            if (rnd > 0.92) {
+              float dist = length(f);
+              float tw = 0.65 + 0.35 * sin(uTime * (2.2 + rnd * 4.0) + rnd * 50.0);
+              float star = smoothstep(0.16, 0.02, dist) * tw * smoothstep(0.06, 0.25, y);
+              col += vec3(1.0, 0.96, 0.86) * star * uStarStr * 1.1;
+            }
+          }
+
+          gl_FragColor = vec4(col, 1.0);
+          #include <tonemapping_fragment>
+          #include <colorspace_fragment>
+        }
+      `,
+    });
+    this.poeticSky = new THREE.Mesh(new THREE.SphereGeometry(250, 32, 20), poeticSkyMat);
+    this.scene.add(this.poeticSky);
+
+    // Sculpted Painterly Cotton Clouds (refindex.html 66_air.js gouache clouds!)
+    this.cloudTopMat = new THREE.MeshBasicMaterial({ color: 0xfff8e8, fog: true });
+    this.cloudBotMat = new THREE.MeshBasicMaterial({ color: 0xefd3bc, fog: true });
+    this.cloudGroup = this.buildSculptedClouds();
+    this.scene.add(this.cloudGroup);
+
+    // Camera (340m far clip to show poetic sky, clouds & Shan-Shui mountains crisply)
     this.camera = new THREE.PerspectiveCamera(56, w / h, 0.14, 340);
 
-    // High-Contrast Photorealistic Lingnan Raking Daylight Rig (<= 1 Shadow Caster!)
-    this.hemiLight = new THREE.HemisphereLight(0x8cc2eb, 0x6b5c46, 0.48);
+    // Warm Golden-Morning Painterly Lighting Rig (<= 1 Shadow Caster!)
+    this.hemiLight = new THREE.HemisphereLight(0x98ccf0, 0x9c825c, 0.72);
     this.scene.add(this.hemiLight);
 
-    this.sunLight = new THREE.DirectionalLight(0xfff0d4, 3.1);
+    this.sunLight = new THREE.DirectionalLight(0xfff1cf, 2.75);
     this.sunLight.position.set(46, 36, 32);
     if (!this.isSoftwareGl) {
       this.sunLight.castShadow = true;
       this.sunLight.shadow.mapSize.set(2048, 2048);
+      this.sunLight.shadow.radius = 2.6;
       this.sunLight.shadow.camera.left = -52;
       this.sunLight.shadow.camera.right = 52;
       this.sunLight.shadow.camera.top = 56;
       this.sunLight.shadow.camera.bottom = -56;
       this.sunLight.shadow.camera.near = 4;
       this.sunLight.shadow.camera.far = 165;
-      this.sunLight.shadow.bias = -0.0004;
+      this.sunLight.shadow.bias = -0.00035;
       this.sunLight.shadow.normalBias = 0.025;
     }
     this.scene.add(this.sunLight);
 
-    // Build Procedural Materials, Architecture & Composite Props
+    // Pillar 1: Zero-shadow warm courtyard radiosity bounce fill (bouncing sunlit He-Ping upward onto eaves & walls)
+    this.groundBounceLight = new THREE.DirectionalLight(0xf6cfa0, 0.62);
+    this.groundBounceLight.position.set(-18, -14, 34);
+    this.groundBounceLight.castShadow = false;
+    this.scene.add(this.groundBounceLight);
+
+    // Pillar 1: Zero-shadow cool azure sky rim fill separating silhouettes & roof ridges against mountain mist
+    this.skyRimLight = new THREE.DirectionalLight(0x9bd2f8, 0.46);
+    this.skyRimLight.position.set(-36, 28, -32);
+    this.skyRimLight.castShadow = false;
+    this.scene.add(this.skyRimLight);
+
+    // Build Procedural Materials, Architecture, Composite Props & Living Hakka Community
     this.mats = createMaterialLibrary(this.renderer);
     this.arch = buildWeilongArchitecture(this.mats, this.isSoftwareGl);
     this.props = buildWeilongProps(this.mats, this.isSoftwareGl);
+    this.living = buildLivingWorld(this.mats, this.isSoftwareGl);
     this.scene.add(this.arch.root);
     this.scene.add(this.props.root);
+    this.scene.add(this.living.root);
 
     // Held Oil-Paper Umbrella attached to Camera
     this.umbrellaHeldGroup = this.buildHeldUmbrella();
@@ -241,8 +432,20 @@ export class WeilongSceneController {
     this.fireflyPoints.visible = false;
     this.scene.add(this.fireflyPoints);
 
-    // Pre-warm shaders on GPU only
+    // Pillar 4: Physical Camera Post-Processing Pipeline (GPU-only so software WebGL never stalls)
     if (!this.isSoftwareGl) {
+      this.composer = new EffectComposer(this.renderer);
+      this.composer.addPass(new RenderPass(this.scene, this.camera));
+      this.bloomPass = new UnrealBloomPass(
+        new THREE.Vector2(Math.max(1, Math.floor(w / 2)), Math.max(1, Math.floor(h / 2))),
+        0.22,
+        0.48,
+        0.94
+      );
+      this.composer.addPass(this.bloomPass);
+      this.lensPass = new ShaderPass(PHYSICAL_LENS_OPTICS_SHADER);
+      this.composer.addPass(this.lensPass);
+      this.composer.addPass(new OutputPass());
       this.renderer.compile(this.scene, this.camera);
     }
 
@@ -250,6 +453,172 @@ export class WeilongSceneController {
     this.applyWeather('sunny');
     this.emitHudSnapshot(true);
     this.startLoop();
+  }
+
+  /**
+   * Pillar 1 & 2: Generates a physical outdoor sky + sunlit courtyard bounce PMREM environment
+   * tailored to each weather state so metallic gold, cinnabar lacquer, porcelain, and wet stone
+   * reflect authentic sky gradients, solar highlights, jade hills, and warm earth radiosity.
+   */
+  private bakePhysicalOutdoorEnv(
+    pmrem: THREE.PMREMGenerator,
+    mode: WeatherMode
+  ): THREE.Texture {
+    const envScene = new THREE.Scene();
+    const disposables: Array<{ dispose: () => void }> = [];
+
+    const cfg =
+      mode === 'sunny'
+        ? {
+            zenith: 0x3a88d4,
+            horizon: 0xf7e8cb,
+            ground: 0xc29e70,
+            hills: 0x4f8a6e,
+            sunCol: 0xfff4d6,
+            sunInt: 3.4,
+            sunPos: [14, 11, 10] as [number, number, number],
+          }
+        : mode === 'rain'
+          ? {
+              zenith: 0x6c8698,
+              horizon: 0xcad6d8,
+              ground: 0x5d6b66,
+              hills: 0x4d6b66,
+              sunCol: 0xe6eff2,
+              sunInt: 1.4,
+              sunPos: [5, 16, 6] as [number, number, number],
+            }
+          : {
+              zenith: 0x102042,
+              horizon: 0x3b385a,
+              ground: 0x4b2f1c,
+              hills: 0x1a2842,
+              sunCol: 0xffa652,
+              sunInt: 2.2,
+              sunPos: [0, 3, 12] as [number, number, number],
+            };
+
+    // Sky hemisphere dome
+    const skyGeo = new THREE.SphereGeometry(28, 24, 16);
+    const skyMat = new THREE.ShaderMaterial({
+      side: THREE.BackSide,
+      uniforms: {
+        uZen: { value: new THREE.Color(cfg.zenith) },
+        uHor: { value: new THREE.Color(cfg.horizon) },
+        uHill: { value: new THREE.Color(cfg.hills) },
+        uGnd: { value: new THREE.Color(cfg.ground) },
+      },
+      vertexShader: /* glsl */ `
+        varying vec3 vD;
+        void main() {
+          vD = normalize(position);
+          gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+        }
+      `,
+      fragmentShader: /* glsl */ `
+        uniform vec3 uZen;
+        uniform vec3 uHor;
+        uniform vec3 uHill;
+        uniform vec3 uGnd;
+        varying vec3 vD;
+        void main() {
+          float y = vD.y;
+          vec3 col = mix(uHor, uZen, smoothstep(0.05, 0.72, y));
+          col = mix(col, uHill, smoothstep(0.08, -0.08, y) * (1.0 - smoothstep(-0.08, -0.26, y)));
+          col = mix(col, uGnd, smoothstep(-0.08, -0.35, y));
+          gl_FragColor = vec4(col, 1.0);
+        }
+      `,
+    });
+    envScene.add(new THREE.Mesh(skyGeo, skyMat));
+    disposables.push(skyGeo, skyMat);
+
+    // High-dynamic-range solar / lantern specular emitter disc (soft broad canopy in overcast rain)
+    const emitterRadius = mode === 'rain' ? 12.0 : 3.2;
+    const emitterScale = mode === 'rain' ? 0.58 : cfg.sunInt;
+    const emitterGeo = new THREE.SphereGeometry(emitterRadius, 12, 10);
+    const emitterMat = new THREE.MeshBasicMaterial({
+      color: new THREE.Color(cfg.sunCol).multiplyScalar(emitterScale),
+    });
+    const emitter = new THREE.Mesh(emitterGeo, emitterMat);
+    emitter.position.set(cfg.sunPos[0], cfg.sunPos[1], cfg.sunPos[2]);
+    envScene.add(emitter);
+    disposables.push(emitterGeo, emitterMat);
+
+    // Warm sunlit courtyard reflector card below horizon for authentic upward GI sheen
+    const bounceGeo = new THREE.PlaneGeometry(24, 24);
+    const bounceMat = new THREE.MeshBasicMaterial({
+      color: new THREE.Color(cfg.ground).multiplyScalar(mode === 'sunny' ? 1.35 : 0.9),
+    });
+    const bounceCard = new THREE.Mesh(bounceGeo, bounceMat);
+    bounceCard.rotation.x = -Math.PI * 0.5;
+    bounceCard.position.y = -10;
+    envScene.add(bounceCard);
+    disposables.push(bounceGeo, bounceMat);
+
+    const rt = pmrem.fromScene(envScene, 0.035);
+    disposables.forEach((d) => d.dispose());
+    return rt.texture;
+  }
+
+  private buildSculptedClouds(): THREE.Group {
+    const group = new THREE.Group();
+    const puffGeoA = createSoftPillowGeometry(1, 1.4, 0.78, 12, 9);
+    const puffGeoB = createSoftPillowGeometry(1, 4.7, 0.72, 12, 9);
+    const cloudConfigs: Array<[number, number, number, number, number]> = [
+      [-92, 42, -108, 1.38, 0.42],
+      [-32, 48, -126, 1.72, 0.36],
+      [38, 45, -118, 1.56, 0.45],
+      [96, 40, -96, 1.32, 0.38],
+      [-115, 38, -28, 1.25, 0.34],
+      [112, 42, -18, 1.34, 0.4],
+      [-74, 46, 78, 1.18, 0.35],
+      [68, 44, 86, 1.3, 0.38],
+      [2, 54, -142, 1.9, 0.3],
+      [-58, 39, -76, 1.08, 0.48],
+      [64, 40, -72, 1.15, 0.44],
+      [-14, 46, 102, 1.22, 0.36],
+    ];
+
+    cloudConfigs.forEach(([cx, cy, cz, sc, speed], idx) => {
+      const cg = new THREE.Group();
+      cg.position.set(cx, cy, cz);
+      cg.rotation.y = (idx % 2 === 0 ? 1 : -1) * 0.28 + idx * 0.14;
+      cg.userData = { baseX: cx, baseY: cy, baseZ: cz, speed, phase: idx * 1.1 };
+
+      const mirror = idx % 2 === 0 ? 1 : -1;
+      // Flat-bottomed soft shaded cumulus underbelly
+      for (const [ox, oy, oz, sx, sy, sz] of [
+        [-4.8 * mirror, -0.85, 0.3, 4.2, 1.25, 2.8],
+        [-0.4 * mirror, -1.05, 0.0, 5.8, 1.45, 3.4],
+        [4.4 * mirror, -0.75, -0.35, 3.8, 1.15, 2.6],
+        [7.4 * mirror, -0.55, 0.2, 2.4, 0.9, 1.9],
+      ]) {
+        const bot = new THREE.Mesh(puffGeoB, this.cloudBotMat);
+        bot.position.set(ox, oy, oz);
+        bot.scale.set(sx, sy, sz);
+        cg.add(bot);
+      }
+      // Asymmetric billowing sunlit cream-washi upper crests
+      for (const [ox, oy, oz, sx, sy, sz] of [
+        [-4.2 * mirror, 0.4, 0.25, 3.6, 2.0, 2.7],
+        [-1.1 * mirror, 1.65, -0.1, 4.7, 3.1, 3.1],
+        [2.6 * mirror, 1.15, 0.15, 3.9, 2.45, 2.8],
+        [5.6 * mirror, 0.25, -0.2, 2.8, 1.6, 2.2],
+        [-2.2 * mirror, 0.85, 1.15, 2.9, 1.9, 2.3],
+        [0.9 * mirror, 2.35, -0.45, 2.6, 2.0, 2.2],
+      ]) {
+        const top = new THREE.Mesh(puffGeoA, this.cloudTopMat);
+        top.position.set(ox, oy, oz);
+        top.scale.set(sx, sy, sz);
+        cg.add(top);
+      }
+
+      cg.scale.setScalar(sc);
+      group.add(cg);
+    });
+
+    return group;
   }
 
   private buildHeldUmbrella(): THREE.Group {
@@ -359,6 +728,12 @@ export class WeilongSceneController {
     this.camera.aspect = w / h;
     this.camera.updateProjectionMatrix();
     this.renderer.setSize(w, h);
+    if (this.composer) {
+      this.composer.setSize(w, h);
+    }
+    if (this.bloomPass) {
+      this.bloomPass.resolution.set(Math.max(1, Math.floor(w / 2)), Math.max(1, Math.floor(h / 2)));
+    }
   }
 
   private handleWindowBlur = (): void => {
@@ -515,67 +890,180 @@ export class WeilongSceneController {
   public applyWeather(weather: WeatherMode): void {
     this.weather = weather;
     this.audio.setWeatherAmbience(weather);
+    this.arch.skyDome.visible = false;
+    this.poeticSky.visible = true;
+    this.scene.environment = this.envMaps[weather];
 
     if (weather === 'sunny') {
-      this.sky.visible = true;
-      this.arch.skyDome.visible = false;
-      this.scene.background = new THREE.Color(0x52a8e6);
-      (this.scene.fog as THREE.FogExp2).color.setHex(0x9ecce8);
-      (this.scene.fog as THREE.FogExp2).density = 0.0022;
-      this.scene.environmentIntensity = 0.45;
-      this.sunLight.color.setHex(0xfff0d4);
-      this.sunLight.intensity = 3.1;
+      this.renderer.toneMappingExposure = 1.06;
+      this.skyUniforms.uZen.value.setHex(0x2874bc);
+      this.skyUniforms.uMid.value.setHex(0x63b2e0);
+      this.skyUniforms.uHor.value.setHex(0xf7e6c4);
+      this.skyUniforms.uHs.value.setHex(0xfff1cc);
+      this.skyUniforms.uGnd.value.setHex(0x88b8a8);
+      this.skyUniforms.uSunStr.value = 1.0;
+      this.skyUniforms.uMoonStr.value = 0.0;
+      this.skyUniforms.uStarStr.value = 0.0;
+      this.cloudTopMat.color.setHex(0xfff8e8);
+      this.cloudBotMat.color.setHex(0xefd1b8);
+      this.cloudGroup.visible = true;
+
+      this.scene.background = new THREE.Color(0x63b2e0);
+      (this.scene.fog as THREE.FogExp2).color.setHex(0xdae6e2);
+      (this.scene.fog as THREE.FogExp2).density = 0.0021;
+      this.scene.environmentIntensity = 0.68;
+      this.sunLight.color.setHex(0xfff0cf);
+      this.sunLight.intensity = 2.85;
       this.sunLight.position.set(46, 36, 32);
-      this.hemiLight.color.setHex(0x8cc2eb);
-      this.hemiLight.groundColor.setHex(0x6b5c46);
-      this.hemiLight.intensity = 0.48;
-      this.mats.huataiCobble.roughness = 0.88;
-      this.mats.lanternPaper.emissiveIntensity = 0.25;
-      this.arch.lanternLights.forEach((l) => (l.intensity = 0.12));
+      this.hemiLight.color.setHex(0x98ccf0);
+      this.hemiLight.groundColor.setHex(0xa88a60);
+      this.hemiLight.intensity = 0.72;
+      this.groundBounceLight.color.setHex(0xf6cfa0);
+      this.groundBounceLight.intensity = 0.64;
+      this.skyRimLight.color.setHex(0x9bd2f8);
+      this.skyRimLight.intensity = 0.46;
+
+      // Sync shared physical optical uniforms (GI radiosity, SSS, wetness)
+      physicalEnvUniforms.uSunDir.value.set(46, 36, 32).normalize();
+      physicalEnvUniforms.uSunColor.value.setHex(0xfff0d2);
+      physicalEnvUniforms.uBounceColor.value.setHex(0xf0c990);
+      physicalEnvUniforms.uSkyColor.value.setHex(0x88c8ec);
+      physicalEnvUniforms.uWetness.value = 0.0;
+      physicalEnvUniforms.uNightFactor.value = 0.0;
+
+      // Dry surface clearcoat calibration
+      this.mats.wettableMaterials.forEach((m) => {
+        const isTile = m === this.mats.roofTile || m === this.mats.roofTileDark;
+        m.clearcoat = isTile ? 0.08 : 0.0;
+        m.clearcoatRoughness = isTile ? 0.45 : 0.28;
+      });
+      this.mats.huataiCobble.roughness = 0.82;
+      this.mats.windowLattice.emissiveIntensity = 0.08;
+      this.mats.lanternPaper.emissiveIntensity = 0.42;
+      this.arch.lanternLights.forEach((l) => (l.intensity = 0.16));
+      if (this.bloomPass) {
+        this.bloomPass.strength = 0.22;
+        this.bloomPass.threshold = 0.94;
+      }
+      if (this.lensPass) {
+        this.lensPass.uniforms.uVignette.value = 0.20;
+      }
       this.rainPoints.visible = false;
       this.arch.rainCurtainMeshes.forEach((m) => (m.visible = false));
       this.fireflyPoints.visible = false;
     } else if (weather === 'rain') {
-      this.sky.visible = false;
-      this.arch.skyDome.visible = true;
-      this.arch.skyDome.material = this.mats.skyRain;
-      this.scene.background = new THREE.Color(0x7e909e);
-      (this.scene.fog as THREE.FogExp2).color.setHex(0x7e909e);
-      (this.scene.fog as THREE.FogExp2).density = 0.0088;
-      this.scene.environmentIntensity = 0.42;
-      this.sunLight.color.setHex(0xcfdce6);
-      this.sunLight.intensity = 1.05;
+      // 烟雨客乡 (Celadon Ink-Wash Misty Rain with physical wet stone & tile clearcoat film!)
+      this.renderer.toneMappingExposure = 1.02;
+      this.skyUniforms.uZen.value.setHex(0x52748e);
+      this.skyUniforms.uMid.value.setHex(0x84a0b2);
+      this.skyUniforms.uHor.value.setHex(0xc8d7d6);
+      this.skyUniforms.uHs.value.setHex(0xdbe5e2);
+      this.skyUniforms.uGnd.value.setHex(0x6c8684);
+      this.skyUniforms.uSunStr.value = 0.12;
+      this.skyUniforms.uMoonStr.value = 0.0;
+      this.skyUniforms.uStarStr.value = 0.0;
+      this.cloudTopMat.color.setHex(0xcfdce0);
+      this.cloudBotMat.color.setHex(0x8ca2b0);
+      this.cloudGroup.visible = true;
+
+      this.scene.background = new THREE.Color(0x9bb2bc);
+      (this.scene.fog as THREE.FogExp2).color.setHex(0xa6bcc2);
+      (this.scene.fog as THREE.FogExp2).density = 0.0064;
+      this.scene.environmentIntensity = 0.64;
+      this.sunLight.color.setHex(0xdbe8ef);
+      this.sunLight.intensity = 1.3;
       this.sunLight.position.set(16, 40, 18);
-      this.hemiLight.color.setHex(0x8fa6b8);
-      this.hemiLight.groundColor.setHex(0x474f52);
-      this.hemiLight.intensity = 0.72;
-      this.mats.huataiCobble.roughness = 0.24;
-      this.mats.lanternPaper.emissiveIntensity = 0.85;
-      this.arch.lanternLights.forEach((l) => (l.intensity = 1.1));
+      this.hemiLight.color.setHex(0xa8c2d0);
+      this.hemiLight.groundColor.setHex(0x5c6862);
+      this.hemiLight.intensity = 0.88;
+      this.groundBounceLight.color.setHex(0x9cb4b2);
+      this.groundBounceLight.intensity = 0.36;
+      this.skyRimLight.color.setHex(0xb8d4e0);
+      this.skyRimLight.intensity = 0.38;
+
+      physicalEnvUniforms.uSunDir.value.set(16, 40, 18).normalize();
+      physicalEnvUniforms.uSunColor.value.setHex(0xd6e6ee);
+      physicalEnvUniforms.uBounceColor.value.setHex(0x8fa8a4);
+      physicalEnvUniforms.uSkyColor.value.setHex(0x9cb8c6);
+      physicalEnvUniforms.uWetness.value = 1.0;
+      physicalEnvUniforms.uNightFactor.value = 0.0;
+
+      // Engage physical rainwater dielectric film (IOR ~1.333 clearcoat sheen on tiles, slabs & courtyard!)
+      this.mats.wettableMaterials.forEach((m) => {
+        const isTile = m === this.mats.roofTile || m === this.mats.roofTileDark;
+        m.clearcoat = isTile ? 0.66 : 0.78;
+        m.clearcoatRoughness = isTile ? 0.22 : 0.14;
+      });
+      this.mats.huataiCobble.roughness = 0.32;
+      this.mats.windowLattice.emissiveIntensity = 0.95;
+      this.mats.lanternPaper.emissiveIntensity = 1.25;
+      this.arch.lanternLights.forEach((l) => (l.intensity = 1.45));
+      if (this.bloomPass) {
+        this.bloomPass.strength = 0.18;
+        this.bloomPass.threshold = 0.90;
+      }
+      if (this.lensPass) {
+        this.lensPass.uniforms.uVignette.value = 0.25;
+      }
       this.rainPoints.visible = true;
       this.arch.rainCurtainMeshes.forEach((m) => (m.visible = true));
       this.fireflyPoints.visible = false;
     } else {
-      // 上元灯夜 (Lantern Festival Night)
-      this.sky.visible = false;
-      this.arch.skyDome.visible = true;
-      this.arch.skyDome.material = this.mats.skyNight;
-      this.scene.background = new THREE.Color(0x0b1222);
-      (this.scene.fog as THREE.FogExp2).color.setHex(0x0b1222);
-      (this.scene.fog as THREE.FogExp2).density = 0.0068;
-      this.scene.environmentIntensity = 0.14;
-      this.sunLight.color.setHex(0x5b76ad);
-      this.sunLight.intensity = 0.36;
-      this.sunLight.position.set(-22, 32, -26);
-      this.hemiLight.color.setHex(0x1f3154);
-      this.hemiLight.groundColor.setHex(0x261a12);
-      this.hemiLight.intensity = 0.34;
-      this.mats.huataiCobble.roughness = 0.68;
-      this.mats.lanternPaper.emissiveIntensity = 2.4;
-      this.arch.lanternLights.forEach((l) => {
-        l.distance = 26;
-        l.intensity = 5.5;
+      // 上元灯夜 (Poetic Indigo Moonlit Lantern Festival Night with warm crimson-gold GI bounce!)
+      this.renderer.toneMappingExposure = 1.16;
+      this.skyUniforms.uZen.value.setHex(0x0b1630);
+      this.skyUniforms.uMid.value.setHex(0x1b335c);
+      this.skyUniforms.uHor.value.setHex(0x4b4868);
+      this.skyUniforms.uHs.value.setHex(0x7c5a64);
+      this.skyUniforms.uGnd.value.setHex(0x152236);
+      this.skyUniforms.uSunStr.value = 0.0;
+      this.skyUniforms.uMoonStr.value = 1.0;
+      this.skyUniforms.uStarStr.value = 1.0;
+      this.cloudTopMat.color.setHex(0x3a4d70);
+      this.cloudBotMat.color.setHex(0x1d2a44);
+      this.cloudGroup.visible = true;
+
+      this.scene.background = new THREE.Color(0x14223d);
+      (this.scene.fog as THREE.FogExp2).color.setHex(0x1b2b48);
+      (this.scene.fog as THREE.FogExp2).density = 0.0044;
+      this.scene.environmentIntensity = 0.34;
+      this.sunLight.color.setHex(0x88a8de);
+      this.sunLight.intensity = 0.68;
+      this.sunLight.position.set(-24, 34, -46);
+      this.hemiLight.color.setHex(0x3a5688);
+      this.hemiLight.groundColor.setHex(0x4a2e1a);
+      this.hemiLight.intensity = 0.52;
+      this.groundBounceLight.color.setHex(0xd47634);
+      this.groundBounceLight.intensity = 0.42;
+      this.skyRimLight.color.setHex(0x6b92d4);
+      this.skyRimLight.intensity = 0.34;
+
+      physicalEnvUniforms.uSunDir.value.set(-24, 34, -46).normalize();
+      physicalEnvUniforms.uSunColor.value.setHex(0x8caee4);
+      physicalEnvUniforms.uBounceColor.value.setHex(0xd47434);
+      physicalEnvUniforms.uSkyColor.value.setHex(0x2d4878);
+      physicalEnvUniforms.uWetness.value = 0.0;
+      physicalEnvUniforms.uNightFactor.value = 1.0;
+
+      this.mats.wettableMaterials.forEach((m) => {
+        const isTile = m === this.mats.roofTile || m === this.mats.roofTileDark;
+        m.clearcoat = isTile ? 0.14 : 0.04;
+        m.clearcoatRoughness = 0.38;
       });
+      this.mats.huataiCobble.roughness = 0.68;
+      this.mats.windowLattice.emissiveIntensity = 1.75;
+      this.mats.lanternPaper.emissiveIntensity = 2.75;
+      this.arch.lanternLights.forEach((l) => {
+        l.distance = 28;
+        l.intensity = 6.4;
+      });
+      if (this.bloomPass) {
+        this.bloomPass.strength = 0.46;
+        this.bloomPass.threshold = 0.84;
+      }
+      if (this.lensPass) {
+        this.lensPass.uniforms.uVignette.value = 0.28;
+      }
       this.rainPoints.visible = false;
       this.arch.rainCurtainMeshes.forEach((m) => (m.visible = false));
       this.fireflyPoints.visible = true;
@@ -798,7 +1286,11 @@ export class WeilongSceneController {
     const dt = Math.min(Math.max(rawDt, 0.001), 0.05);
 
     this.updateScene(dt, now);
-    this.renderer.render(this.scene, this.camera);
+    if (this.composer && !this.isSoftwareGl) {
+      this.composer.render();
+    } else {
+      this.renderer.render(this.scene, this.camera);
+    }
 
     if (this.isSoftwareGl) {
       this.afterDraw(this.tick);
@@ -809,6 +1301,7 @@ export class WeilongSceneController {
 
   private updateScene(dt: number, nowMs: number): void {
     const t = nowMs * 0.001;
+    physicalEnvUniforms.uTime.value = t;
 
     // 1. Camera Mode Choreography
     if (this.mode === 'title') {
@@ -840,7 +1333,22 @@ export class WeilongSceneController {
       }
     }
 
-    // 2. Ambient World & Prop Animations
+    // 2. Ambient World, Water, Clouds & Living Community Animations
+    this.skyUniforms.uTime.value = t;
+    this.arch.updateWater(
+      t,
+      this.weather === 'lantern' ? 1.0 : 0.0,
+      this.weather === 'rain' ? 1.0 : 0.0
+    );
+    this.living.update(dt, t, this.weather);
+
+    // Gentle cloud drift across the valley sky
+    for (const c of this.cloudGroup.children) {
+      const d = c.userData;
+      c.position.x = ((d.baseX + t * d.speed + 150) % 300) - 150;
+      c.position.y = d.baseY + Math.sin(t * 0.22 + d.phase) * 0.7;
+    }
+
     // Swimming Koi in Half-Moon Pond
     for (const child of this.arch.koiGroup.children) {
       const d = child.userData;
@@ -1190,13 +1698,19 @@ export class WeilongSceneController {
     dom.removeEventListener('webglcontextlost', this.handleContextLost);
     this.resizeObserver?.disconnect();
 
-    this.sky.geometry.dispose();
-    this.sky.material.dispose();
+    this.poeticSky.geometry.dispose();
+    (this.poeticSky.material as THREE.Material).dispose();
+    this.cloudTopMat.dispose();
+    this.cloudBotMat.dispose();
     this.rainPoints.geometry.dispose();
     (this.rainPoints.material as THREE.Material).dispose();
     this.fireflyPoints.geometry.dispose();
     (this.fireflyPoints.material as THREE.Material).dispose();
-    this.envMap?.dispose();
+    this.envMaps.sunny.dispose();
+    this.envMaps.rain.dispose();
+    this.envMaps.lantern.dispose();
+    this.composer?.dispose();
+    this.living.dispose();
     this.arch.dispose();
     this.props.dispose();
     this.mats.dispose();

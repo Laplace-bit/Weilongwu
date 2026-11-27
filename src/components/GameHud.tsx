@@ -61,7 +61,7 @@ export const GameHud: React.FC<GameHudProps> = ({
       {/* TOP-LEFT: Architectural Location & Free-Walk Progress Readout */}
       <div
         className="fixed top-4 left-4 px-4 py-2.5 rounded border border-[#d9a84e]/25"
-        style={{ backgroundColor: 'rgba(20, 17, 14, 0.84)' }}
+        style={{ backgroundColor: 'rgba(22, 35, 56, 0.86)' }}
       >
         <div className="flex items-baseline gap-2.5">
           <span className="font-serif-display text-base font-bold text-[#f7f1e6] tracking-wider">
@@ -96,7 +96,7 @@ export const GameHud: React.FC<GameHudProps> = ({
             onOpenMap();
           }}
           className="w-10 h-10 flex items-center justify-center rounded border border-[#d9a84e]/30 text-[#f5efe6] hover:border-[#d9a84e] transition-colors cursor-pointer"
-          style={{ backgroundColor: 'rgba(20, 17, 14, 0.84)' }}
+          style={{ backgroundColor: 'rgba(22, 35, 56, 0.86)' }}
         >
           <svg viewBox="0 0 24 24" className="w-5 h-5" fill="none" stroke="currentColor" strokeWidth="1.8">
             <path d="M3 13a9 9 0 0 1 18 0" />
@@ -115,7 +115,7 @@ export const GameHud: React.FC<GameHudProps> = ({
             onOpenArtifacts();
           }}
           className="w-10 h-10 flex items-center justify-center rounded border border-[#d9a84e]/30 text-[#f5efe6] hover:border-[#d9a84e] transition-colors cursor-pointer"
-          style={{ backgroundColor: 'rgba(20, 17, 14, 0.84)' }}
+          style={{ backgroundColor: 'rgba(22, 35, 56, 0.86)' }}
         >
           <svg viewBox="0 0 24 24" className="w-5 h-5" fill="none" stroke="currentColor" strokeWidth="1.8">
             <path d="M5 6.5A2.5 2.5 0 0 1 7.5 4H19v15H7.5A2.5 2.5 0 0 0 5 21V6.5Z" />
@@ -133,7 +133,7 @@ export const GameHud: React.FC<GameHudProps> = ({
             onToggleMute();
           }}
           className="w-10 h-10 flex items-center justify-center rounded border border-[#d9a84e]/30 text-[#f5efe6] hover:border-[#d9a84e] transition-colors cursor-pointer"
-          style={{ backgroundColor: 'rgba(20, 17, 14, 0.84)' }}
+          style={{ backgroundColor: 'rgba(22, 35, 56, 0.86)' }}
         >
           {muted ? (
             <svg viewBox="0 0 24 24" className="w-5 h-5" fill="none" stroke="currentColor" strokeWidth="1.8">
@@ -158,7 +158,7 @@ export const GameHud: React.FC<GameHudProps> = ({
             onPause();
           }}
           className="w-10 h-10 flex items-center justify-center rounded border border-[#d9a84e]/30 text-[#f5efe6] hover:border-[#d9a84e] transition-colors cursor-pointer"
-          style={{ backgroundColor: 'rgba(20, 17, 14, 0.84)' }}
+          style={{ backgroundColor: 'rgba(22, 35, 56, 0.86)' }}
         >
           <svg viewBox="0 0 24 24" className="w-5 h-5" fill="currentColor">
             <rect x="6" y="5" width="4" height="14" rx="1" />
@@ -188,17 +188,17 @@ export const GameHud: React.FC<GameHudProps> = ({
               e.currentTarget.blur();
               onTriggerInteract();
             }}
-            className="flex items-center gap-3 px-4 py-2 rounded border border-[#d9a84e]/60 text-left transition-transform hover:scale-[1.02] cursor-pointer shadow-lg"
-            style={{ backgroundColor: 'rgba(22, 18, 14, 0.9)' }}
+            className="flex items-center gap-3 px-4 py-2 rounded border border-[#ebb854]/60 text-left transition-transform hover:scale-[1.02] cursor-pointer shadow-lg"
+            style={{ backgroundColor: 'rgba(22, 35, 56, 0.92)' }}
           >
-            <span className="px-2 py-0.5 text-xs font-bold bg-[#b5382a] text-[#faf5ed] rounded">
+            <span className="px-2 py-0.5 text-xs font-bold bg-[#d44c2b] text-[#fbf5e8] rounded">
               E
             </span>
             <div>
-              <div className="text-sm font-semibold text-[#f7f1e6] leading-snug whitespace-nowrap">
+              <div className="text-sm font-semibold text-[#fbf5e8] leading-snug whitespace-nowrap">
                 {nearby.actionLabel}
               </div>
-              <div className="text-[11px] text-[#d9a84e] whitespace-nowrap">
+              <div className="text-[11px] text-[#f0c563] whitespace-nowrap">
                 {nearby.name} · {nearby.tierLabel}
               </div>
             </div>
@@ -209,10 +209,10 @@ export const GameHud: React.FC<GameHudProps> = ({
       {/* NON-INTRUSIVE HAKKA DIALECT + MANDARIN FOLKLORE SUBTITLE RIBBON */}
       {subtitle && (
         <div
-          className="fixed left-1/2 -translate-x-1/2 max-w-xl w-[90vw] px-5 py-3 rounded border border-[#d9a84e]/35 text-center transition-all"
+          className="fixed left-1/2 -translate-x-1/2 max-w-xl w-[90vw] px-5 py-3 rounded border border-[#ebb854]/35 text-center transition-all"
           style={{
             bottom: dockCollapsed ? '52px' : '116px',
-            backgroundColor: 'rgba(20, 17, 14, 0.88)',
+            backgroundColor: 'rgba(22, 35, 56, 0.90)',
           }}
         >
           <div className="font-serif-display text-base text-[#ebd08a] tracking-wide">
@@ -244,15 +244,15 @@ export const GameHud: React.FC<GameHudProps> = ({
               e.currentTarget.blur();
               setDockCollapsed((v) => !v);
             }}
-            className="px-3.5 py-1 text-[11px] text-[#dfd5c5] hover:text-[#f7f1e6] rounded-t border border-b-0 border-[#d9a84e]/30 cursor-pointer whitespace-nowrap"
-            style={{ backgroundColor: 'rgba(20, 17, 14, 0.88)' }}
+            className="px-3.5 py-1 text-[11px] text-[#e8dec9] hover:text-[#fbf5e8] rounded-t border border-b-0 border-[#ebb854]/30 cursor-pointer whitespace-nowrap"
+            style={{ backgroundColor: 'rgba(22, 35, 56, 0.88)' }}
           >
             {dockCollapsed ? '▴ 展开游览工具栏' : '▾ 收起工具栏'}
           </button>
 
           <div
-            className="flex flex-wrap sm:flex-nowrap items-center justify-center gap-1.5 px-3 py-2 rounded border border-[#d9a84e]/30 shadow-xl"
-            style={{ backgroundColor: 'rgba(20, 17, 14, 0.9)' }}
+            className="flex flex-wrap sm:flex-nowrap items-center justify-center gap-1.5 px-3 py-2 rounded border border-[#ebb854]/30 shadow-xl"
+            style={{ backgroundColor: 'rgba(22, 35, 56, 0.90)' }}
           >
             {/* Walk vs Aerial Inspection View Toggle */}
             <div className="flex items-center gap-1 pr-2 border-r border-[#f5efe6]/15">
@@ -265,8 +265,8 @@ export const GameHud: React.FC<GameHudProps> = ({
                 }}
                 className={`px-2.5 py-1.5 text-xs rounded transition-colors cursor-pointer whitespace-nowrap ${
                   cameraView === 'aerial'
-                    ? 'bg-[#d9a84e] text-[#171310] font-semibold'
-                    : 'bg-white/10 text-[#f5efe6] hover:bg-white/15'
+                    ? 'bg-[#ebb854] text-[#162338] font-semibold'
+                    : 'bg-white/10 text-[#fbf5e8] hover:bg-white/15'
                 }`}
               >
                 {cameraView === 'aerial' ? '返回自由步行 (V)' : '航拍俯瞰全景 (V)'}
@@ -286,8 +286,8 @@ export const GameHud: React.FC<GameHudProps> = ({
                   }}
                   className={`px-2.5 py-1.5 text-xs rounded transition-colors cursor-pointer whitespace-nowrap ${
                     weather === w
-                      ? 'bg-[#b5382a] text-[#faf5ed] font-semibold'
-                      : 'text-[#d8cebe] hover:text-[#faf5ed] hover:bg-white/10'
+                      ? 'bg-[#d44c2b] text-[#fbf5e8] font-semibold'
+                      : 'text-[#e5dbc6] hover:text-[#fbf5e8] hover:bg-white/10'
                   }`}
                 >
                   {WEATHER_LABELS[w].name}

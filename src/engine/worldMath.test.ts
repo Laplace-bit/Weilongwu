@@ -11,6 +11,11 @@ import {
   sampleInnerWeilongCurve,
   sampleOuterWeilongCurve,
 } from './worldMath';
+import {
+  sampleClosedLoopPath,
+  samplePondSwimPath,
+  sampleFlockOrbit,
+} from './livingPaths';
 import { ROOM_NODES, INTERACTABLES } from '../data/weilongData';
 
 test('architectural floor elevation rises monotonically along South-to-North ritual axis', () => {
@@ -99,4 +104,31 @@ test('Jiaobei divination and mastery progress work accurately', () => {
   assert.equal(calculateMasteryProgress(0, 24, 0, 28, 0, 6), 0);
   assert.equal(calculateMasteryProgress(12, 24, 14, 28, 3, 6), 50);
   assert.equal(calculateMasteryProgress(30, 24, 30, 28, 10, 6), 100);
+});
+
+test('living-world closed loops, pond waterfowl bounds, and soaring bird orbits remain valid', () => {
+  const square = [
+    { x: 0, z: 0 },
+    { x: 10, z: 0 },
+    { x: 10, z: 10 },
+    { x: 0, z: 10 },
+  ];
+  const s0 = sampleClosedLoopPath(square, 0);
+  const sMid = sampleClosedLoopPath(square, 0.125);
+  const sWrap = sampleClosedLoopPath(square, 1.0);
+  assert.ok(Math.abs(s0.x) < 1e-6 && Math.abs(s0.z) < 1e-6);
+  assert.ok(Math.abs(sMid.x - 5) < 1e-5 && Math.abs(sMid.z) < 1e-5);
+  assert.ok(Math.abs(sWrap.x - s0.x) < 1e-5 && Math.abs(sWrap.z - s0.z) < 1e-5);
+
+  // Pond waterfowl must always remain strictly inside the semicircular pond basin
+  for (let i = 0; i < 32; i++) {
+    const angle = (i / 32) * Math.PI * 2;
+    const p = samplePondSwimPath(3.5, 43.2, 7.5, 3.8, angle, 1);
+    assert.ok(p.z >= 39.79, `Waterfowl z=${p.z} should stay south of jetty`);
+    const normR = Math.hypot(p.x / 14.5, (p.z - 38.6) / 9.3);
+    assert.ok(normR <= 1.01, `Waterfowl (${p.x}, ${p.z}) exceeded pond margin: ${normR}`);
+  }
+
+  const crane = sampleFlockOrbit(0, 6, 36, 30, 24, 0.25);
+  assert.ok(crane.y > 20 && Number.isFinite(crane.yaw) && crane.bank > 0);
 });
