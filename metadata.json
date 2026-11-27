@@ -1,0 +1,6 @@
+{
+  "name": "围龙古韵 · 客家围龙屋 3D 沉浸游览",
+  "description": "全开放、全可进入、万物可触的梅州客家“三堂两横一围龙”3D建筑与民俗交互探索体验。",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
