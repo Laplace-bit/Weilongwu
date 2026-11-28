@@ -1,0 +1,8 @@
+{
+  "name": "Inside a Songbird's Voice — Comparative Physical Syrinx Model",
+  "description": "Interactive 2D anatomical cross-section and real-time physical-modeling WebAudio bio-acoustic instrument of an oscine songbird's bipartite syrinx.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}

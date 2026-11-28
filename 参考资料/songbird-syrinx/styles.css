@@ -1,0 +1,735 @@
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html,
+body {
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  background-color: #EDE4D0;
+  touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-touch-callout: none;
+  overscroll-behavior: none;
+  font-family: "Iowan Old Style", "Palatino Linotype", "Book Antiqua", Palatino, Georgia, serif;
+  font-synthesis: style weight;
+  -webkit-font-smoothing: antialiased;
+}
+
+#syrinx-canvas {
+  display: block;
+  width: 100vw;
+  height: 100vh;
+  touch-action: none;
+}
+
+/* ============================================================================
+   SynthBird (Automaton syrinx-VII) — Archival Copperplate Lab-Plate Sidebar
+   ============================================================================ */
+.synth-sidebar {
+  position: fixed;
+  top: 20px;
+  right: 18px;
+  bottom: auto;
+  max-height: calc(100vh - 132px);
+  width: clamp(256px, 20.5vw, 286px);
+  z-index: 20;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  background: linear-gradient(180deg, rgba(252, 248, 239, 0.94) 0%, rgba(245, 237, 221, 0.94) 100%);
+  border: 1px solid rgba(102, 82, 60, 0.50);
+  box-shadow: 0 3px 12px rgba(54, 38, 22, 0.06);
+  color: #2A2018;
+  opacity: 1;
+  transform: translateX(0);
+  transition: opacity 0.30s cubic-bezier(0.22, 1, 0.36, 1), transform 0.30s cubic-bezier(0.22, 1, 0.36, 1);
+  touch-action: pan-y;
+}
+
+.synth-sidebar.is-first-reveal {
+  transition:
+    opacity 1.60s cubic-bezier(0.37, 0, 0.22, 1) 0.12s,
+    transform 1.60s cubic-bezier(0.25, 0.1, 0.22, 1) 0.12s;
+}
+
+.synth-sidebar.is-hidden {
+  opacity: 0;
+  pointer-events: none;
+  transform: translateX(18px);
+  transition: opacity 0.24s ease, transform 0.24s ease;
+}
+
+.synth-plate-inner {
+  position: relative;
+  flex: 0 1 auto;
+  min-height: 0;
+  margin: 2.5px;
+  padding: 8px 10px 9px;
+  border: 1px solid rgba(102, 82, 60, 0.22);
+  display: flex;
+  flex-direction: column;
+  gap: 6.5px;
+  overflow-y: auto;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(102, 82, 60, 0.32) transparent;
+}
+
+.synth-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding-bottom: 6px;
+  border-bottom: 1px solid rgba(104, 84, 62, 0.26);
+}
+
+.synth-title-block {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.synth-plate-tag {
+  font-family: ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
+  font-size: 9px;
+  letter-spacing: 0.11em;
+  color: #5E503F;
+}
+
+.synth-title {
+  font-size: 14.5px;
+  font-weight: 600;
+  color: #241B14;
+  letter-spacing: 0.01em;
+  line-height: 1.15;
+}
+
+.synth-voice-readout {
+  display: flex;
+  gap: 4px;
+}
+
+.sv-pill {
+  font-family: ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
+  font-size: 10px;
+  font-weight: 600;
+  padding: 2px 5px;
+  border: 1px solid rgba(104, 84, 62, 0.30);
+  background: rgba(250, 245, 234, 0.85);
+  color: #6B5B4A;
+  min-width: 42px;
+  text-align: center;
+}
+
+.sv-pill.sv-left.active {
+  background: rgba(28, 104, 134, 0.14);
+  border-color: rgba(28, 104, 134, 0.65);
+  color: #16546D;
+}
+
+.sv-pill.sv-right.active {
+  background: rgba(184, 62, 38, 0.14);
+  border-color: rgba(184, 62, 38, 0.65);
+  color: #962E19;
+}
+
+.synth-section {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.synth-sec-label {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  font-family: ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
+  font-size: 9px;
+  letter-spacing: 0.09em;
+  color: #645340;
+}
+
+.synth-hint-inline {
+  font-style: italic;
+  font-family: "Iowan Old Style", Palatino, Georgia, serif;
+  letter-spacing: 0.01em;
+  font-size: 10.5px;
+  color: #6E5C48;
+}
+
+/* 6 Instant Patch Presets */
+.synth-preset-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 4px;
+}
+
+.synth-preset-btn {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 5.5px;
+  background: rgba(251, 246, 235, 0.66);
+  border: 1px solid rgba(108, 88, 66, 0.30);
+  color: #2A2018;
+  font-family: inherit;
+  font-size: 10.8px;
+  font-weight: 600;
+  white-space: nowrap;
+  cursor: pointer;
+  text-align: left;
+  transition: background 0.12s ease, border-color 0.12s ease;
+}
+
+.synth-preset-btn:hover {
+  background: rgba(244, 236, 218, 0.90);
+  border-color: rgba(98, 78, 56, 0.56);
+}
+
+.synth-preset-btn.active {
+  background: linear-gradient(90deg, rgba(46, 107, 94, 0.15), rgba(250, 244, 231, 0.92));
+  border-color: #2E6B5E;
+  color: #1B473E;
+}
+
+.sp-num {
+  font-family: ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
+  font-size: 9.5px;
+  color: #7A6752;
+  opacity: 0.85;
+}
+
+/* Voice Mode + Hold + Octave Routing Strip */
+.synth-routing-bar {
+  flex-direction: row;
+  align-items: center;
+  justify-content: space-between;
+  gap: 4px;
+  padding: 5px 0;
+  border-top: 1px solid rgba(104, 84, 62, 0.18);
+  border-bottom: 1px solid rgba(104, 84, 62, 0.18);
+}
+
+.synth-mode-group {
+  display: flex;
+  border: 1px solid rgba(104, 84, 62, 0.38);
+  background: rgba(248, 242, 229, 0.72);
+}
+
+.synth-seg-btn {
+  border: none;
+  border-right: 1px solid rgba(104, 84, 62, 0.26);
+  background: transparent;
+  padding: 3.5px 5px;
+  font-family: ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
+  font-size: 9.5px;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  white-space: nowrap;
+  color: #5C4B3A;
+  cursor: pointer;
+}
+
+.synth-seg-btn:last-child {
+  border-right: none;
+}
+
+.synth-seg-btn.active {
+  background: #3B5964;
+  color: #FCF8EE;
+}
+
+.synth-hold-btn {
+  padding: 3.5px 6px;
+  border: 1px solid rgba(104, 84, 62, 0.40);
+  background: rgba(250, 245, 234, 0.80);
+  font-family: ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
+  font-size: 9.5px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  white-space: nowrap;
+  color: #4A3B2C;
+  cursor: pointer;
+}
+
+.synth-hold-btn.active {
+  background: #B84228;
+  border-color: #8C2C16;
+  color: #FFFDF8;
+}
+
+.synth-oct-box {
+  display: flex;
+  align-items: center;
+  flex-shrink: 0;
+  border: 1px solid rgba(104, 84, 62, 0.36);
+  background: rgba(250, 245, 234, 0.78);
+}
+
+.synth-oct-btn {
+  border: none;
+  background: transparent;
+  width: 18px;
+  height: 21px;
+  font-size: 12px;
+  font-weight: 700;
+  color: #3E3022;
+  cursor: pointer;
+}
+
+.synth-oct-btn:hover {
+  background: rgba(104, 84, 62, 0.14);
+}
+
+.synth-oct-val {
+  font-family: ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
+  font-size: 9.5px;
+  font-weight: 600;
+  padding: 0 3px;
+  white-space: nowrap;
+  color: #2A2018;
+}
+
+/* 8 Macro Controls Rack */
+.synth-knob-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px 7px;
+}
+
+.synth-ctrl {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 3px 5px 4px;
+  background: rgba(249, 243, 230, 0.62);
+  border: 1px solid rgba(108, 88, 66, 0.20);
+}
+
+.sc-top {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 3px;
+  font-size: 10.4px;
+  font-weight: 600;
+  white-space: nowrap;
+  color: #2E231A;
+}
+
+.sc-top output {
+  font-family: ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
+  font-size: 9.5px;
+  font-weight: 500;
+  color: #6B5640;
+}
+
+.synth-ctrl input[type="range"] {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 100%;
+  height: 12px;
+  background: transparent;
+  cursor: ew-resize;
+}
+
+.synth-ctrl input[type="range"]::-webkit-slider-runnable-track {
+  height: 3px;
+  background: linear-gradient(90deg, rgba(72, 108, 118, 0.45), rgba(168, 76, 46, 0.52));
+  border-radius: 1px;
+}
+
+.synth-ctrl input[type="range"]::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 9px;
+  height: 13px;
+  margin-top: -5px;
+  background: #FAF3E3;
+  border: 1.2px solid #4A3928;
+  box-shadow: 0 1px 2px rgba(42, 32, 24, 0.25);
+}
+
+.synth-ctrl input[type="range"]::-moz-range-track {
+  height: 3px;
+  background: rgba(98, 78, 56, 0.40);
+}
+
+.synth-ctrl input[type="range"]::-moz-range-thumb {
+  width: 9px;
+  height: 13px;
+  border-radius: 0;
+  background: #FAF3E3;
+  border: 1.2px solid #4A3928;
+}
+
+.synth-lfo-strip {
+  display: flex;
+  align-items: stretch;
+  gap: 6px;
+  margin-top: 1px;
+}
+
+.synth-lfo-rate {
+  flex: 1 1 auto;
+}
+
+.synth-lfo-targets {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 2px;
+  width: 96px;
+}
+
+.synth-tgt-btn {
+  border: 1px solid rgba(104, 84, 62, 0.32);
+  background: rgba(250, 245, 234, 0.74);
+  font-family: ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
+  font-size: 9px;
+  font-weight: 600;
+  color: #5A4938;
+  cursor: pointer;
+  padding: 1px 3px;
+}
+
+.synth-tgt-btn.active {
+  background: #486670;
+  border-color: #2F4750;
+  color: #FCF8EE;
+}
+
+/* Interactive 18-Key Ableton QWERTY Diagram */
+.synth-kbd-section {
+  margin-top: 1px;
+  padding-top: 7px;
+  border-top: 1px solid rgba(104, 84, 62, 0.24);
+}
+
+.synth-piano {
+  position: relative;
+  width: 100%;
+  height: 62px;
+  background: rgba(68, 54, 40, 0.10);
+  border: 1px solid rgba(102, 82, 60, 0.36);
+}
+
+.synth-key {
+  position: absolute;
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+  align-items: center;
+  padding-bottom: 3px;
+  cursor: pointer;
+  font-family: ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
+  transition: transform 0.05s ease, background 0.06s ease;
+}
+
+.synth-key.is-white {
+  top: 0;
+  bottom: 0;
+  left: calc(var(--slot) * (100% / 11));
+  width: calc(100% / 11);
+  background: linear-gradient(180deg, #FCF8EE 0%, #EFE5CF 100%);
+  border: none;
+  border-right: 1px solid rgba(102, 82, 60, 0.34);
+  color: #3A2C20;
+  z-index: 1;
+}
+
+.synth-key.is-white:last-of-type {
+  border-right: none;
+}
+
+.synth-key.is-black {
+  top: 0;
+  height: 60%;
+  left: calc(var(--slot) * (100% / 11));
+  width: calc(0.70 * (100% / 11));
+  background: linear-gradient(180deg, #373E42 0%, #1F2427 100%);
+  border: 1px solid #181B1D;
+  border-top: none;
+  color: #EAE2D0;
+  z-index: 2;
+  padding-bottom: 2px;
+}
+
+.sk-char {
+  font-size: 9.5px;
+  font-weight: 700;
+  line-height: 1.05;
+}
+
+.sk-note {
+  font-size: 7.5px;
+  opacity: 0.68;
+  line-height: 1;
+}
+
+.synth-key.is-black .sk-note {
+  display: none;
+}
+
+/* Prussian Blue = Left Syrinx Voice, Venetian Vermilion = Right Syrinx Voice */
+.synth-key.voice-l:not(.voice-r) {
+  background: #1C6886 !important;
+  color: #FFFDF8 !important;
+}
+
+.synth-key.voice-r:not(.voice-l) {
+  background: #B83E26 !important;
+  color: #FFFDF8 !important;
+}
+
+.synth-key.voice-l.voice-r {
+  background: linear-gradient(135deg, #1C6886 0%, #1C6886 49%, #B83E26 51%, #B83E26 100%) !important;
+  color: #FFFDF8 !important;
+}
+
+.synth-legend {
+  font-size: 10.2px;
+  line-height: 1.35;
+  color: #4E3E2E;
+  text-align: center;
+  padding-top: 1px;
+  display: flex;
+  flex-direction: column;
+  gap: 1.5px;
+}
+
+.synth-legend b {
+  color: #241A12;
+  font-weight: 600;
+}
+
+.synth-mobile-bar {
+  display: none;
+}
+
+.synth-collapsible-rack {
+  display: contents;
+}
+
+@media (min-width: 680px) and (min-aspect-ratio: 21/20) and (max-width: 900px) {
+  .synth-sidebar {
+    width: 242px;
+    right: 10px;
+    top: 12px;
+    bottom: auto;
+    max-height: calc(100vh - 110px);
+  }
+}
+
+/* 9:16 Portrait, 1:1 Square & Mobile Safe-Margin Layout */
+@media (max-aspect-ratio: 21/20), (max-width: 679px) {
+  .synth-sidebar {
+    top: auto;
+    bottom: var(--synth-bottom, 128px);
+    left: var(--safe-side, 5.6vw);
+    right: var(--safe-side, 5.6vw);
+    width: auto;
+    max-height: calc(100vh - var(--synth-bottom, 128px) - var(--synth-top-clear, 98px));
+    border-width: calc(1px * var(--u, 1));
+    transform: translateY(0);
+  }
+
+  .synth-sidebar.is-hidden {
+    opacity: 0;
+    pointer-events: none;
+    transform: translateY(calc(10px * var(--u, 1)));
+  }
+
+  .synth-plate-inner {
+    margin: calc(2px * var(--u, 1));
+    padding: calc(4.5px * var(--u, 1)) calc(6px * var(--u, 1));
+    gap: calc(4.5px * var(--u, 1));
+    border-width: calc(0.8px * var(--u, 1));
+  }
+
+  .synth-mobile-bar {
+    display: flex;
+    order: 1;
+    align-items: center;
+    justify-content: space-between;
+    gap: calc(5px * var(--u, 1));
+  }
+
+  .synth-mob-preset {
+    display: flex;
+    align-items: stretch;
+    flex: 1 1 auto;
+    min-width: 0;
+    border: calc(1px * var(--u, 1)) solid rgba(104, 84, 62, 0.38);
+    background: rgba(251, 246, 235, 0.84);
+  }
+
+  .synth-mob-arrow {
+    border: none;
+    background: transparent;
+    width: calc(24px * var(--u, 1));
+    font-size: calc(13.5px * var(--u, 1));
+    font-weight: 700;
+    line-height: 1;
+    color: #3E3022;
+    cursor: pointer;
+    padding: 0;
+  }
+
+  .synth-mob-arrow:hover {
+    background: rgba(104, 84, 62, 0.12);
+  }
+
+  .synth-mob-pname {
+    flex: 1 1 auto;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    border: none;
+    border-left: calc(0.8px * var(--u, 1)) solid rgba(104, 84, 62, 0.24);
+    border-right: calc(0.8px * var(--u, 1)) solid rgba(104, 84, 62, 0.24);
+    background: linear-gradient(90deg, rgba(46, 107, 94, 0.14), rgba(250, 244, 231, 0.92));
+    padding: calc(3.5px * var(--u, 1)) calc(6px * var(--u, 1));
+    font-family: inherit;
+    font-size: calc(10.6px * var(--u, 1));
+    font-weight: 600;
+    color: #1B473E;
+    text-align: center;
+    cursor: pointer;
+  }
+
+  .synth-mob-oct .synth-oct-btn {
+    width: calc(19px * var(--u, 1));
+    height: calc(22px * var(--u, 1));
+    font-size: calc(12px * var(--u, 1));
+  }
+
+  .synth-mob-oct .synth-oct-val {
+    font-size: calc(9.2px * var(--u, 1));
+    padding: 0 calc(3.5px * var(--u, 1));
+  }
+
+  .synth-drawer-btn {
+    flex-shrink: 0;
+    padding: calc(3.8px * var(--u, 1)) calc(7px * var(--u, 1));
+    border: calc(1px * var(--u, 1)) solid rgba(104, 84, 62, 0.40);
+    background: rgba(250, 245, 234, 0.86);
+    font-family: ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
+    font-size: calc(9.4px * var(--u, 1));
+    font-weight: 600;
+    color: #3E3022;
+    white-space: nowrap;
+    cursor: pointer;
+  }
+
+  .synth-drawer-btn.active {
+    background: #3B5964;
+    border-color: #2A414A;
+    color: #FCF8EE;
+  }
+
+  .synth-kbd-section {
+    order: 3;
+    margin-top: 0;
+    padding-top: 0;
+    border-top: none;
+  }
+
+  .synth-piano {
+    height: calc(42px * var(--u, 1));
+    border-width: calc(1px * var(--u, 1));
+  }
+
+  .synth-key {
+    padding-bottom: calc(2px * var(--u, 1));
+  }
+
+  .sk-char {
+    font-size: calc(8.4px * var(--u, 1));
+  }
+
+  .sk-note {
+    font-size: calc(6.8px * var(--u, 1));
+  }
+
+  .synth-legend {
+    display: none;
+  }
+
+  .synth-collapsible-rack {
+    display: none;
+    order: 2;
+  }
+
+  .synth-sidebar.is-expanded {
+    background: linear-gradient(180deg, rgba(252, 248, 239, 0.99) 0%, rgba(245, 237, 221, 0.99) 100%);
+    box-shadow: 0 -6px 20px rgba(42, 30, 18, 0.14);
+  }
+
+  .synth-sidebar.is-expanded .synth-collapsible-rack {
+    display: flex;
+    flex-direction: column;
+    gap: calc(4.5px * var(--u, 1));
+    padding: calc(4.5px * var(--u, 1)) 0;
+    border-top: calc(1px * var(--u, 1)) solid rgba(104, 84, 62, 0.22);
+    border-bottom: calc(1px * var(--u, 1)) solid rgba(104, 84, 62, 0.22);
+  }
+
+  .synth-desktop-presets,
+  .synth-routing-bar .synth-oct-box {
+    display: none;
+  }
+
+  .synth-routing-bar {
+    padding: calc(2px * var(--u, 1)) 0 calc(4px * var(--u, 1));
+    border-top: none;
+    border-bottom: calc(1px * var(--u, 1)) solid rgba(104, 84, 62, 0.18);
+  }
+
+  .synth-seg-btn {
+    padding: calc(3.5px * var(--u, 1)) calc(6px * var(--u, 1));
+    font-size: calc(9.5px * var(--u, 1));
+  }
+
+  .synth-hold-btn {
+    padding: calc(3.5px * var(--u, 1)) calc(8px * var(--u, 1));
+    font-size: calc(9.5px * var(--u, 1));
+  }
+
+  .synth-knob-grid {
+    gap: calc(5px * var(--u, 1)) calc(6px * var(--u, 1));
+  }
+
+  .synth-ctrl {
+    padding: calc(3px * var(--u, 1)) calc(5px * var(--u, 1));
+    gap: calc(1.5px * var(--u, 1));
+  }
+
+  .sc-top {
+    font-size: calc(10px * var(--u, 1));
+  }
+
+  .sc-top output {
+    font-size: calc(9px * var(--u, 1));
+  }
+
+  .synth-ctrl input[type="range"] {
+    height: calc(12px * var(--u, 1));
+  }
+
+  .synth-lfo-targets {
+    width: calc(96px * var(--u, 1));
+    gap: calc(2px * var(--u, 1));
+  }
+
+  .synth-tgt-btn {
+    font-size: calc(8.8px * var(--u, 1));
+    padding: calc(1.5px * var(--u, 1)) calc(3px * var(--u, 1));
+  }
+}
