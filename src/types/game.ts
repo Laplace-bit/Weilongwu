@@ -1,6 +1,6 @@
 export type GameMode = 'title' | 'playing' | 'paused';
 
-export type WeatherMode = 'sunny' | 'rain' | 'lantern';
+export type WeatherMode = 'sunny' | 'rain';
 
 export type InteractionTier = 1 | 2 | 3 | 4 | 5;
 
@@ -85,10 +85,14 @@ export interface HudSnapshot {
   inspectedArtifacts: string[];
   fiveElementsLit: number;
   holdingUmbrella: boolean;
-  xrayActive: boolean;
-  taijiActive: boolean;
   doumenOpen: boolean;
   gunSlitActive: boolean;
   weather: WeatherMode;
   cameraView: CameraViewMode;
+  timeOfDay: number;
+  timePlaying: boolean;
+  timeSpeed: number;
+  timePeriodLabel: string;
+  formattedTime: string;
+  volume: number;
 }

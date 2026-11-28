@@ -71,7 +71,6 @@ export interface MaterialLibrary {
   limeWallInterior: THREE.MeshStandardMaterial;
   limeRidge: THREE.MeshStandardMaterial;
   rammedEarth: THREE.MeshStandardMaterial;
-  rammedEarthXray: THREE.MeshStandardMaterial;
   roofTile: THREE.MeshPhysicalMaterial;
   roofTileDark: THREE.MeshPhysicalMaterial;
   graniteSlab: THREE.MeshPhysicalMaterial;
@@ -92,6 +91,10 @@ export interface MaterialLibrary {
   foliageDeep: THREE.MeshStandardMaterial;
   foliageBright: THREE.MeshStandardMaterial;
   foliageMid: THREE.MeshStandardMaterial;
+  foliageSprigDeep: THREE.MeshStandardMaterial;
+  foliageSprigMid: THREE.MeshStandardMaterial;
+  foliageSprigBright: THREE.MeshStandardMaterial;
+  blossomSprig: THREE.MeshStandardMaterial;
   grassDecal: THREE.MeshStandardMaterial;
   mossDecal: THREE.MeshStandardMaterial;
   forestGround: THREE.MeshStandardMaterial;
@@ -1613,6 +1616,219 @@ function makeMossDecalTexture(aniso: number): THREE.CanvasTexture {
   return tex;
 }
 
+/**
+ * High-detail alpha-cutout botanical leaf sprig texture (香樟/荔枝/茶树羽状枝叶)
+ * with branching dark-bark twigs, pointed veined leaves, and airy transparency gaps
+ * so canopies look layered, dappled, and natural instead of lumpy solid blobs.
+ */
+function makeLeafSprigTexture(
+  aniso: number,
+  palette: [string, string, string, string],
+  seed: number
+): THREE.CanvasTexture {
+  const S = 512;
+  const rand = mulberry32(seed);
+  const [c, ctx] = makeCanvas(S, S);
+  ctx.clearRect(0, 0, S, S);
+
+  const drawPointedLeaf = (
+    x: number,
+    y: number,
+    len: number,
+    wid: number,
+    ang: number,
+    fillColor: string,
+    highlightColor: string
+  ) => {
+    ctx.save();
+    ctx.translate(x, y);
+    ctx.rotate(ang);
+    ctx.beginPath();
+    ctx.moveTo(0, 0);
+    ctx.bezierCurveTo(len * 0.25, -wid, len * 0.72, -wid * 0.85, len, 0);
+    ctx.bezierCurveTo(len * 0.72, wid * 0.85, len * 0.25, wid, 0, 0);
+    ctx.closePath();
+
+    const grad = ctx.createLinearGradient(0, -wid * 0.5, len, wid * 0.5);
+    grad.addColorStop(0, fillColor);
+    grad.addColorStop(0.65, highlightColor);
+    grad.addColorStop(1, fillColor);
+    ctx.fillStyle = grad;
+    ctx.fill();
+
+    // Subtle sunlit midrib & lateral veins
+    ctx.strokeStyle = 'rgba(235, 248, 195, 0.34)';
+    ctx.lineWidth = Math.max(1.2, wid * 0.08);
+    ctx.beginPath();
+    ctx.moveTo(len * 0.08, 0);
+    ctx.lineTo(len * 0.86, 0);
+    ctx.stroke();
+    ctx.restore();
+  };
+
+  // Delicate forked twigs radiating from lower-center
+  const branches: Array<{ x0: number; y0: number; cx: number; cy: number; x1: number; y1: number; w: number }> = [
+    { x0: 256, y0: 472, cx: 252, cy: 310, x1: 258, y1: 86, w: 6.5 },
+    { x0: 254, y0: 365, cx: 185, cy: 312, x1: 106, y1: 224, w: 4.8 },
+    { x0: 256, y0: 350, cx: 332, cy: 295, x1: 408, y1: 215, w: 4.8 },
+    { x0: 255, y0: 252, cx: 196, cy: 198, x1: 128, y1: 132, w: 3.8 },
+    { x0: 257, y0: 242, cx: 320, cy: 185, x1: 388, y1: 122, w: 3.8 },
+    { x0: 256, y0: 405, cx: 192, cy: 392, x1: 122, y1: 344, w: 3.6 },
+    { x0: 256, y0: 400, cx: 324, cy: 386, x1: 396, y1: 338, w: 3.6 },
+  ];
+
+  ctx.lineCap = 'round';
+  for (const b of branches) {
+    ctx.strokeStyle = '#5c4632';
+    ctx.lineWidth = b.w;
+    ctx.beginPath();
+    ctx.moveTo(b.x0, b.y0);
+    ctx.quadraticCurveTo(b.cx, b.cy, b.x1, b.y1);
+    ctx.stroke();
+
+    // Populate paired & alternating leaves along each twig
+    const steps = 6;
+    for (let s = 1; s <= steps; s++) {
+      const t = s / steps;
+      const omt = 1 - t;
+      const px = omt * omt * b.x0 + 2 * omt * t * b.cx + t * t * b.x1;
+      const py = omt * omt * b.y0 + 2 * omt * t * b.cy + t * t * b.y1;
+      const tx = 2 * omt * (b.cx - b.x0) + 2 * t * (b.x1 - b.cx);
+      const ty = 2 * omt * (b.cy - b.y0) + 2 * t * (b.y1 - b.cy);
+      const baseAng = Math.atan2(ty, tx);
+
+      for (const side of [-1, 1]) {
+        const spread = side * (0.45 + rand() * 0.42) + (rand() - 0.5) * 0.24;
+        const len = (54 + rand() * 34) * (1.06 - t * 0.24);
+        const wid = len * (0.28 + rand() * 0.08);
+        const c1 = palette[Math.floor(rand() * palette.length)];
+        const c2 = palette[Math.min(palette.length - 1, Math.floor(rand() * palette.length))];
+        drawPointedLeaf(px, py, len, wid, baseAng + spread, c1, c2);
+      }
+      if (s === steps) {
+        const len = 50 + rand() * 22;
+        drawPointedLeaf(px, py, len, len * 0.31, baseAng + (rand() - 0.5) * 0.2, palette[2], palette[3]);
+      }
+    }
+  }
+
+  // Extra scattered outer rosette leaves for natural feathery depth without filling gaps
+  for (let i = 0; i < 18; i++) {
+    const ang = rand() * Math.PI * 2;
+    const rad = 60 + rand() * 140;
+    const px = 256 + Math.cos(ang) * rad;
+    const py = 248 + Math.sin(ang) * rad * 0.9;
+    const len = 46 + rand() * 30;
+    const c1 = palette[Math.floor(rand() * palette.length)];
+    const c2 = palette[Math.floor(rand() * palette.length)];
+    drawPointedLeaf(px, py, len, len * 0.3, ang + (rand() - 0.5) * 0.9, c1, c2);
+  }
+
+  const tex = createTexture(c, aniso, true, 1, 1);
+  tex.wrapS = THREE.ClampToEdgeWrapping;
+  tex.wrapT = THREE.ClampToEdgeWrapping;
+  return tex;
+}
+
+/**
+ * Alpha-cutout flowering peach blossom sprig texture (岭南桃花枝) with 5-petal blossoms,
+ * pink buds, golden stamens, and delicate sage leaf shoots on dark twigs.
+ */
+function makeBlossomSprigTexture(aniso: number): THREE.CanvasTexture {
+  const S = 512;
+  const rand = mulberry32(8421);
+  const [c, ctx] = makeCanvas(S, S);
+  ctx.clearRect(0, 0, S, S);
+
+  const twigs = [
+    { x0: 256, y0: 470, cx: 248, cy: 300, x1: 266, y1: 88, w: 6 },
+    { x0: 252, y0: 365, cx: 175, cy: 305, x1: 98, y1: 210, w: 4.5 },
+    { x0: 256, y0: 345, cx: 335, cy: 280, x1: 412, y1: 196, w: 4.5 },
+    { x0: 258, y0: 245, cx: 192, cy: 182, x1: 132, y1: 112, w: 3.6 },
+    { x0: 260, y0: 235, cx: 330, cy: 172, x1: 392, y1: 112, w: 3.6 },
+  ];
+
+  ctx.lineCap = 'round';
+  for (const b of twigs) {
+    ctx.strokeStyle = '#5c3f33';
+    ctx.lineWidth = b.w;
+    ctx.beginPath();
+    ctx.moveTo(b.x0, b.y0);
+    ctx.quadraticCurveTo(b.cx, b.cy, b.x1, b.y1);
+    ctx.stroke();
+  }
+
+  // Fresh spring sage leaves tucked behind blossoms
+  for (let i = 0; i < 24; i++) {
+    const b = twigs[i % twigs.length];
+    const t = 0.2 + rand() * 0.78;
+    const omt = 1 - t;
+    const px = omt * omt * b.x0 + 2 * omt * t * b.cx + t * t * b.x1 + (rand() - 0.5) * 32;
+    const py = omt * omt * b.y0 + 2 * omt * t * b.cy + t * t * b.y1 + (rand() - 0.5) * 32;
+    const ang = rand() * Math.PI * 2;
+    const len = 36 + rand() * 24;
+    const wid = len * 0.26;
+    ctx.save();
+    ctx.translate(px, py);
+    ctx.rotate(ang);
+    ctx.fillStyle = rand() > 0.5 ? '#6ba364' : '#8ec272';
+    ctx.beginPath();
+    ctx.moveTo(0, 0);
+    ctx.bezierCurveTo(len * 0.3, -wid, len * 0.7, -wid * 0.8, len, 0);
+    ctx.bezierCurveTo(len * 0.7, wid * 0.8, len * 0.3, wid, 0, 0);
+    ctx.fill();
+    ctx.restore();
+  }
+
+  // 5-petal peach blossoms clustered organically along twigs
+  const drawFlower = (cx: number, cy: number, rad: number) => {
+    const rot0 = rand() * Math.PI * 2;
+    const petalColors = ['#fad8d4', '#f6b8bc', '#f29ea6', '#fce7df'];
+    const pCol = petalColors[Math.floor(rand() * petalColors.length)];
+    for (let p = 0; p < 5; p++) {
+      const a = rot0 + (p / 5) * Math.PI * 2;
+      ctx.save();
+      ctx.translate(cx, cy);
+      ctx.rotate(a);
+      const grad = ctx.createRadialGradient(rad * 0.2, 0, 1, rad * 0.65, 0, rad * 0.85);
+      grad.addColorStop(0, '#e36f82');
+      grad.addColorStop(0.45, pCol);
+      grad.addColorStop(1, '#fff2ee');
+      ctx.fillStyle = grad;
+      ctx.beginPath();
+      ctx.ellipse(rad * 0.56, 0, rad * 0.54, rad * 0.38, 0, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.restore();
+    }
+    // Warm golden stamen heart
+    ctx.fillStyle = '#e85d76';
+    ctx.beginPath();
+    ctx.arc(cx, cy, rad * 0.2, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = '#f8d868';
+    for (let s = 0; s < 5; s++) {
+      const sa = rot0 + s * 1.25;
+      ctx.beginPath();
+      ctx.arc(cx + Math.cos(sa) * rad * 0.16, cy + Math.sin(sa) * rad * 0.16, 2.2, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  };
+
+  for (let i = 0; i < 42; i++) {
+    const b = twigs[i % twigs.length];
+    const t = 0.18 + rand() * 0.82;
+    const omt = 1 - t;
+    const px = omt * omt * b.x0 + 2 * omt * t * b.cx + t * t * b.x1 + (rand() - 0.5) * 66;
+    const py = omt * omt * b.y0 + 2 * omt * t * b.cy + t * t * b.y1 + (rand() - 0.5) * 66;
+    drawFlower(px, py, 16 + rand() * 16);
+  }
+
+  const tex = createTexture(c, aniso, true, 1, 1);
+  tex.wrapS = THREE.ClampToEdgeWrapping;
+  tex.wrapT = THREE.ClampToEdgeWrapping;
+  return tex;
+}
+
 export function createMaterialLibrary(renderer: THREE.WebGLRenderer): MaterialLibrary {
   const aniso = Math.min(8, renderer.capabilities.getMaxAnisotropy());
   const textures: THREE.Texture[] = [];
@@ -1630,6 +1846,10 @@ export function createMaterialLibrary(renderer: THREE.WebGLRenderer): MaterialLi
   const coupletTex = makeCoupletMap(aniso);
   const grain = makeGrainMap(aniso);
   const foliage = makeFoliageMaps(aniso);
+  const leafSprigDeepTex = makeLeafSprigTexture(aniso, ['#265c42', '#357452', '#448a5b', '#5da163'], 7101);
+  const leafSprigMidTex = makeLeafSprigTexture(aniso, ['#3b7c54', '#509658', '#68ad5e', '#86c468'], 7202);
+  const leafSprigBrightTex = makeLeafSprigTexture(aniso, ['#5c9e58', '#79b85e', '#9acc68', '#b8de74'], 7303);
+  const blossomSprigTex = makeBlossomSprigTexture(aniso);
   const grassDecalTex = makeGrassDecalTexture(aniso);
   const mossDecalTex = makeMossDecalTexture(aniso);
   const skySunnyTex = makeSkyDomeTexture('sunny', aniso);
@@ -1667,6 +1887,10 @@ export function createMaterialLibrary(renderer: THREE.WebGLRenderer): MaterialLi
     grain,
     foliage.map,
     foliage.normal,
+    leafSprigDeepTex,
+    leafSprigMidTex,
+    leafSprigBrightTex,
+    blossomSprigTex,
     grassDecalTex,
     mossDecalTex,
     skySunnyTex,
@@ -1711,16 +1935,6 @@ export function createMaterialLibrary(renderer: THREE.WebGLRenderer): MaterialLi
     metalness: 0.0,
   });
 
-  const rammedEarthXray = new THREE.MeshStandardMaterial({
-    color: 0xd9a870,
-    map: earth.map,
-    normalMap: earth.normal,
-    roughness: 0.84,
-    metalness: 0.02,
-    transparent: true,
-    opacity: 1.0,
-  });
-
   // Painterly cerulean-indigo Qing barrel tiles (MeshPhysicalMaterial for rain water-film clearcoat & kiln glaze!)
   const roofTile = new THREE.MeshPhysicalMaterial({
     color: 0x7aa4c4,
@@ -1734,6 +1948,7 @@ export function createMaterialLibrary(renderer: THREE.WebGLRenderer): MaterialLi
     clearcoat: 0.08,
     clearcoatRoughness: 0.45,
     side: THREE.DoubleSide,
+    shadowSide: THREE.DoubleSide,
   });
 
   const roofTileDark = new THREE.MeshPhysicalMaterial({
@@ -1745,6 +1960,7 @@ export function createMaterialLibrary(renderer: THREE.WebGLRenderer): MaterialLi
     ior: 1.52,
     clearcoat: 0.1,
     clearcoatRoughness: 0.42,
+    shadowSide: THREE.DoubleSide,
   });
 
   const graniteSlab = new THREE.MeshPhysicalMaterial({
@@ -1942,6 +2158,43 @@ export function createMaterialLibrary(renderer: THREE.WebGLRenderer): MaterialLi
     metalness: 0.0,
   });
 
+  // Alpha-cutout layered botanical leaf-sprig & blossom-sprig canopy materials
+  const foliageSprigDeep = new THREE.MeshStandardMaterial({
+    color: 0xd4edd6,
+    map: leafSprigDeepTex,
+    alphaTest: 0.4,
+    side: THREE.DoubleSide,
+    roughness: 0.74,
+    metalness: 0.0,
+  });
+
+  const foliageSprigMid = new THREE.MeshStandardMaterial({
+    color: 0xe6f4d8,
+    map: leafSprigMidTex,
+    alphaTest: 0.4,
+    side: THREE.DoubleSide,
+    roughness: 0.7,
+    metalness: 0.0,
+  });
+
+  const foliageSprigBright = new THREE.MeshStandardMaterial({
+    color: 0xf4f9dc,
+    map: leafSprigBrightTex,
+    alphaTest: 0.4,
+    side: THREE.DoubleSide,
+    roughness: 0.66,
+    metalness: 0.0,
+  });
+
+  const blossomSprig = new THREE.MeshStandardMaterial({
+    color: 0xfff5f5,
+    map: blossomSprigTex,
+    alphaTest: 0.4,
+    side: THREE.DoubleSide,
+    roughness: 0.62,
+    metalness: 0.0,
+  });
+
   const grassDecal = new THREE.MeshStandardMaterial({
     color: 0xd9eca8,
     map: grassDecalTex,
@@ -2105,6 +2358,34 @@ export function createMaterialLibrary(renderer: THREE.WebGLRenderer): MaterialLi
     wrapStrength: 0.28,
     power: 2.2,
   });
+  attachSubsurfaceShader(foliageSprigDeep, {
+    key: 'foliage_sprig_deep',
+    tintHex: 0x7fd470,
+    backStrength: 0.54,
+    wrapStrength: 0.26,
+    power: 2.3,
+  });
+  attachSubsurfaceShader(foliageSprigMid, {
+    key: 'foliage_sprig_mid',
+    tintHex: 0xafe672,
+    backStrength: 0.62,
+    wrapStrength: 0.28,
+    power: 2.2,
+  });
+  attachSubsurfaceShader(foliageSprigBright, {
+    key: 'foliage_sprig_bright',
+    tintHex: 0xdaf280,
+    backStrength: 0.68,
+    wrapStrength: 0.3,
+    power: 2.1,
+  });
+  attachSubsurfaceShader(blossomSprig, {
+    key: 'blossom_sprig',
+    tintHex: 0xffc6cc,
+    backStrength: 0.62,
+    wrapStrength: 0.32,
+    power: 2.0,
+  });
   attachSubsurfaceShader(bambooGreen, {
     key: 'bamboo_green',
     tintHex: 0x9ce072,
@@ -2139,7 +2420,6 @@ export function createMaterialLibrary(renderer: THREE.WebGLRenderer): MaterialLi
     limeWallInterior,
     limeRidge,
     rammedEarth,
-    rammedEarthXray,
     roofTile,
     roofTileDark,
     graniteSlab,
@@ -2160,6 +2440,10 @@ export function createMaterialLibrary(renderer: THREE.WebGLRenderer): MaterialLi
     foliageDeep,
     foliageMid,
     foliageBright,
+    foliageSprigDeep,
+    foliageSprigMid,
+    foliageSprigBright,
+    blossomSprig,
     grassDecal,
     mossDecal,
     forestGround,
@@ -2178,7 +2462,6 @@ export function createMaterialLibrary(renderer: THREE.WebGLRenderer): MaterialLi
     limeWallInterior,
     limeRidge,
     rammedEarth,
-    rammedEarthXray,
     roofTile,
     roofTileDark,
     graniteSlab,
@@ -2199,6 +2482,10 @@ export function createMaterialLibrary(renderer: THREE.WebGLRenderer): MaterialLi
     foliageDeep,
     foliageMid,
     foliageBright,
+    foliageSprigDeep,
+    foliageSprigMid,
+    foliageSprigBright,
+    blossomSprig,
     grassDecal,
     mossDecal,
     forestGround,

@@ -10,6 +10,7 @@ import {
   createCraftedLantern,
   createCuppedPetalGeometry,
   createDrumStone,
+  createFoliageCardClusterGeometry,
   createLanternSharedGeos,
   createPaintedWoodMat,
   createSculptedLotusPadGeometry,
@@ -22,12 +23,17 @@ import {
 import {
   FRONT_CENTER_Z,
   FRONT_STRAIGHT_HALF_W,
-  FRONT_WALL_INNER_Z,
-  FRONT_WALL_OUTER_Z,
   groundHeightAt,
+  INNER_BAY_COUNT,
+  INNER_OPEN_OUTER_BAYS,
   INNER_RING_HALF_DEPTH,
   INNER_RING_RX,
   INNER_RING_RZ,
+  isDragonApexBay,
+  isRingRoomPartitionBoundary,
+  isValidTreePosition,
+  OUTER_BAY_COUNT,
+  OUTER_OPEN_OUTER_BAYS,
   OUTER_RING_HALF_DEPTH,
   OUTER_RING_RX,
   OUTER_RING_RZ,
@@ -46,7 +52,15 @@ export interface ArchitectureRefs {
   koiGroup: THREE.Group;
   lanternLights: THREE.PointLight[];
   rainCurtainMeshes: THREE.Mesh[];
-  updateWater: (t: number, nightFactor: number, rainFactor: number) => void;
+  updateWater: (
+    t: number,
+    nightFactor: number,
+    rainFactor: number,
+    skyZenithHex?: number,
+    skyHorizonHex?: number,
+    sunColorHex?: number,
+    lanternGlow?: number
+  ) => void;
   dispose: () => void;
 }
 
@@ -446,20 +460,30 @@ export function buildWeilongArchitecture(
         northMesh.receiveShadow = true;
         root.add(northMesh);
 
-        // Segmented organic lime-mortar main ridge spine (正脊) following timber settling!
+        // Segmented organic lime-mortar main ridge spine (正脊) + shadow-sealing purlin beam
         const ra = r0.clone();
         ra.y += organicRoofSettling(ra.x, ra.z) + 0.1;
         const rb = r1.clone();
         rb.y += organicRoofSettling(rb.x, rb.z) + 0.1;
-        const rSegLen = ra.distanceTo(rb) + 0.14;
-        const rBar = new THREE.Mesh(trackGeo(new THREE.BoxGeometry(0.34, 0.28, rSegLen)), mats.limeRidge);
+        const rSegLen = ra.distanceTo(rb) + 0.18;
+        const rBar = new THREE.Mesh(trackGeo(new THREE.BoxGeometry(0.36, 0.3, rSegLen)), mats.limeRidge);
         rBar.position.lerpVectors(ra, rb, 0.5);
         rBar.lookAt(rb);
+        rBar.castShadow = castShadow;
+        rBar.receiveShadow = true;
         root.add(rBar);
-        const rCap = new THREE.Mesh(trackGeo(new THREE.BoxGeometry(0.44, 0.1, rSegLen + 0.04)), mats.limeRidge);
+        // Solid cedar ridge purlin tucked under the ridge seam to block any razor-thin sunlight leaks onto interior floors
+        const rPurlin = new THREE.Mesh(trackGeo(new THREE.BoxGeometry(0.58, 0.28, rSegLen + 0.08)), mats.darkTimber);
+        rPurlin.position.lerpVectors(ra, rb, 0.5);
+        rPurlin.position.y -= 0.19;
+        rPurlin.lookAt(rb.x, rb.y - 0.19, rb.z);
+        rPurlin.castShadow = castShadow;
+        root.add(rPurlin);
+        const rCap = new THREE.Mesh(trackGeo(new THREE.BoxGeometry(0.46, 0.1, rSegLen + 0.04)), mats.limeRidge);
         rCap.position.lerpVectors(ra, rb, 0.5);
         rCap.position.y += 0.14;
         rCap.lookAt(rb.x, rb.y + 0.14, rb.z);
+        rCap.castShadow = castShadow;
         root.add(rCap);
       }
 
@@ -467,12 +491,18 @@ export function buildWeilongArchitecture(
         const gW1 = new THREE.Vector3(cx - halfL + 0.25, gableBaseY, cz + halfS - overhang * 0.6);
         const gW2 = new THREE.Vector3(cx - halfL + 0.25, gableBaseY, cz - halfS + overhang * 0.6);
         const gWT = new THREE.Vector3(cx - halfL + 0.25, ridgeY, cz);
-        root.add(new THREE.Mesh(trackGeo(createWorldUvTri(gW1, gW2, gWT, 3.6)), mats.limeWall));
+        const gWMesh = new THREE.Mesh(trackGeo(createWorldUvTri(gW1, gW2, gWT, 3.6)), mats.limeWall);
+        gWMesh.castShadow = castShadow;
+        gWMesh.receiveShadow = true;
+        root.add(gWMesh);
 
         const gE1 = new THREE.Vector3(cx + halfL - 0.25, gableBaseY, cz - halfS + overhang * 0.6);
         const gE2 = new THREE.Vector3(cx + halfL - 0.25, gableBaseY, cz + halfS - overhang * 0.6);
         const gET = new THREE.Vector3(cx + halfL - 0.25, ridgeY, cz);
-        root.add(new THREE.Mesh(trackGeo(createWorldUvTri(gE1, gE2, gET, 3.6)), mats.limeWall));
+        const gEMesh = new THREE.Mesh(trackGeo(createWorldUvTri(gE1, gE2, gET, 3.6)), mats.limeWall);
+        gEMesh.castShadow = castShadow;
+        gEMesh.receiveShadow = true;
+        root.add(gEMesh);
 
         const slopeLen = Math.hypot(halfS, ridgeY - eaveY);
         for (const endX of [cx - halfL + 0.06, cx + halfL - 0.06]) {
@@ -480,6 +510,7 @@ export function buildWeilongArchitecture(
             const verge = new THREE.Mesh(trackGeo(new THREE.BoxGeometry(0.22, 0.18, slopeLen)), mats.limeRidge);
             verge.position.set(endX, (ridgeY + eaveY) * 0.5 + 0.02, cz + dirZ * halfS * 0.5);
             verge.rotation.x = dirZ * pitch;
+            verge.castShadow = castShadow;
             root.add(verge);
           }
         }
@@ -518,15 +549,24 @@ export function buildWeilongArchitecture(
         ra.y += organicRoofSettling(ra.x, ra.z) + 0.09;
         const rb = r1.clone();
         rb.y += organicRoofSettling(rb.x, rb.z) + 0.09;
-        const rSegLen = ra.distanceTo(rb) + 0.14;
-        const rBar = new THREE.Mesh(trackGeo(new THREE.BoxGeometry(0.32, 0.26, rSegLen)), mats.limeRidge);
+        const rSegLen = ra.distanceTo(rb) + 0.18;
+        const rBar = new THREE.Mesh(trackGeo(new THREE.BoxGeometry(0.34, 0.28, rSegLen)), mats.limeRidge);
         rBar.position.lerpVectors(ra, rb, 0.5);
         rBar.lookAt(rb);
+        rBar.castShadow = castShadow;
+        rBar.receiveShadow = true;
         root.add(rBar);
-        const rCap = new THREE.Mesh(trackGeo(new THREE.BoxGeometry(0.42, 0.09, rSegLen + 0.04)), mats.limeRidge);
+        const rPurlin = new THREE.Mesh(trackGeo(new THREE.BoxGeometry(0.56, 0.26, rSegLen + 0.08)), mats.darkTimber);
+        rPurlin.position.lerpVectors(ra, rb, 0.5);
+        rPurlin.position.y -= 0.18;
+        rPurlin.lookAt(rb.x, rb.y - 0.18, rb.z);
+        rPurlin.castShadow = castShadow;
+        root.add(rPurlin);
+        const rCap = new THREE.Mesh(trackGeo(new THREE.BoxGeometry(0.44, 0.09, rSegLen + 0.04)), mats.limeRidge);
         rCap.position.lerpVectors(ra, rb, 0.5);
         rCap.position.y += 0.13;
         rCap.lookAt(rb.x, rb.y + 0.13, rb.z);
+        rCap.castShadow = castShadow;
         root.add(rCap);
       }
 
@@ -537,18 +577,25 @@ export function buildWeilongArchitecture(
             const verge = new THREE.Mesh(trackGeo(new THREE.BoxGeometry(slopeLen, 0.18, 0.22)), mats.limeRidge);
             verge.position.set(cx + dirX * halfS * 0.5, (ridgeY + eaveY) * 0.5 + 0.02, endZ);
             verge.rotation.z = -dirX * pitch;
+            verge.castShadow = castShadow;
             root.add(verge);
           }
         }
         const gS1 = new THREE.Vector3(cx - halfS + overhang * 0.5, gableBaseY, cz + halfL - 0.22);
         const gS2 = new THREE.Vector3(cx + halfS - overhang * 0.5, gableBaseY, cz + halfL - 0.22);
         const gST = new THREE.Vector3(cx, ridgeY, cz + halfL - 0.22);
-        root.add(new THREE.Mesh(trackGeo(createWorldUvTri(gS1, gS2, gST, 3.6)), mats.limeWall));
+        const gSMesh = new THREE.Mesh(trackGeo(createWorldUvTri(gS1, gS2, gST, 3.6)), mats.limeWall);
+        gSMesh.castShadow = castShadow;
+        gSMesh.receiveShadow = true;
+        root.add(gSMesh);
 
         const gN1 = new THREE.Vector3(cx + halfS - overhang * 0.5, gableBaseY, cz - halfL + 0.22);
         const gN2 = new THREE.Vector3(cx - halfS + overhang * 0.5, gableBaseY, cz - halfL + 0.22);
         const gNT = new THREE.Vector3(cx, ridgeY, cz - halfL + 0.22);
-        root.add(new THREE.Mesh(trackGeo(createWorldUvTri(gN1, gN2, gNT, 3.6)), mats.limeWall));
+        const gNMesh = new THREE.Mesh(trackGeo(createWorldUvTri(gN1, gN2, gNT, 3.6)), mats.limeWall);
+        gNMesh.castShadow = castShadow;
+        gNMesh.receiveShadow = true;
+        root.add(gNMesh);
       }
 
       registerEaveMicroGeometry(cx + halfS, eaveY, cz - halfL, cx + halfS, eaveY, cz + halfL, 1, 0, pitch, 0.78);
@@ -749,15 +796,45 @@ export function buildWeilongArchitecture(
   }
 
   // =========================================================================
-  // 1. CONTINUOUS TERRAIN, EXPANSIVE HE-PING FORECOURT & HALF-MOON POND
+  // 1. CONTINUOUS CONTOURED TERRAIN, EXPANSIVE HE-PING FORECOURT & HALF-MOON POND
   // =========================================================================
-  // Lush poetic pastoral outer valley ground
-  const outerGround = new THREE.Mesh(
-    trackGeo(new THREE.PlaneGeometry(340, 340)),
-    mats.forestGround
-  );
-  outerGround.rotation.x = -Math.PI * 0.5;
-  outerGround.position.set(0, -0.08, -10);
+  // Subdivided valley terrain matching groundHeightAt(x, z) so rear hillside trees & cottages
+  // sit solidly rooted on real sloped ground with ZERO floating trunks or floor z-fighting!
+  const outerGroundGeo = trackGeo(new THREE.PlaneGeometry(340, 340, 104, 104));
+  outerGroundGeo.rotateX(-Math.PI * 0.5);
+  const ogPos = outerGroundGeo.attributes.position as THREE.BufferAttribute;
+  for (let i = 0; i < ogPos.count; i++) {
+    const wx = ogPos.getX(i);
+    const wz = ogPos.getZ(i) - 10;
+    let wy = groundHeightAt(wx, wz, 0) - 0.07;
+
+    // Smoothly depress under the Half-Moon Pond basin so water & sculpted pond bed show cleanly
+    if (wz >= 37.2 && wz <= 51.0) {
+      const pd = Math.hypot(wx / 17.0, Math.max(0, wz - 38.4) / 11.6);
+      if (pd < 1.08) {
+        const basin = Math.max(0, 1 - pd * pd);
+        wy = Math.min(wy, -0.35 - basin * 1.15);
+      }
+    }
+
+    // Keep depressed cleanly below stone slabs inside central architectural core & He-Ping
+    if (Math.abs(wx) < 38.5 && wz > 19.5 && wz < 41.2) {
+      wy = Math.min(wy, -0.18);
+    }
+    if (Math.abs(wx) < 20.5 && wz >= -6.2 && wz <= 22.0) {
+      wy = Math.min(wy, -0.18);
+    }
+    // Keep depressed slightly beneath inner courtyard Huatai cobble mesh so zero poking
+    const huataiNorm = Math.hypot(wx / (INNER_RING_RX - 2.0), (wz - OVAL_CENTER_Z) / (INNER_RING_RZ - 2.0));
+    if (wz < 10.5 && huataiNorm < 0.96) {
+      wy = Math.min(wy, groundHeightAt(wx, wz, 0) - 0.28);
+    }
+
+    ogPos.setY(i, wy);
+  }
+  outerGroundGeo.computeVertexNormals();
+  const outerGround = new THREE.Mesh(outerGroundGeo, mats.forestGround);
+  outerGround.position.set(0, 0, -10);
   outerGround.receiveShadow = true;
   root.add(outerGround);
 
@@ -816,27 +893,98 @@ export function buildWeilongArchitecture(
     root.add(postGroup);
   }
 
-  // Half-Moon Pond (半月塘) with deep turquoise-cerulean mineral water & crisp embankment reflections
+  // Half-Moon Pond (半月塘): Sculpted submerged pebble/sandstone basin + crystal-clear optical water!
+  const pondBedRings = 12;
+  const pondBedSegs = 48;
+  const pbPos: number[] = [];
+  const pbUvs: number[] = [];
+  const pbIdx: number[] = [];
+  for (let r = 0; r <= pondBedRings; r++) {
+    const rf = r / pondBedRings;
+    for (let s = 0; s <= pondBedSegs; s++) {
+      const ang = (s / pondBedSegs) * Math.PI;
+      const lx = Math.cos(ang) * 16.3 * rf;
+      const lz = Math.sin(ang) * 10.9 * rf;
+      const northFade = THREE.MathUtils.smoothstep(lz, 0.0, 2.2);
+      const rimFade = 1.0 - THREE.MathUtils.smoothstep(rf, 0.72, 1.0);
+      const depth = 0.24 + 0.92 * rimFade * northFade;
+      const microRipple = Math.sin(lx * 0.8 + lz * 0.9) * 0.04;
+      pbPos.push(lx, -depth + microRipple, 38.6 + lz);
+      pbUvs.push(lx * 0.16, lz * 0.16);
+    }
+  }
+  for (let r = 0; r < pondBedRings; r++) {
+    for (let s = 0; s < pondBedSegs; s++) {
+      const a = r * (pondBedSegs + 1) + s;
+      const b = a + 1;
+      const c = a + (pondBedSegs + 1);
+      const d = c + 1;
+      pbIdx.push(a, b, c, b, d, c);
+    }
+  }
+  const pondBedGeo = trackGeo(new THREE.BufferGeometry());
+  pondBedGeo.setAttribute('position', new THREE.Float32BufferAttribute(pbPos, 3));
+  pondBedGeo.setAttribute('uv', new THREE.Float32BufferAttribute(pbUvs, 2));
+  pondBedGeo.setIndex(pbIdx);
+  pondBedGeo.computeVertexNormals();
+  const pondBedMat = trackMat(
+    new THREE.MeshStandardMaterial({
+      color: 0xb7a688,
+      map: mats.huataiCobble.map,
+      normalMap: mats.huataiCobble.normalMap,
+      normalScale: new THREE.Vector2(0.7, 0.7),
+      roughness: 0.9,
+      metalness: 0.0,
+    })
+  );
+  const pondBedMesh = new THREE.Mesh(pondBedGeo, pondBedMat);
+  pondBedMesh.receiveShadow = true;
+  root.add(pondBedMesh);
+
+  // Decorative submerged river boulders visible through the clear pond water
+  const riverStoneGeo = trackGeo(createSoftPillowGeometry(0.45, 4.4, 0.56, 10, 8));
+  for (let st = 0; st < 16; st++) {
+    const sa = 0.14 * Math.PI + (st / 15) * 0.72 * Math.PI;
+    const sr = 0.42 + (st % 4) * 0.14;
+    const sx = Math.cos(sa) * 14.5 * sr;
+    const sz = 38.6 + Math.sin(sa) * 9.5 * sr;
+    const stone = new THREE.Mesh(riverStoneGeo, mats.granitePlinth);
+    stone.position.set(sx, -0.78 + (st % 3) * 0.11, sz);
+    stone.scale.set(0.8 + (st % 3) * 0.35, 0.55 + (st % 2) * 0.25, 0.75 + (st % 4) * 0.22);
+    stone.rotation.y = st * 1.1;
+    root.add(stone);
+  }
+
   const pondShape = new THREE.Shape();
   pondShape.absellipse(0, 0, 16.2, 10.8, 0, Math.PI, false, 0);
   pondShape.closePath();
-  const pondWaterGeo = trackGeo(new THREE.ShapeGeometry(pondShape, 56));
+  const pondWaterGeo = trackGeo(new THREE.ShapeGeometry(pondShape, 64));
   pondWaterGeo.rotateX(Math.PI * 0.5);
 
   const pondUniforms = {
     uTime: { value: 0 },
     uNight: { value: 0 },
     uRain: { value: 0 },
+    uLanternGlow: { value: 0.08 },
     uSunDir: physicalEnvUniforms.uSunDir,
+    uSkyZenith: { value: new THREE.Color(0x3a82c4) },
+    uSkyHorizon: { value: new THREE.Color(0xbce0ee) },
+    uSunColor: { value: new THREE.Color(0xfff2d2) },
   };
   const pondWaterMat = trackMat(
     new THREE.ShaderMaterial({
       uniforms: pondUniforms,
+      transparent: true,
+      depthWrite: false,
       side: THREE.DoubleSide,
       vertexShader: /* glsl */ `
+        uniform float uTime;
+        uniform float uRain;
         varying vec3 vWPos;
         void main() {
           vec4 wp = modelMatrix * vec4(position, 1.0);
+          float swell = sin(wp.x * 0.55 + uTime * 1.1) * cos(wp.z * 0.65 - uTime * 0.9) * mix(0.012, 0.022, uRain);
+          wp.y += swell;
           vWPos = wp.xyz;
           gl_Position = projectionMatrix * viewMatrix * wp;
         }
@@ -845,7 +993,11 @@ export function buildWeilongArchitecture(
         uniform float uTime;
         uniform float uNight;
         uniform float uRain;
+        uniform float uLanternGlow;
         uniform vec3 uSunDir;
+        uniform vec3 uSkyZenith;
+        uniform vec3 uSkyHorizon;
+        uniform vec3 uSunColor;
         varying vec3 vWPos;
 
         float wHash(vec2 p) {
@@ -862,143 +1014,127 @@ export function buildWeilongArchitecture(
           );
         }
 
-        // Physical GGX microfacet specular distribution for crisp sunlit water sparkle
         float ggxDistribution(float ndh, float alpha) {
           float a2 = alpha * alpha;
           float d = ndh * ndh * (a2 - 1.0) + 1.0;
           return a2 / max(3.14159 * d * d, 0.0005);
         }
 
-        // Dual-layer refracted water caustic interference pattern
         float causticPattern(vec2 p, float t) {
-          vec2 uv1 = p * 1.45 + vec2(t * 0.24, -t * 0.18);
-          vec2 uv2 = p * 2.05 + vec2(-t * 0.29, t * 0.21);
-          float c1 = abs(sin(uv1.x * 2.4 + cos(uv1.y * 2.2 + t * 0.8)) + cos(uv1.y * 2.6 - sin(uv1.x * 1.9 - t * 0.6)));
-          float c2 = abs(sin(uv2.x * 2.1 - cos(uv2.y * 2.5 - t * 0.9)) + cos(uv2.y * 2.0 + sin(uv2.x * 2.3 + t * 0.7)));
-          float net = pow(clamp(1.0 - min(c1, c2) * 0.42, 0.0, 1.0), 3.2);
-          return net;
+          vec2 uv1 = p * 1.55 + vec2(t * 0.28, -t * 0.2);
+          vec2 uv2 = p * 2.25 + vec2(-t * 0.34, t * 0.24);
+          float c1 = abs(sin(uv1.x * 2.4 + cos(uv1.y * 2.2 + t * 0.85)) + cos(uv1.y * 2.6 - sin(uv1.x * 1.9 - t * 0.65)));
+          float c2 = abs(sin(uv2.x * 2.1 - cos(uv2.y * 2.5 - t * 0.95)) + cos(uv2.y * 2.0 + sin(uv2.x * 2.3 + t * 0.72)));
+          return pow(clamp(1.0 - min(c1, c2) * 0.42, 0.0, 1.0), 3.0);
         }
 
         void main() {
           vec2 p = vWPos.xz;
           float t = uTime;
 
-          // Distance to semicircular pond shore & north granite steps -> physical water depth (0.08m .. 2.35m)
+          // Distance to semicircular pond shore & north granite steps -> physical water depth
           float dz = max(0.0, p.y - 38.6);
           float rimR = length(vec2(p.x / 16.2, dz / 10.8));
-          float shoreCurved = smoothstep(0.68, 1.0, rimR);
-          float shoreNorth = 1.0 - smoothstep(0.0, 2.2, dz);
+          float shoreCurved = smoothstep(0.66, 1.0, rimR);
+          float shoreNorth = 1.0 - smoothstep(0.0, 2.3, dz);
           float shore = max(shoreCurved, shoreNorth);
-          float waterDepth = mix(2.25, 0.14, clamp(shore, 0.0, 1.0));
+          float waterDepth = mix(1.45, 0.14, clamp(shore, 0.0, 1.0));
 
-          // Multi-octave capillary + swell wave normals (analytical derivatives for optical reflections)
-          float ph1 = p.x * 1.25 + t * 1.2 + sin(p.y * 0.78 - t * 0.55);
-          float ph2 = p.y * 1.72 - t * 1.05 + cos(p.x * 0.92 + t * 0.65);
-          float ph3 = (p.x * 2.8 - p.y * 2.4) + t * 2.1;
-          float n1 = wNoise(p * 1.05 + vec2(t * 0.22, -t * 0.16));
-          float n2 = wNoise(p * 2.85 + vec2(-t * 0.36, t * 0.31));
-          float capAmp = mix(1.0, 1.45, uRain);
+          // Multi-directional Gerstner-like swell + fine breeze capillary ripples + dynamic moving ripples
+          float ph1 = p.x * 1.35 + t * 1.35 + sin(p.y * 0.85 - t * 0.65);
+          float ph2 = p.y * 1.85 - t * 1.18 + cos(p.x * 0.96 + t * 0.72);
+          float ph3 = (p.x * 3.1 - p.y * 2.6) + t * 2.35;
+          float ph4 = (p.x * 4.4 + p.y * 3.8) - t * 2.9;
+          float n1 = wNoise(p * 1.2 + vec2(t * 0.25, -t * 0.18));
+          float n2 = wNoise(p * 3.2 + vec2(-t * 0.42, t * 0.34));
+
+          // Gentle organic rings emanating around active koi & waterfowl swimming zones
+          vec2 rCenterA = vec2(sin(t * 0.32) * 4.8, 43.2 + cos(t * 0.26) * 2.2);
+          vec2 rCenterB = vec2(cos(t * 0.28) * 5.6, 44.1 + sin(t * 0.22) * 1.8);
+          float dA = length(p - rCenterA);
+          float dB = length(p - rCenterB);
+          float ringRippleA = sin(dA * 7.5 - t * 4.2) * exp(-dA * 0.55) * 0.04;
+          float ringRippleB = sin(dB * 8.0 - t * 4.6) * exp(-dB * 0.62) * 0.036;
+          vec2 dirA = (p - rCenterA) / max(dA, 0.05);
+          vec2 dirB = (p - rCenterB) / max(dB, 0.05);
+
+          float capAmp = mix(1.0, 1.55, uRain);
           vec3 N = normalize(vec3(
-            (cos(ph1) * 0.048 + sin(ph3) * 0.018 + (n1 - 0.5) * 0.085) * capAmp,
+            (cos(ph1) * 0.058 + sin(ph3) * 0.024 + cos(ph4) * 0.014 + (n1 - 0.5) * 0.105) * capAmp + dirA.x * ringRippleA + dirB.x * ringRippleB,
             1.0,
-            (-sin(ph2) * 0.048 - cos(ph3) * 0.018 + (n2 - 0.5) * 0.085) * capAmp
+            (-sin(ph2) * 0.058 - cos(ph3) * 0.024 + sin(ph4) * 0.014 + (n2 - 0.5) * 0.105) * capAmp + dirA.y * ringRippleA + dirB.y * ringRippleB
           ));
 
           vec3 V = normalize(cameraPosition - vWPos);
           vec3 L = normalize(uSunDir);
           float ndv = clamp(dot(N, V), 0.001, 1.0);
 
-          // Pillar 2: Exact Schlick Fresnel for Air -> Water interface (IOR = 1.333, F0 = 0.0204)
+          // Exact Schlick Fresnel for Air -> Water interface (IOR = 1.333)
           float F0 = 0.0204;
           float fresnel = F0 + (1.0 - F0) * pow(1.0 - ndv, 5.0);
 
-          // Pillar 2: Beer-Lambert exponential spectral depth absorption (red absorbs fastest, blue/jade penetrates)
-          vec3 absorptionCoeff = mix(
-            mix(vec3(0.72, 0.24, 0.19), vec3(0.84, 0.42, 0.36), uRain),
-            vec3(1.15, 0.58, 0.38),
-            uNight
-          );
-          vec3 transmittance = exp(-waterDepth * absorptionCoeff);
+          // Crystal-clear spring-fed Lingnan jade water: translucent in shallows, rich emerald-cerulean in center
+          vec3 shallowTint = mix(mix(vec3(0.28, 0.66, 0.62), vec3(0.22, 0.44, 0.48), uRain), vec3(0.05, 0.16, 0.24), uNight);
+          vec3 deepTint = mix(mix(vec3(0.06, 0.32, 0.46), vec3(0.09, 0.23, 0.34), uRain), vec3(0.02, 0.07, 0.16), uNight);
+          float depthRatio = 1.0 - exp(-waterDepth * 0.85);
+          vec3 waterBody = mix(shallowTint, deepTint, depthRatio);
 
-          // Submerged sunlit warm sandstone/granite pond bed + refracted dual-layer caustics
-          float bedTex = wNoise(p * 1.8 + N.xz * 1.2);
-          vec3 dayBed = mix(vec3(0.36, 0.68, 0.58), vec3(0.58, 0.72, 0.54), bedTex);
-          vec3 rainBed = mix(vec3(0.22, 0.40, 0.42), vec3(0.32, 0.48, 0.44), bedTex);
-          vec3 nightBed = vec3(0.04, 0.12, 0.20);
-          vec3 bedCol = mix(mix(dayBed, rainBed, uRain), nightBed, uNight);
+          // Refracted dancing sun caustics shimmering across the clear water volume
+          float caust = causticPattern(p + N.xz * 0.85, t);
+          waterBody += uSunColor * vec3(0.32, 0.44, 0.36) * caust * (1.0 - uNight * 0.88) * (1.0 - uRain * 0.72) * 0.58;
 
-          float caust = causticPattern(p + N.xz * 0.65, t);
-          bedCol += vec3(0.34, 0.48, 0.34) * caust * (1.0 - uNight) * (1.0 - uRain * 0.75) * 0.68;
+          // Subtle bank shadow under the granite coping
+          float bankShadow = max(smoothstep(0.92, 1.0, rimR), 1.0 - smoothstep(0.0, 0.52, dz));
+          waterBody *= mix(1.0, 0.72, bankShadow * 0.55);
 
-          // Deep mineral water volumetric scatter color
-          vec3 dayScatter = vec3(0.04, 0.25, 0.44);
-          vec3 rainScatter = vec3(0.07, 0.19, 0.30);
-          vec3 nightScatter = vec3(0.015, 0.055, 0.13);
-          vec3 volumeCol = mix(mix(dayScatter, rainScatter, uRain), nightScatter, uNight);
-
-          // Combined refracted underwater radiance (Beer-Lambert attenuated bed + in-scattered water volume)
-          vec3 refractedCol = mix(volumeCol, bedCol, transmittance);
-
-          // Crisp cool embankment ambient occlusion under stone coping
-          float bankShadow = max(smoothstep(0.92, 1.0, rimR), 1.0 - smoothstep(0.0, 0.55, dz));
-          refractedCol *= mix(1.0, 0.66, bankShadow * 0.68);
-
-          // Physically reflected sky + subtle north Weilongwu architectural & weeping willow mirror gradient
+          // Dynamic sky & architecture reflection synced to the live 24h sky palette!
           vec3 R = reflect(-V, N);
-          float skyGrad = clamp(R.y * 1.4, 0.0, 1.0);
-          vec3 dayZenith = vec3(0.28, 0.62, 0.88);
-          vec3 dayHorizon = vec3(0.76, 0.90, 0.96);
-          vec3 rainZenith = vec3(0.42, 0.54, 0.64);
-          vec3 rainHorizon = vec3(0.66, 0.74, 0.80);
-          vec3 nightZenith = vec3(0.05, 0.10, 0.22);
-          vec3 nightHorizon = vec3(0.16, 0.24, 0.42);
-          vec3 reflSky = mix(
-            mix(mix(dayHorizon, dayZenith, skyGrad), mix(rainHorizon, rainZenith, skyGrad), uRain),
-            mix(nightHorizon, nightZenith, skyGrad),
-            uNight
-          );
+          float skyGrad = clamp(R.y * 1.35, 0.0, 1.0);
+          vec3 reflSky = mix(uSkyHorizon, uSkyZenith, skyGrad);
 
-          // Reflected white lime facade & cerulean roof silhouette softly mirrored near the north shore
-          float hallMirrorMask = (1.0 - smoothstep(0.4, 7.6, dz)) * (1.0 - smoothstep(6.0, 14.5, abs(p.x)));
-          vec3 hallMirrorCol = mix(vec3(0.84, 0.78, 0.68), vec3(0.28, 0.38, 0.46), smoothstep(2.8, 6.2, dz));
-          hallMirrorCol = mix(hallMirrorCol, vec3(0.48, 0.54, 0.60), uRain * 0.55);
-          reflSky = mix(reflSky, hallMirrorCol, hallMirrorMask * 0.44 * (1.0 - uNight * 0.85));
+          // Reflected white lime facade & cerulean tile roof mirrored gently near the north shore
+          float hallMirrorMask = (1.0 - smoothstep(0.35, 7.8, dz)) * (1.0 - smoothstep(6.2, 14.8, abs(p.x)));
+          vec3 hallMirrorCol = mix(vec3(0.86, 0.80, 0.70), vec3(0.30, 0.42, 0.52), smoothstep(2.8, 6.2, dz));
+          hallMirrorCol = mix(hallMirrorCol, uSkyHorizon * 0.72, uRain * 0.5 + uNight * 0.75);
+          reflSky = mix(reflSky, hallMirrorCol, hallMirrorMask * 0.42);
 
-          // Energy-conserving Fresnel blend (weighted gently so shallow turquoise stays jewel-bright!)
-          float envBlend = clamp(fresnel * 1.35 + 0.06, 0.04, 0.72);
-          vec3 col = mix(refractedCol, reflSky, envBlend);
+          float envBlend = clamp(fresnel * 1.48 + 0.08, 0.06, 0.82);
+          vec3 col = mix(waterBody, reflSky, envBlend);
 
-          // Pillar 2: GGX microfacet sun / moon specular glints
+          // Crisp GGX solar / lunar specular sparkle on wave facets
           vec3 H = normalize(L + V);
           float ndh = max(dot(N, H), 0.0);
-          float ggxSharp = ggxDistribution(ndh, mix(0.085, 0.18, uRain)) * fresnel * 0.22;
-          float ggxBroad = ggxDistribution(ndh, 0.26) * fresnel * 0.09;
-          vec3 glintCol = mix(vec3(1.0, 0.95, 0.78), vec3(0.76, 0.88, 1.0), uNight);
-          col += glintCol * (ggxSharp + ggxBroad) * (1.0 - uRain * 0.78) * (0.65 + 0.45 * n2);
+          float ggxSharp = ggxDistribution(ndh, mix(0.072, 0.16, uRain)) * (0.14 + fresnel * 0.9);
+          float ggxBroad = ggxDistribution(ndh, 0.24) * (0.04 + fresnel * 0.25);
+          vec3 glintCol = mix(uSunColor, vec3(0.76, 0.88, 1.0), uNight);
+          col += glintCol * (ggxSharp * 0.24 + ggxBroad * 0.09) * (1.0 - uRain * 0.76) * (0.68 + 0.45 * n2);
 
-          // Shimmering crimson-gold lantern reflections dancing on ripples along north shore at night
-          float northGlow = (1.0 - smoothstep(0.0, 8.8, dz)) * (1.0 - smoothstep(4.5, 15.5, abs(p.x)));
-          float lanternRipple = 0.52 + 0.48 * sin(p.x * 2.4 + N.x * 16.0 + t * 2.8);
-          col += vec3(1.0, 0.48, 0.16) * northGlow * uNight * lanternRipple * (0.48 + 0.55 * fresnel);
+          // Warm crimson-gold lantern reflections dancing across ripples at dusk & night
+          float northGlow = (1.0 - smoothstep(0.0, 9.2, dz)) * (1.0 - smoothstep(4.5, 15.6, abs(p.x)));
+          float lanternRipple = 0.52 + 0.48 * sin(p.x * 2.5 + N.x * 18.0 + t * 2.9);
+          col += vec3(1.0, 0.50, 0.18) * northGlow * uLanternGlow * lanternRipple * (0.46 + 0.62 * fresnel);
 
-          // Delicate woodblock lapping foam line along granite coping
-          float foamWave = sin(rimR * 36.0 - t * 2.2 + n1 * 4.0) * 0.5 + 0.5;
-          float foamMask = smoothstep(0.925, 0.996, rimR) * (0.5 + 0.5 * foamWave);
-          foamMask = max(foamMask, (1.0 - smoothstep(0.0, 0.34, dz)) * (0.4 + 0.45 * foamWave));
-          vec3 foamCol = mix(vec3(0.95, 0.97, 0.92), vec3(0.34, 0.45, 0.60), uNight);
-          col = mix(col, foamCol, clamp(foamMask * 0.52, 0.0, 0.52));
+          // Delicate shoreline lapping shimmer along granite coping
+          float foamWave = sin(rimR * 38.0 - t * 2.3 + n1 * 4.2) * 0.5 + 0.5;
+          float foamMask = smoothstep(0.93, 0.996, rimR) * (0.5 + 0.5 * foamWave);
+          foamMask = max(foamMask, (1.0 - smoothstep(0.0, 0.34, dz)) * (0.42 + 0.45 * foamWave));
+          vec3 foamCol = mix(vec3(0.96, 0.98, 0.94), vec3(0.36, 0.48, 0.64), uNight);
+          col = mix(col, foamCol, clamp(foamMask * 0.55, 0.0, 0.55));
 
-          // Expanding physical concentric raindrop rings in rain mode
+          // Expanding concentric raindrop rings in rain mode
           if (uRain > 0.05) {
-            vec2 cell = floor(p * 1.45);
-            vec2 f = fract(p * 1.45) - 0.5;
-            float phase = fract(t * 1.2 + wHash(cell) * 6.28);
+            vec2 cell = floor(p * 1.55);
+            vec2 f = fract(p * 1.55) - 0.5;
+            float phase = fract(t * 1.35 + wHash(cell) * 6.28);
             float ring = abs(length(f) - phase * 0.44);
-            float drop = (1.0 - smoothstep(0.0, 0.042, ring)) * (1.0 - phase);
-            col += vec3(0.45, 0.58, 0.66) * drop * uRain * 0.72;
+            float drop = (1.0 - smoothstep(0.0, 0.044, ring)) * (1.0 - phase);
+            col += vec3(0.52, 0.66, 0.74) * drop * uRain * 0.78;
           }
 
-          gl_FragColor = vec4(col, 1.0);
+          // Transparent clarity: clear enough in shallows to clearly see submerged pebbles & swimming koi,
+          // becoming more reflective at grazing Fresnel angles and deeper in the center.
+          float alpha = clamp(mix(0.38, 0.74, depthRatio) + fresnel * 0.46 + foamMask * 0.25, 0.34, 0.92);
+          gl_FragColor = vec4(col, alpha);
           #include <tonemapping_fragment>
           #include <colorspace_fragment>
         }
@@ -1007,7 +1143,7 @@ export function buildWeilongArchitecture(
   );
   const pondWater = new THREE.Mesh(pondWaterGeo, pondWaterMat);
   pondWater.position.set(0, -0.22, 38.6);
-  pondWater.receiveShadow = true;
+  pondWater.renderOrder = 2;
   root.add(pondWater);
 
   // Sculpted Floating Jade Lotus Pads (荷叶) & 12-Petal Cupped Lotus Flowers (荷花) with Backlit SSS!
@@ -1331,7 +1467,8 @@ export function buildWeilongArchitecture(
       centerX: (k % 3 - 1) * 3.8,
       centerZ: 42.8 + (k % 3) * 1.2,
     };
-    fish.position.set(fish.userData.centerX, -0.19, fish.userData.centerZ);
+    const swimDepth = -0.36 - (k % 3) * 0.055;
+    fish.position.set(fish.userData.centerX, swimDepth, fish.userData.centerZ);
     koiGroup.add(fish);
     animatedKoiTails.push({ tail: tailPivot, fin: finPivot, phase: k * 0.95 });
   }
@@ -1612,23 +1749,9 @@ export function buildWeilongArchitecture(
     const wx = side * 14.9;
     // Wing stone floor
     addBox(7.2, 0.32, 20.6, wx, 0.16, 6.4, mats.graniteSlab, 0, root, false);
-    // Wing outer walls facing the sunlit crescent Tianjie (x = ±18.4) with 3 wide open doorways!
+    // Wing outer walls facing the sunlit crescent Tianjie (x = ±18.4) with 3 wide open doorways
     addCraftedWall(2.6, 3.35, 0.38, side * 18.4, 0.32, 15.1, Math.PI * 0.5);
-    // On East wing middle segment, build our interactive X-Ray Rammed Earth Wall with visible bamboo/timber "墙骨"!
-    if (side === 1) {
-      // Exposed internal bamboo & cedar wall-bones inside the transparent X-Ray rammed-earth layer
-      const boneGroup = new THREE.Group();
-      for (let by = 0.75; by <= 3.1; by += 0.55) {
-        addBox(0.06, 0.06, 4.4, 18.4, by, 7.7, mats.bambooGreen, 0, boneGroup, false);
-      }
-      for (let bz = 5.7; bz <= 9.7; bz += 0.8) {
-        addBox(0.08, 3.1, 0.08, 18.4, 1.9, bz, mats.darkTimber, 0, boneGroup, false);
-      }
-      root.add(boneGroup);
-      addBox(0.42, 3.35, 4.6, 18.4, 1.99, 7.7, mats.rammedEarthXray);
-    } else {
-      addCraftedWall(4.6, 3.35, 0.38, side * 18.4, 0.32, 7.7, Math.PI * 0.5);
-    }
+    addCraftedWall(4.6, 3.35, 0.38, side * 18.4, 0.32, 7.7, Math.PI * 0.5);
     addCraftedWall(2.4, 3.35, 0.38, side * 18.4, 0.32, 0.2, Math.PI * 0.5);
 
     // Wing windows facing the crescent Tianjie courtyard
@@ -1749,16 +1872,24 @@ export function buildWeilongArchitecture(
       outerSlope.receiveShadow = true;
       root.add(outerSlope);
 
-      // Organic smoothly-curving pale lime ridge spine connecting ridge0 -> ridge1
+      // Organic smoothly-curving pale lime ridge spine + shadow-sealing ridge purlin
       const ra = ridge0.clone();
       ra.y += organicRoofSettling(ra.x, ra.z) + 0.08;
       const rb = ridge1.clone();
       rb.y += organicRoofSettling(rb.x, rb.z) + 0.08;
-      const rLen = ra.distanceTo(rb) + 0.16;
-      const rBar = new THREE.Mesh(trackGeo(new THREE.BoxGeometry(0.32, 0.24, rLen)), mats.limeRidge);
+      const rLen = ra.distanceTo(rb) + 0.18;
+      const rBar = new THREE.Mesh(trackGeo(new THREE.BoxGeometry(0.34, 0.26, rLen)), mats.limeRidge);
       rBar.position.lerpVectors(ra, rb, 0.5);
       rBar.lookAt(rb);
+      rBar.castShadow = castShadow;
+      rBar.receiveShadow = true;
       root.add(rBar);
+      const rPurlin = new THREE.Mesh(trackGeo(new THREE.BoxGeometry(0.54, 0.24, rLen + 0.08)), mats.darkTimber);
+      rPurlin.position.lerpVectors(ra, rb, 0.5);
+      rPurlin.position.y -= 0.17;
+      rPurlin.lookAt(rb.x, rb.y - 0.17, rb.z);
+      rPurlin.castShadow = castShadow;
+      root.add(rPurlin);
 
       // 3D barrel-tile drip caps & exposed cedar rafter tails along curved eaves
       const slopePitch = Math.atan2(ridgeHeight - wallHeight, halfDepth + overhang);
@@ -1795,8 +1926,7 @@ export function buildWeilongArchitecture(
         s1.z - s1.nz * halfDepth - (s0.z - s0.nz * halfDepth)
       );
 
-      const midIdx = Math.floor(bayCount / 2);
-      const isDragonApex = !isOuterRing && i >= midIdx - 2 && i < midIdx + 2;
+      const isDragonApex = isDragonApexBay(i, bayCount, isOuterRing);
       if (isDragonApex) {
         if (i % 2 === 0) {
           columns.push({
@@ -1850,24 +1980,49 @@ export function buildWeilongArchitecture(
         }
       }
 
-      // 5. Partial radial room partition fins every 6 slices (= every 3 rooms)
-      if (i > 0 && i % 6 === 0 && !isDragonApex) {
-        const px = s0.x + s0.nx * 0.75;
-        const pz = s0.z + s0.nz * 0.75;
-        addBox(0.24, wallHeight - 0.1, halfDepth * 1.15, px, s0.yBase + wallHeight * 0.5, pz, mats.limeWallInterior, bayYaw, root, false);
+      // 5. Full-depth solid radial room partition walls separating discrete rooms (一格一格的实体房间)
+      // Synchronized 1:1 with worldMath.buildCurvedRingWallSegments() colliders!
+      if (isRingRoomPartitionBoundary(i, bayCount, isOuterRing)) {
+        const partYaw = Math.atan2(s0.nx, s0.nz);
+        const fullDepth = halfDepth * 1.92;
+        addBox(
+          0.26,
+          wallHeight,
+          fullDepth,
+          s0.x,
+          s0.yBase + wallHeight * 0.5,
+          s0.z,
+          mats.limeWallInterior,
+          partYaw,
+          root,
+          castShadow
+        );
+        // Subtle timber lintel cap atop partition wall
+        addBox(
+          0.3,
+          0.14,
+          fullDepth,
+          s0.x,
+          s0.yBase + wallHeight - 0.07,
+          s0.z,
+          mats.darkTimber,
+          partYaw,
+          root,
+          false
+        );
       }
     }
   };
 
-  // Build Silky 64-Segment Inner Weilong Ring (内围龙 — 32 architectural rooms along 64 silky-curved segments!)
+  // Build Silky 64-Segment Inner Weilong Ring (内围龙 — 独立隔间实体围屋)
   buildCurvedWeilongRing({
     sampleFn: sampleInnerWeilongCurve,
-    bayCount: 64,
+    bayCount: INNER_BAY_COUNT,
     halfDepth: INNER_RING_HALF_DEPTH,
     wallHeight: 3.15,
     ridgeHeight: 5.25,
     overhang: 0.62,
-    openOuterBays: new Set([12, 13, 24, 25, 38, 39, 50, 51]),
+    openOuterBays: INNER_OPEN_OUTER_BAYS,
     isOuterRing: false,
   });
 
@@ -1882,15 +2037,15 @@ export function buildWeilongArchitecture(
     addBox(3.1, 0.25, 3.6, ax, ay - 0.12, az, mats.graniteSlab, yaw, root, false);
   }
 
-  // Build Silky 52-Segment Outer Weilong Ring (外围龙 — 26 rooms along 52 silky-curved segments!)
+  // Build Silky 52-Segment Outer Weilong Ring (外围龙 — 独立隔间实体围屋)
   buildCurvedWeilongRing({
     sampleFn: sampleOuterWeilongCurve,
-    bayCount: 52,
+    bayCount: OUTER_BAY_COUNT,
     halfDepth: OUTER_RING_HALF_DEPTH,
     wallHeight: 3.45,
     ridgeHeight: 5.65,
     overhang: 0.65,
-    openOuterBays: new Set([20, 21, 30, 31]),
+    openOuterBays: OUTER_OPEN_OUTER_BAYS,
     isOuterRing: true,
   });
 
@@ -2193,61 +2348,89 @@ export function buildWeilongArchitecture(
     root.add(hg);
   };
 
-  buildHakkaCottage({ x: 5.5, y: 2.2, z: -40.5, w: 12.4, h: 6.4, d: 8.2, rotY: 0.08, isBrick: false, hasBalcony: true, hasYardWall: true });
-  buildHakkaCottage({ x: 27.5, y: 2.0, z: -37.5, w: 10.6, h: 5.6, d: 7.4, rotY: -0.15, isBrick: true, hasBalcony: true });
-  buildHakkaCottage({ x: -38, y: 0.2, z: -62, w: 10.2, h: 5.4, d: 7.4, rotY: 0.12, isBrick: false });
-  buildHakkaCottage({ x: 32, y: 0.2, z: -68, w: 9.6, h: 5.8, d: 7.0, rotY: -0.18, isBrick: true });
-  buildHakkaCottage({ x: -12, y: 0.2, z: -78, w: 11.0, h: 5.2, d: 7.6, rotY: 0.05, isBrick: false });
-  buildHakkaCottage({ x: 54, y: 0.2, z: -48, w: 9.2, h: 5.0, d: 6.8, rotY: -0.24, isBrick: false });
-
-  // 8E. Sculpted Camphor & Lychee Groves (145 Instanced Smooth-Pillow Trees + 6 Near Gnarled Hero Camphor Trees!)
-  const forestTreePositions: [number, number, number, number][] = [];
-  for (let i = 0; i < 145; i++) {
-    const phi = -0.22 * Math.PI + (i / 144) * 1.44 * Math.PI;
-    const band = i % 4;
-    const rAdd = 7.2 + band * 12.5 + ((i * 17) % 8);
-    const tx = Math.cos(phi) * (OUTER_RING_RX + rAdd);
-    const tz = OVAL_CENTER_Z - Math.sin(phi) * (OUTER_RING_RZ + rAdd);
-    if (Math.hypot(tx - 5.5, tz + 40.5) < 9.5) continue;
-    if (Math.hypot(tx - 27.5, tz + 37.5) < 8.5) continue;
-    if (Math.hypot(tx, tz + 46.5) < 4.5) continue;
-    if (Math.hypot(tx + 38, tz + 62) < 9.0) continue;
-    if (Math.hypot(tx - 32, tz + 68) < 9.0) continue;
-    const scale = 0.92 + ((i * 29) % 10) * 0.12 + (band >= 2 ? 0.35 : 0);
-    forestTreePositions.push([tx, groundHeightAt(tx, tz, 0), tz, scale]);
+  // Ground every rural cottage flush with the contoured hillside terrain (zero floating houses!)
+  const cottageSpecs = [
+    { x: 5.5, z: -42.5, w: 12.4, h: 6.4, d: 8.2, rotY: 0.08, isBrick: false, hasBalcony: true, hasYardWall: true },
+    { x: 27.5, z: -39.5, w: 10.6, h: 5.6, d: 7.4, rotY: -0.15, isBrick: true, hasBalcony: true },
+    { x: -38, z: -62, w: 10.2, h: 5.4, d: 7.4, rotY: 0.12, isBrick: false },
+    { x: 32, z: -68, w: 9.6, h: 5.8, d: 7.0, rotY: -0.18, isBrick: true },
+    { x: -12, z: -78, w: 11.0, h: 5.2, d: 7.6, rotY: 0.05, isBrick: false },
+    { x: 54, z: -48, w: 9.2, h: 5.0, d: 6.8, rotY: -0.24, isBrick: false },
+  ];
+  for (const cs of cottageSpecs) {
+    buildHakkaCottage({ ...cs, y: groundHeightAt(cs.x, cs.z, 0) - 0.14 });
   }
 
-  // Smooth velvety rounded woodcarved foliage pillows (ZERO faceted origami edges!)
-  const pillowGeoA = trackGeo(createSoftPillowGeometry(2.3, 1.3, 0.76, 14, 10));
-  const pillowGeoB = trackGeo(createSoftPillowGeometry(1.85, 3.9, 0.74, 14, 10));
-  const pillowGeoC = trackGeo(createSoftPillowGeometry(1.48, 6.2, 0.72, 12, 9));
+  // 8E. Ecologically Thinned & Grounded Camphor/Lychee Groves with Layered Alpha-Cutout Leaf Sprig Canopies!
+  // Thinned from 145 overcrowded rear trees to ~68 naturally spaced groves, strictly validated via isValidTreePosition()
+  // so zero trees ever float or clip into any wall or house.
+  const forestTreePositions: [number, number, number, number][] = [];
+  const totalForestCandidates = 78;
+  for (let i = 0; i < totalForestCandidates; i++) {
+    const phi = -0.18 * Math.PI + (i / (totalForestCandidates - 1)) * 1.36 * Math.PI;
+    const band = i % 3;
+    const jitter = (((i * 37) % 11) - 5) * 0.85;
+    const rAdd = 10.5 + band * 16.5 + jitter;
+    const tx = Math.cos(phi) * (OUTER_RING_RX + rAdd);
+    const tz = OVAL_CENTER_Z - Math.sin(phi) * (OUTER_RING_RZ + rAdd);
 
-  // Gently curving tapered trunk template for instanced forest trees
+    // Keep clear of all cottages, Bogong shrine, and every building wall
+    if (!isValidTreePosition(tx, tz, 4.2)) continue;
+    if (Math.hypot(tx - 5.5, tz + 42.5) < 11.2) continue;
+    if (Math.hypot(tx - 27.5, tz + 39.5) < 10.0) continue;
+    if (Math.hypot(tx, tz + 46.5) < 6.0) continue;
+    if (Math.hypot(tx + 38, tz + 62) < 10.5) continue;
+    if (Math.hypot(tx - 32, tz + 68) < 10.5) continue;
+    if (Math.hypot(tx + 12, tz + 78) < 10.5) continue;
+    if (Math.hypot(tx - 54, tz + 48) < 9.5) continue;
+
+    // Enforce natural inter-tree spacing so groves breathe ecologically
+    let tooClose = false;
+    for (let j = 0; j < forestTreePositions.length; j++) {
+      const [ox, , oz] = forestTreePositions[j];
+      if (Math.hypot(tx - ox, tz - oz) < 7.8) {
+        tooClose = true;
+        break;
+      }
+    }
+    if (tooClose) continue;
+
+    const scale = 0.94 + ((i * 29) % 10) * 0.1 + (band >= 2 ? 0.28 : 0);
+    // Embed root base 0.16m into terrain so sloped hillsides never reveal floating gaps
+    forestTreePositions.push([tx, groundHeightAt(tx, tz, 0) - 0.16, tz, scale]);
+  }
+
+  // Airy multi-layered botanical leaf-sprig card clusters (replaces lumpy solid pillow blobs!)
+  const sprigClusterGeoA = trackGeo(createFoliageCardClusterGeometry(2.45, 14, 1.3, 0.78));
+  const sprigClusterGeoB = trackGeo(createFoliageCardClusterGeometry(1.95, 12, 3.9, 0.76));
+  const sprigClusterGeoC = trackGeo(createFoliageCardClusterGeometry(1.6, 10, 6.2, 0.74));
+
+  // Gently curving tapered trunk + lower fork template for instanced forest trees
   const instTrunkGeo = trackGeo(
     createTaperedCurveGeometry(
       [
-        new THREE.Vector3(0, 0, 0),
+        new THREE.Vector3(0, -0.15, 0),
         new THREE.Vector3(0.12, 1.4, 0.06),
         new THREE.Vector3(-0.08, 3.0, -0.05),
-        new THREE.Vector3(0.05, 4.1, 0.04),
+        new THREE.Vector3(0.05, 4.2, 0.04),
       ],
       0.34,
-      0.16,
+      0.14,
       8,
       7
     )
   );
 
   const trunkInst = new THREE.InstancedMesh(instTrunkGeo, mats.darkTimber, forestTreePositions.length);
-  const crownInstDeep = new THREE.InstancedMesh(pillowGeoA, mats.foliageDeep, forestTreePositions.length);
-  const crownInstMid = new THREE.InstancedMesh(pillowGeoB, mats.foliageMid, forestTreePositions.length * 2);
-  const crownInstBright = new THREE.InstancedMesh(pillowGeoC, mats.foliageBright, forestTreePositions.length);
+  const crownInstDeep = new THREE.InstancedMesh(sprigClusterGeoA, mats.foliageSprigDeep, forestTreePositions.length);
+  const crownInstMid = new THREE.InstancedMesh(sprigClusterGeoB, mats.foliageSprigMid, forestTreePositions.length * 2);
+  const crownInstBright = new THREE.InstancedMesh(sprigClusterGeoC, mats.foliageSprigBright, forestTreePositions.length);
 
   const tintPalette = [
     new THREE.Color(0xffffff),
-    new THREE.Color(0xf2f7e4),
-    new THREE.Color(0xe6f2ee),
-    new THREE.Color(0xf8f0d8),
+    new THREE.Color(0xf0f6e2),
+    new THREE.Color(0xe6f2ec),
+    new THREE.Color(0xf7efda),
   ];
 
   forestTreePositions.forEach(([tx, ty, tz, sc], idx) => {
@@ -2260,30 +2443,30 @@ export function buildWeilongArchitecture(
     dummy.updateMatrix();
     trunkInst.setMatrixAt(idx, dummy.matrix);
 
-    dummy.position.set(tx, ty + 4.1 * sc, tz);
+    dummy.position.set(tx, ty + 4.25 * sc, tz);
     dummy.rotation.set(0, yaw, 0);
-    dummy.scale.set(sc * 1.24, sc * 0.92, sc * 1.18);
+    dummy.scale.set(sc * 1.18, sc * 0.94, sc * 1.14);
     dummy.updateMatrix();
     crownInstDeep.setMatrixAt(idx, dummy.matrix);
     crownInstDeep.setColorAt(idx, tint);
 
-    dummy.position.set(tx + Math.cos(yaw) * 1.2 * sc, ty + 4.8 * sc, tz + Math.sin(yaw) * 1.2 * sc);
+    dummy.position.set(tx + Math.cos(yaw) * 1.25 * sc, ty + 4.9 * sc, tz + Math.sin(yaw) * 1.25 * sc);
     dummy.rotation.set(0.08, yaw + 1.1, -0.08);
-    dummy.scale.set(sc * 0.98, sc * 0.84, sc * 0.94);
+    dummy.scale.set(sc * 0.96, sc * 0.86, sc * 0.94);
     dummy.updateMatrix();
     crownInstMid.setMatrixAt(idx * 2, dummy.matrix);
     crownInstMid.setColorAt(idx * 2, tint);
 
-    dummy.position.set(tx - Math.sin(yaw) * 1.1 * sc, ty + 4.45 * sc, tz + Math.cos(yaw) * 1.1 * sc);
+    dummy.position.set(tx - Math.sin(yaw) * 1.15 * sc, ty + 4.55 * sc, tz + Math.cos(yaw) * 1.15 * sc);
     dummy.rotation.set(-0.08, yaw + 2.4, 0.1);
-    dummy.scale.set(sc * 0.9, sc * 0.8, sc * 0.96);
+    dummy.scale.set(sc * 0.9, sc * 0.84, sc * 0.94);
     dummy.updateMatrix();
     crownInstMid.setMatrixAt(idx * 2 + 1, dummy.matrix);
     crownInstMid.setColorAt(idx * 2 + 1, tint);
 
-    dummy.position.set(tx - Math.cos(yaw) * 0.65 * sc, ty + 5.35 * sc, tz - Math.sin(yaw) * 0.65 * sc);
+    dummy.position.set(tx - Math.cos(yaw) * 0.6 * sc, ty + 5.45 * sc, tz - Math.sin(yaw) * 0.6 * sc);
     dummy.rotation.set(0.06, yaw + 3.8, 0.06);
-    dummy.scale.set(sc * 0.88, sc * 0.76, sc * 0.88);
+    dummy.scale.set(sc * 0.88, sc * 0.78, sc * 0.88);
     dummy.updateMatrix();
     crownInstBright.setMatrixAt(idx, dummy.matrix);
     crownInstBright.setColorAt(idx, tint);
@@ -2301,12 +2484,12 @@ export function buildWeilongArchitecture(
   crownInstBright.computeBoundingSphere();
   root.add(trunkInst, crownInstDeep, crownInstMid, crownInstBright);
 
-  // 6 Near Foreground Hero Camphor Trees (苍劲多叉古樟树: 盘根 + 分叉主枝 + 7层圆润青绿云团叶冠!)
+  // 6 Near Foreground Hero Camphor Trees (苍劲多叉古樟树: 盘根 + 多分叉枝干 + 通透羽状叶冠)
   const barkMat = createPaintedWoodMat(0x6d4732, trackMat, 0.84);
   const heroTrunkGeo = trackGeo(
     createTaperedCurveGeometry(
       [
-        new THREE.Vector3(0, -0.05, 0),
+        new THREE.Vector3(0, -0.18, 0),
         new THREE.Vector3(0.18, 1.3, 0.08),
         new THREE.Vector3(-0.1, 2.7, -0.08),
         new THREE.Vector3(0.12, 3.8, 0.1),
@@ -2325,7 +2508,7 @@ export function buildWeilongArchitecture(
         new THREE.Vector3(-1.65, 3.75, 0.55),
       ],
       0.2,
-      0.08,
+      0.075,
       8,
       7
     )
@@ -2338,37 +2521,54 @@ export function buildWeilongArchitecture(
         new THREE.Vector3(1.72, 4.05, -0.62),
       ],
       0.18,
-      0.075,
+      0.07,
       8,
       7
     )
   );
+  const heroBranchFGeo = trackGeo(
+    createTaperedCurveGeometry(
+      [
+        new THREE.Vector3(0.0, 2.65, 0.04),
+        new THREE.Vector3(0.28, 3.45, 0.85),
+        new THREE.Vector3(0.45, 4.15, 1.38),
+      ],
+      0.14,
+      0.055,
+      7,
+      6
+    )
+  );
+  const heroCrownClusters: Array<[number, number, number, number, THREE.Material, THREE.BufferGeometry]> = [
+    [0.0, 4.35, 0.0, 1.1, mats.foliageSprigDeep, sprigClusterGeoA],
+    [-1.65, 4.15, 0.55, 0.94, mats.foliageSprigMid, sprigClusterGeoB],
+    [1.72, 4.35, -0.6, 0.92, mats.foliageSprigMid, sprigClusterGeoB],
+    [0.45, 4.75, 1.18, 0.88, mats.foliageSprigMid, sprigClusterGeoB],
+    [-0.55, 5.15, -0.82, 0.86, mats.foliageSprigBright, sprigClusterGeoC],
+    [0.85, 5.35, 0.25, 0.84, mats.foliageSprigBright, sprigClusterGeoC],
+    [-0.9, 4.88, -0.1, 0.8, mats.foliageSprigBright, sprigClusterGeoC],
+  ];
   for (const [tx, tz, sc, idx] of [
-    [39.5, 16.5, 1.35, 0],
-    [43.0, 9.5, 1.5, 1],
-    [44.5, 2.5, 1.45, 2],
-    [42.0, 22.0, 1.2, 3],
-    [-42.5, 15.0, 1.3, 4],
-    [-45.0, 6.0, 1.42, 5],
+    [40.5, 16.5, 1.3, 0],
+    [44.0, 9.5, 1.44, 1],
+    [45.5, 2.5, 1.4, 2],
+    [42.5, 22.0, 1.18, 3],
+    [-42.5, 15.0, 1.28, 4],
+    [-45.0, 6.0, 1.38, 5],
   ] as Array<[number, number, number, number]>) {
-    const ty = groundHeightAt(tx, tz, 0);
+    if (!isValidTreePosition(tx, tz, 2.8)) continue;
+    const ty = groundHeightAt(tx, tz, 0) - 0.14;
     const cg = new THREE.Group();
     cg.position.set(tx, ty, tz);
     cg.rotation.y = idx * 1.15;
     cg.scale.setScalar(sc);
-    cg.add(new THREE.Mesh(heroTrunkGeo, barkMat));
+    const trunkMesh = new THREE.Mesh(heroTrunkGeo, barkMat);
+    trunkMesh.castShadow = castShadow;
+    cg.add(trunkMesh);
     cg.add(new THREE.Mesh(heroBranchLGeo, barkMat));
     cg.add(new THREE.Mesh(heroBranchRGeo, barkMat));
-    const puffs: Array<[number, number, number, number, THREE.Material, THREE.BufferGeometry]> = [
-      [0.0, 4.25, 0.0, 1.15, mats.foliageDeep, pillowGeoA],
-      [-1.55, 4.15, 0.52, 0.92, mats.foliageMid, pillowGeoB],
-      [1.62, 4.35, -0.58, 0.9, mats.foliageMid, pillowGeoB],
-      [0.35, 4.85, 1.05, 0.85, mats.foliageMid, pillowGeoB],
-      [-0.55, 5.1, -0.82, 0.86, mats.foliageBright, pillowGeoC],
-      [0.85, 5.28, 0.25, 0.82, mats.foliageBright, pillowGeoC],
-      [-0.9, 4.78, -0.1, 0.78, mats.foliageBright, pillowGeoC],
-    ];
-    for (const [px, py, pz, psc, pmat, pgeo] of puffs) {
+    cg.add(new THREE.Mesh(heroBranchFGeo, barkMat));
+    for (const [px, py, pz, psc, pmat, pgeo] of heroCrownClusters) {
       const m = new THREE.Mesh(pgeo, pmat);
       m.position.set(px, py, pz);
       m.scale.setScalar(psc);
@@ -2378,32 +2578,12 @@ export function buildWeilongArchitecture(
     root.add(cg);
   }
 
-  // 8F. 14 Exquisitely Sculpted Spring Peach Blossom Trees with backlit Subsurface Scattering (SSS)!
-  const blossomMatCore = attachSubsurfaceShader(
-    createPaintedWoodMat(SCULPT_COLORS.blossomCore, trackMat, 0.72),
-    { key: 'peach_core', tintHex: 0xff9eb2, backStrength: 0.62, wrapStrength: 0.28, power: 2.2 }
-  );
-  const blossomMatMid = attachSubsurfaceShader(
-    createPaintedWoodMat(SCULPT_COLORS.blossomMid, trackMat, 0.7),
-    { key: 'peach_mid', tintHex: 0xffc6d2, backStrength: 0.68, wrapStrength: 0.3, power: 2.1 }
-  );
-  const blossomMatLight = attachSubsurfaceShader(
-    createPaintedWoodMat(SCULPT_COLORS.blossomHighlight, trackMat, 0.68),
-    { key: 'peach_light', tintHex: 0xffe4df, backStrength: 0.72, wrapStrength: 0.3, power: 2.0 }
-  );
-  const blossomMatApricot = attachSubsurfaceShader(
-    createPaintedWoodMat(SCULPT_COLORS.blossomApricot, trackMat, 0.7),
-    { key: 'peach_apricot', tintHex: 0xffe5c4, backStrength: 0.66, wrapStrength: 0.28, power: 2.1 }
-  );
-  const blossomTwigLeafMat = attachSubsurfaceShader(
-    createPaintedWoodMat(HANDCRAFTED_PAL.sage, trackMat, 0.74),
-    { key: 'peach_leaf', tintHex: 0xbfe882, backStrength: 0.56, wrapStrength: 0.24, power: 2.3 }
-  );
-
+  // 8F. 14 Exquisitely Sculpted Spring Peach Blossom Trees — strictly validated to NEVER clip walls
+  // and upgraded to airy layered blossom-sprig clusters!
   const peachTrunkGeo = trackGeo(
     createTaperedCurveGeometry(
       [
-        new THREE.Vector3(0, -0.04, 0),
+        new THREE.Vector3(0, -0.16, 0),
         new THREE.Vector3(0.16, 0.95, 0.08),
         new THREE.Vector3(-0.14, 2.05, -0.06),
         new THREE.Vector3(0.08, 3.05, 0.12),
@@ -2453,45 +2633,41 @@ export function buildWeilongArchitecture(
       6
     )
   );
-  const peachPuffBigGeo = trackGeo(createSoftPillowGeometry(0.95, 2.1, 0.72, 14, 10));
-  const peachPuffSmallGeo = trackGeo(createSoftPillowGeometry(0.68, 5.3, 0.75, 12, 9));
+  const blossomClusterBigGeo = trackGeo(createFoliageCardClusterGeometry(1.18, 12, 2.1, 0.74));
+  const blossomClusterSmallGeo = trackGeo(createFoliageCardClusterGeometry(0.86, 9, 5.3, 0.78));
 
+  // All 14 coordinates cleanly cleared of Inner/Outer Weilong walls and Half-Moon Pond
   const blossomTrees: Array<[number, number, number]> = [
-    [-26.5, 25.2, 1.08],
-    [26.2, 25.8, 1.12],
-    [-29.2, 32.5, 0.96],
-    [29.8, 31.8, 1.02],
-    [-21.5, 36.2, 0.94],
+    [-27.0, 25.2, 1.08],
+    [27.0, 25.6, 1.1],
+    [-30.5, 32.0, 0.98],
+    [30.5, 31.8, 1.02],
+    [-21.8, 36.2, 0.94],
     [21.8, 36.0, 0.96],
-    [-16.2, 46.8, 0.94],
-    [16.5, 46.2, 0.98],
-    [-19.5, -24.5, 1.15],
-    [20.2, -23.8, 1.18],
-    [-8.5, -36.5, 1.24],
-    [14.0, -35.8, 1.2],
-    [-34.0, 2.0, 1.16],
-    [35.2, 4.5, 1.18],
+    [-17.4, 47.4, 0.94],
+    [17.4, 47.0, 0.98],
+    [-24.5, -45.5, 1.12],
+    [24.5, -45.5, 1.14],
+    [-13.5, -47.2, 1.18],
+    [16.8, -46.8, 1.16],
+    [-44.5, -12.5, 1.14],
+    [45.0, -12.0, 1.16],
   ];
 
-  const blossomPuffLayout: Array<[number, number, number, number, number]> = [
-    // [x, y, z, scale, matIdx: 0=core, 1=mid, 2=light, 3=apricot, 4=leaf]
-    [0.0, 3.35, 0.0, 1.12, 0],
-    [1.38, 3.05, 0.52, 1.04, 1],
-    [-1.32, 3.32, -0.48, 1.02, 1],
-    [-0.36, 3.55, 1.12, 0.92, 2],
-    [0.52, 3.85, -0.68, 0.94, 2],
-    [-0.65, 3.92, 0.25, 0.96, 3],
-    [0.85, 3.68, 0.92, 0.78, 2],
-    [-1.55, 3.02, 0.36, 0.76, 0],
-    [1.62, 2.86, -0.25, 0.74, 3],
-    [0.12, 4.22, -0.05, 0.85, 2],
-    [-0.95, 2.88, -0.82, 0.56, 4],
-    [0.98, 2.78, 0.12, 0.52, 4],
+  const blossomClusterLayout: Array<[number, number, number, number, boolean]> = [
+    [0.0, 3.4, 0.0, 1.12, true],
+    [1.42, 3.08, 0.54, 1.02, true],
+    [-1.36, 3.35, -0.5, 1.0, true],
+    [-0.38, 3.58, 1.14, 0.94, true],
+    [0.54, 3.9, -0.68, 0.92, false],
+    [-0.68, 3.96, 0.26, 0.94, false],
+    [0.86, 3.7, 0.9, 0.82, false],
+    [0.12, 4.28, -0.05, 0.88, false],
   ];
-  const bMats = [blossomMatCore, blossomMatMid, blossomMatLight, blossomMatApricot, blossomTwigLeafMat];
 
   blossomTrees.forEach(([bx, bz, sc], idx) => {
-    const by = groundHeightAt(bx, bz, 0);
+    if (!isValidTreePosition(bx, bz, 2.2)) return;
+    const by = groundHeightAt(bx, bz, 0) - 0.14;
     const tg = new THREE.Group();
     tg.position.set(bx, by, bz);
     tg.rotation.y = idx * 1.47;
@@ -2504,32 +2680,24 @@ export function buildWeilongArchitecture(
     tg.add(new THREE.Mesh(peachBranch2Geo, barkMat));
     tg.add(new THREE.Mesh(peachBranch3Geo, barkMat));
 
-    blossomPuffLayout.forEach(([px, py, pz, psc, mIdx], pIdx) => {
-      const geo = pIdx < 6 ? peachPuffBigGeo : peachPuffSmallGeo;
-      const puff = new THREE.Mesh(geo, bMats[mIdx]);
-      puff.position.set(px, py, pz);
-      puff.scale.setScalar(psc);
-      puff.rotation.y = pIdx * 0.9 + idx;
-      puff.castShadow = castShadow && pIdx < 4;
-      tg.add(puff);
+    blossomClusterLayout.forEach(([px, py, pz, psc, isBig], pIdx) => {
+      const geo = isBig ? blossomClusterBigGeo : blossomClusterSmallGeo;
+      const cluster = new THREE.Mesh(geo, mats.blossomSprig);
+      cluster.position.set(px, py, pz);
+      cluster.scale.setScalar(psc);
+      cluster.rotation.y = pIdx * 1.15 + idx;
+      cluster.castShadow = castShadow && pIdx < 4;
+      tg.add(cluster);
     });
     root.add(tg);
   });
 
-  // 8G. 5 Gracefully Leaning Sculpted Weeping Willows with translucent sunlit SSS fronds!
-  const willowDeepMat = attachSubsurfaceShader(
-    createPaintedWoodMat(SCULPT_COLORS.willowLeafDeep, trackMat, 0.74),
-    { key: 'willow_deep', tintHex: 0xa2df6c, backStrength: 0.56, wrapStrength: 0.25, power: 2.3 }
-  );
-  const willowTopMat = attachSubsurfaceShader(
-    createPaintedWoodMat(SCULPT_COLORS.willowLeafMid, trackMat, 0.72),
-    { key: 'willow_top', tintHex: 0xc8eb78, backStrength: 0.64, wrapStrength: 0.28, power: 2.1 }
-  );
+  // 8G. 5 Gracefully Leaning Sculpted Weeping Willows with airy sprig crowns + translucent SSS fronds!
   const willowCurtainMat = attachSubsurfaceShader(
     trackMat(
       new THREE.MeshStandardMaterial({
         color: SCULPT_COLORS.willowLeafTip,
-        roughness: 0.74,
+        roughness: 0.72,
         side: THREE.DoubleSide,
       })
     ),
@@ -2549,7 +2717,7 @@ export function buildWeilongArchitecture(
   const willowTrunkGeo = trackGeo(
     createTaperedCurveGeometry(
       [
-        new THREE.Vector3(0, -0.05, 0),
+        new THREE.Vector3(0, -0.16, 0),
         new THREE.Vector3(0.28, 1.35, 0.08),
         new THREE.Vector3(0.62, 2.75, 0.14),
         new THREE.Vector3(0.92, 3.85, 0.18),
@@ -2575,19 +2743,19 @@ export function buildWeilongArchitecture(
   );
   const willowFrondLongGeo = trackGeo(createWillowFrondGeometry(2.55, 0.52, 0.085, 7));
   const willowFrondMedGeo = trackGeo(createWillowFrondGeometry(1.92, 0.42, 0.075, 6));
+  const willowSprigGeo = trackGeo(createFoliageCardClusterGeometry(1.15, 11, 8.7, 0.7));
 
   const willowPositions: Array<[number, number, number]> = [
-    [-17.4, 39.2, 1.06],
-    [17.4, 39.6, 1.08],
-    [-13.8, 49.4, 0.96],
-    [13.4, 49.6, 0.98],
-    [0.8, 50.8, 1.04],
+    [-17.8, 39.2, 1.06],
+    [17.8, 39.6, 1.08],
+    [-13.8, 49.6, 0.96],
+    [13.4, 49.8, 0.98],
+    [0.8, 51.0, 1.04],
   ];
   willowPositions.forEach(([wx, wz, sc], idx) => {
-    const wy = groundHeightAt(wx, wz, 0);
+    const wy = groundHeightAt(wx, wz, 0) - 0.12;
     const wg = new THREE.Group();
     wg.position.set(wx, wy, wz);
-    // Orient trunk gracefully leaning inward toward the Half-Moon Pond water center (0, 43.2)!
     const toPondYaw = Math.atan2(0 - wx, 43.2 - wz);
     wg.rotation.y = toPondYaw - Math.PI * 0.5;
     wg.scale.setScalar(sc);
@@ -2597,21 +2765,20 @@ export function buildWeilongArchitecture(
     wg.add(wTrunk);
     wg.add(new THREE.Mesh(willowBoughGeo, barkMat));
 
-    // Lush layered soft cloud-like weeping willow crown canopy (8 pillows)
+    // Airy layered weeping willow sprig clusters crowning the hanging fronds
     const crownCenters: Array<[number, number, number, number, THREE.Material]> = [
-      [0.95, 4.02, 0.14, 0.98, willowDeepMat],
-      [1.62, 3.82, 0.68, 0.78, willowTopMat],
-      [1.48, 3.88, -0.52, 0.76, willowTopMat],
-      [0.25, 4.16, -0.46, 0.82, willowTopMat],
-      [-0.36, 3.74, -0.96, 0.72, willowDeepMat],
-      [0.86, 4.56, 0.06, 0.76, willowTopMat],
-      [0.45, 3.86, 0.92, 0.74, willowDeepMat],
-      [1.75, 4.18, 0.08, 0.68, willowTopMat],
+      [0.95, 4.02, 0.14, 1.04, mats.foliageSprigMid],
+      [1.62, 3.82, 0.68, 0.84, mats.foliageSprigBright],
+      [1.48, 3.88, -0.52, 0.82, mats.foliageSprigBright],
+      [0.25, 4.16, -0.46, 0.88, mats.foliageSprigMid],
+      [-0.36, 3.74, -0.96, 0.78, mats.foliageSprigDeep],
+      [0.86, 4.56, 0.06, 0.82, mats.foliageSprigBright],
+      [0.45, 3.86, 0.92, 0.78, mats.foliageSprigMid],
     ];
     for (const [cx, cy, cz, csc, cmat] of crownCenters) {
-      const dome = new THREE.Mesh(peachPuffBigGeo, cmat);
+      const dome = new THREE.Mesh(willowSprigGeo, cmat);
       dome.position.set(cx, cy, cz);
-      dome.scale.set(csc * 1.18, csc * 0.76, csc * 1.18);
+      dome.scale.set(csc * 1.12, csc * 0.82, csc * 1.12);
       wg.add(dome);
     }
 
@@ -2640,60 +2807,49 @@ export function buildWeilongArchitecture(
     root.add(wg);
   });
 
-  // 8H. 14 Multi-Cluster Sculpted Courtyard Flowering Shrubs with sunlit SSS foliage
-  const shrubLeafDeepMat = attachSubsurfaceShader(
-    createPaintedWoodMat(HANDCRAFTED_PAL.pine, trackMat, 0.8),
-    { key: 'shrub_deep', tintHex: 0x76c86e, backStrength: 0.48, wrapStrength: 0.22, power: 2.4 }
-  );
-  const shrubLeafLightMat = attachSubsurfaceShader(
-    createPaintedWoodMat(HANDCRAFTED_PAL.leaf, trackMat, 0.76),
-    { key: 'shrub_light', tintHex: 0xa6de72, backStrength: 0.56, wrapStrength: 0.25, power: 2.2 }
-  );
+  // 8H. 14 Multi-Cluster Sculpted Courtyard Flowering Shrubs with airy leaf sprigs
   const flowerAccentMats = [
     createPaintedWoodMat(HANDCRAFTED_PAL.verm, trackMat, 0.58),
     createPaintedWoodMat(HANDCRAFTED_PAL.lilac, trackMat, 0.58),
     createPaintedWoodMat(HANDCRAFTED_PAL.lemon, trackMat, 0.58),
     createPaintedWoodMat(HANDCRAFTED_PAL.pink, trackMat, 0.58),
   ];
-  const shrubPuffGeo = trackGeo(createSoftPillowGeometry(0.46, 7.1, 0.78, 12, 8));
-  const flowerClusterGeo = trackGeo(createSoftPillowGeometry(0.11, 2.5, 0.85, 8, 6));
+  const shrubSprigGeo = trackGeo(createFoliageCardClusterGeometry(0.56, 8, 7.1, 0.78));
+  const flowerClusterGeo = trackGeo(createSoftPillowGeometry(0.085, 2.5, 0.85, 8, 6));
   const shrubSpots: Array<[number, number, number]> = [
-    [-19.8, 22.8, 1.0],
-    [19.8, 22.8, 1.05],
-    [-23.2, 23.4, 1.15],
-    [23.2, 23.4, 1.12],
-    [-14.2, 36.1, 0.92],
-    [14.2, 36.1, 0.94],
-    [-17.8, 37.2, 1.08],
-    [17.8, 37.2, 1.05],
+    [-20.6, 23.0, 1.0],
+    [20.6, 23.0, 1.05],
+    [-23.6, 23.6, 1.12],
+    [23.6, 23.6, 1.1],
+    [-14.2, 36.1, 0.9],
+    [14.2, 36.1, 0.92],
+    [-17.8, 37.2, 1.02],
+    [17.8, 37.2, 1.0],
     [-8.5, -16.8, 0.95],
     [8.5, -16.8, 0.95],
-    [-13.5, -14.2, 1.02],
-    [13.5, -14.2, 1.02],
-    [-20.8, 18.2, 0.95],
-    [20.8, 18.2, 0.95],
+    [-13.5, -14.2, 1.0],
+    [13.5, -14.2, 1.0],
+    [-21.2, 18.2, 0.92],
+    [21.2, 18.2, 0.92],
   ];
   shrubSpots.forEach(([sx, sz, sc], idx) => {
-    const sy = groundHeightAt(sx, sz, 0);
+    const sy = groundHeightAt(sx, sz, 0) - 0.04;
     const sg = new THREE.Group();
     sg.position.set(sx, sy, sz);
     sg.rotation.y = idx * 1.25;
     sg.scale.setScalar(sc);
 
-    // 4 overlapping soft foliage mounds per bush
     for (const [bx, by, bz, bsc, isLight] of [
-      [0, 0.34, 0, 1.15, false],
-      [0.36, 0.28, 0.22, 0.82, true],
-      [-0.34, 0.3, -0.18, 0.85, true],
-      [0.05, 0.46, -0.14, 0.72, true],
+      [0, 0.36, 0, 1.12, false],
+      [0.32, 0.3, 0.2, 0.8, true],
+      [-0.32, 0.32, -0.18, 0.84, true],
     ] as Array<[number, number, number, number, boolean]>) {
-      const m = new THREE.Mesh(shrubPuffGeo, isLight ? shrubLeafLightMat : shrubLeafDeepMat);
+      const m = new THREE.Mesh(shrubSprigGeo, isLight ? mats.foliageSprigBright : mats.foliageSprigDeep);
       m.position.set(bx, by, bz);
       m.scale.setScalar(bsc);
       sg.add(m);
     }
 
-    // 8 delicate blossom florets dotted across the foliage pillows
     const fMat = flowerAccentMats[idx % flowerAccentMats.length];
     for (let f = 0; f < 8; f++) {
       const a = (f / 8) * Math.PI * 2 + idx * 0.7;
@@ -2716,10 +2872,22 @@ export function buildWeilongArchitecture(
     koiGroup,
     lanternLights,
     rainCurtainMeshes,
-    updateWater: (t: number, nightFactor: number, rainFactor: number) => {
+    updateWater: (
+      t: number,
+      nightFactor: number,
+      rainFactor: number,
+      skyZenithHex?: number,
+      skyHorizonHex?: number,
+      sunColorHex?: number,
+      lanternGlow?: number
+    ) => {
       pondUniforms.uTime.value = t;
       pondUniforms.uNight.value = nightFactor;
       pondUniforms.uRain.value = rainFactor;
+      if (skyZenithHex !== undefined) pondUniforms.uSkyZenith.value.setHex(skyZenithHex);
+      if (skyHorizonHex !== undefined) pondUniforms.uSkyHorizon.value.setHex(skyHorizonHex);
+      if (sunColorHex !== undefined) pondUniforms.uSunColor.value.setHex(sunColorHex);
+      if (lanternGlow !== undefined) pondUniforms.uLanternGlow.value = lanternGlow;
 
       // Graceful gentle breeze sway on weeping willow frond curtains
       for (let i = 0; i < animatedWillowFronds.length; i++) {
@@ -2734,7 +2902,7 @@ export function buildWeilongArchitecture(
         rd.mesh.rotation.z = Math.sin(t * 1.6 + rd.phase) * 0.055;
       }
 
-      // Articulated S-wave swimming wag for all 12 Koi fish
+      // Articulated S-wave swimming wag for all 12 underwater Koi fish
       for (let i = 0; i < animatedKoiTails.length; i++) {
         const kt = animatedKoiTails[i];
         kt.tail.rotation.y = Math.sin(t * 5.2 + kt.phase) * 0.34;

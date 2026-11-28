@@ -1,14 +1,7 @@
 import * as THREE from 'three';
 import { HANDCRAFTED_PAL, type MaterialLibrary } from './proceduralTextures';
 import { INTERACTABLES } from '../data/weilongData';
-import {
-  groundHeightAt,
-  INNER_RING_RX,
-  INNER_RING_RZ,
-  OUTER_RING_RX,
-  OUTER_RING_RZ,
-  OVAL_CENTER_Z,
-} from './worldMath';
+import { groundHeightAt } from './worldMath';
 import {
   createCuppedPetalGeometry,
   createPaintedWoodMat,
@@ -35,12 +28,13 @@ export interface PropAnimationRefs {
   jiaobeiRight: THREE.Mesh;
   incenseSmokeGroup: THREE.Group;
   fiveElementStones: THREE.Mesh[];
-  fiveElementBeam: THREE.Mesh;
   studyLampLight: THREE.PointLight;
   dryingClothes: THREE.Mesh[];
   chickens: THREE.Group[];
   startledBirds: THREE.Group;
-  taijiOverlay: THREE.Group;
+  grainMatGroups: THREE.Group[];
+  grainTarpCovers: THREE.Mesh[];
+  grainStaticRake: THREE.Group;
   dispose: () => void;
 }
 
@@ -158,6 +152,25 @@ export function buildWeilongProps(
   const matBorderShortGeo = trackGeo(new THREE.CylinderGeometry(0.032, 0.032, 3.65, 8));
   matBorderShortGeo.rotateX(Math.PI * 0.5);
 
+  const grainMatGroups: THREE.Group[] = [];
+  const grainTarpCovers: THREE.Mesh[] = [];
+  const rainTarpMat = createPaintedWoodMat(0x526b5c, trackMat, 0.78);
+  const rainTarpGeo = trackGeo(new THREE.PlaneGeometry(5.15, 3.35, 14, 10));
+  rainTarpGeo.rotateX(-Math.PI * 0.5);
+  {
+    const pos = rainTarpGeo.attributes.position as THREE.BufferAttribute;
+    for (let i = 0; i < pos.count; i++) {
+      const x = pos.getX(i);
+      const z = pos.getZ(i);
+      const nx = x / 2.575;
+      const nz = z / 1.675;
+      const dome = Math.max(0, 1 - nx * nx * 0.8) * Math.max(0, 1 - nz * nz * 0.8);
+      const fold = 0.02 * Math.sin(x * 3.8 + z * 1.6);
+      pos.setY(i, 0.055 + (0.28 + fold) * Math.pow(dome, 0.55));
+    }
+    rainTarpGeo.computeVertexNormals();
+  }
+
   for (const [mx, mz] of [
     [5.2, 29.2],
     [-6.0, 28.8],
@@ -185,25 +198,36 @@ export function buildWeilongProps(
     grainMound.position.y = 0.025;
     grainMound.receiveShadow = true;
     matGroup.add(grainMound);
+
+    // Rain-shelter woven oilcloth tarp draped over grain mound during rain rush-harvest
+    const tarpCover = new THREE.Mesh(rainTarpGeo, rainTarpMat);
+    tarpCover.position.y = 0.04;
+    tarpCover.visible = false;
+    tarpCover.castShadow = castShadow;
+    tarpCover.receiveShadow = true;
+    matGroup.add(tarpCover);
+    grainTarpCovers.push(tarpCover);
+
     root.add(matGroup);
+    grainMatGroups.push(matGroup);
   }
 
-  // Handcrafted leaning 7-tooth wooden grain push-rake on East mat
-  const rakeGroup = new THREE.Group();
-  rakeGroup.position.set(5.2, 0.14, 29.2);
-  const rakePole = new THREE.Mesh(trackGeo(new THREE.CylinderGeometry(0.028, 0.032, 2.25, 10)), bambooMat);
+  // Handcrafted leaning 7-tooth wooden grain push-rake resting beside East mat (stowed at night)
+  const grainStaticRake = new THREE.Group();
+  grainStaticRake.position.set(7.6, 0.14, 28.2);
+  const rakePole = new THREE.Mesh(trackGeo(new THREE.CylinderGeometry(0.028, 0.032, 2.15, 10)), bambooMat);
   rakePole.rotation.z = 0.55;
-  rakePole.position.set(0.55, 0.9, 0);
-  rakeGroup.add(rakePole);
-  const rakeBlade = new THREE.Mesh(trackGeo(new THREE.BoxGeometry(0.075, 0.16, 0.98)), mats.darkTimber);
+  rakePole.position.set(0.52, 0.85, 0);
+  grainStaticRake.add(rakePole);
+  const rakeBlade = new THREE.Mesh(trackGeo(new THREE.BoxGeometry(0.075, 0.16, 0.94)), mats.darkTimber);
   rakeBlade.position.set(-0.02, 0.12, 0);
-  rakeGroup.add(rakeBlade);
+  grainStaticRake.add(rakeBlade);
   for (let t = -3; t <= 3; t++) {
     const tooth = new THREE.Mesh(trackGeo(new THREE.CylinderGeometry(0.014, 0.014, 0.14, 6)), mats.weatheredWoodDoor);
     tooth.position.set(-0.02, 0.03, t * 0.13);
-    rakeGroup.add(tooth);
+    grainStaticRake.add(tooth);
   }
-  root.add(rakeGroup);
+  root.add(grainStaticRake);
 
   // =========================================================================
   // 03. LOWER HALL: OIL-PAPER UMBRELLA RACK (4 COLORFUL UMBRELLAS) & DOULI HAT
@@ -1320,15 +1344,6 @@ export function buildWeilongProps(
     fiveElementStones.push(stone);
   });
 
-  const fiveElementBeam = new THREE.Mesh(
-    trackGeo(new THREE.BoxGeometry(0.32, 0.08, 13.5)),
-    trackMat(new THREE.MeshBasicMaterial({ color: 0xf4c95d, transparent: true, opacity: 0.72 }))
-  );
-  fiveElementBeam.position.set(1.2, 2.0, -14.8);
-  fiveElementBeam.rotation.x = 0.085;
-  fiveElementBeam.visible = false;
-  root.add(fiveElementBeam);
-
   // West Huatai Bamboo Drying Rack with Forked Stands & 3 Sculpted Hakka Indigo Tunics
   const dryingClothes: THREE.Mesh[] = [];
   const rackY = groundHeightAt(-10.5, -11.8, 0);
@@ -1572,38 +1587,6 @@ export function buildWeilongProps(
   bogongGroup.add(bCenser);
   root.add(bogongGroup);
 
-  // Double-Ring Taiji AR Geomancy Overlay (太极脉络透视)
-  const taijiOverlay = new THREE.Group();
-  const arGold = trackMat(
-    new THREE.MeshBasicMaterial({ color: 0xf6cf65, transparent: true, opacity: 0.78, side: THREE.DoubleSide })
-  );
-  const arJade = trackMat(
-    new THREE.MeshBasicMaterial({ color: 0x52c7a8, transparent: true, opacity: 0.65, side: THREE.DoubleSide })
-  );
-  const axisLine = new THREE.Mesh(trackGeo(new THREE.BoxGeometry(0.45, 0.14, 82)), arGold);
-  axisLine.position.set(0, 9.6, 8.0);
-  taijiOverlay.add(axisLine);
-
-  const innerArc = new THREE.Mesh(trackGeo(new THREE.RingGeometry(0.97, 1.0, 48, 1, 0, Math.PI)), arGold);
-  innerArc.rotation.x = -Math.PI * 0.5;
-  innerArc.scale.set(INNER_RING_RX, INNER_RING_RZ, 1);
-  innerArc.position.set(0, 9.6, OVAL_CENTER_Z);
-  taijiOverlay.add(innerArc);
-
-  const outerArc = new THREE.Mesh(trackGeo(new THREE.RingGeometry(0.98, 1.0, 48, 1, 0, Math.PI)), arGold);
-  outerArc.rotation.x = -Math.PI * 0.5;
-  outerArc.scale.set(OUTER_RING_RX, OUTER_RING_RZ, 1);
-  outerArc.position.set(0, 10.2, OVAL_CENTER_Z);
-  taijiOverlay.add(outerArc);
-
-  const southArc = new THREE.Mesh(trackGeo(new THREE.RingGeometry(15.6, 16.6, 42, 1, Math.PI, Math.PI)), arJade);
-  southArc.rotation.x = -Math.PI * 0.5;
-  southArc.position.set(0, 8.6, 38.6);
-  taijiOverlay.add(southArc);
-
-  taijiOverlay.visible = false;
-  root.add(taijiOverlay);
-
   return {
     root,
     interactableMeshes,
@@ -1622,12 +1605,13 @@ export function buildWeilongProps(
     jiaobeiRight,
     incenseSmokeGroup,
     fiveElementStones,
-    fiveElementBeam,
     studyLampLight,
     dryingClothes,
     chickens,
     startledBirds,
-    taijiOverlay,
+    grainMatGroups,
+    grainTarpCovers,
+    grainStaticRake,
     dispose: () => {
       geometries.forEach((g) => g.dispose());
       localMaterials.forEach((m) => m.dispose());

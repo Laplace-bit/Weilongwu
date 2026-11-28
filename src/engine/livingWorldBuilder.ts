@@ -20,9 +20,11 @@ import {
   createTurnedLatheGeometry,
 } from './sculptHelpers';
 
+import { evaluateLivingBehavior } from './livingBehavior';
+
 export interface LivingWorldRefs {
   root: THREE.Group;
-  update: (dt: number, t: number, weather: WeatherMode) => void;
+  update: (dt: number, t: number, weather: WeatherMode, timeOfDay?: number) => void;
   dispose: () => void;
 }
 
@@ -39,6 +41,7 @@ interface WalkingVillagerAnim {
   carryPole?: THREE.Object3D;
   pinwheel?: THREE.Object3D;
   hasUmbrella?: boolean;
+  rainUmbrella?: THREE.Group;
   isChild?: boolean;
 }
 
@@ -51,6 +54,13 @@ interface IdleVillagerAnim {
   kind: 'rake' | 'wash' | 'fan' | 'chat' | 'tea' | 'bow' | 'tend';
   phaseOffset: number;
   ripple?: THREE.Mesh;
+  rakeGroup?: THREE.Group;
+  baseX: number;
+  baseZ: number;
+  baseYaw: number;
+  shelterX?: number;
+  shelterZ?: number;
+  shelterYaw?: number;
 }
 
 interface PoultryAnim {
@@ -88,6 +98,8 @@ interface QuadrupedAnim {
   waypoints?: readonly PathPoint2D[];
   speed: number;
   phaseOffset: number;
+  baseX: number;
+  baseZ: number;
   baseY: number;
 }
 
@@ -102,6 +114,10 @@ interface CraneAnim {
   alt: number;
   speed: number;
   phaseOffset: number;
+  roostX: number;
+  roostY: number;
+  roostZ: number;
+  roostYaw: number;
 }
 
 interface ButterflyAnim {
@@ -625,6 +641,8 @@ export function buildLivingWorld(
     head: THREE.Group;
     leftArm: THREE.Group;
     rightArm: THREE.Group;
+    leftHandSocket: THREE.Group;
+    rightHandSocket: THREE.Group;
     leftLeg: THREE.Group;
     rightLeg: THREE.Group;
   }
@@ -751,8 +769,8 @@ export function buildLivingWorld(
     neck.position.y = 0.68;
     torso.add(neck);
 
-    // Sculpted tapered wide sleeves + contrasting cuffs + rounded hands
-    const makeArm = (side: -1 | 1): THREE.Group => {
+    // Sculpted tapered wide sleeves + contrasting cuffs + explicit hand sockets for zero-drift prop attachment
+    const makeArm = (side: -1 | 1): { arm: THREE.Group; handSocket: THREE.Group } => {
       const arm = new THREE.Group();
       arm.position.set(side * 0.225, 0.56, 0);
 
@@ -771,14 +789,21 @@ export function buildLivingWorld(
       cuff.rotation.z = side * 0.13;
       arm.add(cuff);
 
+      const handSocket = new THREE.Group();
+      handSocket.position.set(side * 0.056, -0.45, 0.02);
       const hand = new THREE.Mesh(sphereGeo, skinMat);
       hand.scale.set(0.062, 0.068, 0.062);
-      hand.position.set(side * 0.056, -0.45, 0.02);
-      arm.add(hand);
-      return arm;
+      handSocket.add(hand);
+      arm.add(handSocket);
+
+      return { arm, handSocket };
     };
-    const leftArm = makeArm(-1);
-    const rightArm = makeArm(1);
+    const leftArmBuilt = makeArm(-1);
+    const rightArmBuilt = makeArm(1);
+    const leftArm = leftArmBuilt.arm;
+    const rightArm = rightArmBuilt.arm;
+    const leftHandSocket = leftArmBuilt.handSocket;
+    const rightHandSocket = rightArmBuilt.handSocket;
     torso.add(leftArm, rightArm);
 
     // Expressive carved-wood doll head with chin contour, tiny nose, smiling eyes & blush
@@ -931,7 +956,75 @@ export function buildLivingWorld(
       }
     }
 
-    return { group: g, torso, head, leftArm, rightArm, leftLeg, rightLeg };
+    return {
+      group: g,
+      torso,
+      head,
+      leftArm,
+      rightArm,
+      leftHandSocket,
+      rightHandSocket,
+      leftLeg,
+      rightLeg,
+    };
+  };
+
+  // Shared turned oil-paper umbrella factory mounted directly to a villager's rightHandSocket
+  const sharedUmbCanopyGeo = trackGeo(
+    createTurnedLatheGeometry(
+      [
+        [0.0, 0.23],
+        [0.16, 0.21],
+        [0.36, 0.155],
+        [0.54, 0.075],
+        [0.64, 0.0],
+      ],
+      18
+    )
+  );
+  const sharedUmbRimGeo = trackGeo(new THREE.TorusGeometry(0.635, 0.018, 6, 20));
+  const createHandOilPaperUmbrella = (canopyHex: number): THREE.Group => {
+    const umbGroup = new THREE.Group();
+    // Oriented so when rightArm.rotation.x = -0.68, the handle rises vertically from the palm!
+    umbGroup.rotation.set(0.56, 0, -0.08);
+
+    const handle = new THREE.Mesh(cylGeo, bambooPoleMat);
+    handle.scale.set(0.016, 1.18, 0.016);
+    handle.position.y = 0.52;
+    umbGroup.add(handle);
+
+    const canopy = new THREE.Mesh(
+      sharedUmbCanopyGeo,
+      trackMat(
+        new THREE.MeshStandardMaterial({
+          color: canopyHex,
+          roughness: 0.48,
+          side: THREE.DoubleSide,
+        })
+      )
+    );
+    canopy.position.y = 0.94;
+    umbGroup.add(canopy);
+
+    for (let r = 0; r < 8; r++) {
+      const a = (r / 8) * Math.PI * 2;
+      const rib = new THREE.Mesh(cylGeo, bambooPoleMat);
+      rib.scale.set(0.008, 0.64, 0.008);
+      rib.position.set(Math.cos(a) * 0.3, 1.05, Math.sin(a) * 0.3);
+      rib.rotation.z = Math.cos(a) * 1.24;
+      rib.rotation.x = -Math.sin(a) * 1.24;
+      umbGroup.add(rib);
+    }
+    const rim = new THREE.Mesh(sharedUmbRimGeo, clothCreamMat);
+    rim.rotation.x = Math.PI * 0.5;
+    rim.position.y = 0.94;
+    umbGroup.add(rim);
+
+    const finial = new THREE.Mesh(sphereGeo, mats.gildedGold);
+    finial.scale.setScalar(0.036);
+    finial.position.y = 1.18;
+    umbGroup.add(finial);
+    return umbGroup;
   };
 
   // =========================================================================
@@ -942,11 +1035,13 @@ export function buildLivingWorld(
   const idleVillagers: IdleVillagerAnim[] = [];
 
   // 2A. Two Raking Farmers standing cleanly beside the two unified He-Ping grain mats!
-  const farmerPlacements: Array<[number, number, number, THREE.MeshStandardMaterial]> = [
-    [-9.15, 28.8, Math.PI * 0.5, clothIndigoMat], // West mat [-6.0, 28.8], facing East
-    [8.35, 29.2, -Math.PI * 0.5, clothTealMat],   // East mat [5.2, 29.2], facing West
+  //     Each 7-tooth wooden grain rake is a single unified rig parented directly to rightHandSocket
+  //     so palm, bamboo shaft, crossbar, and all 7 teeth move together with zero detachment!
+  const farmerPlacements: Array<[number, number, number, number, number, THREE.MeshStandardMaterial]> = [
+    [-8.65, 28.8, Math.PI * 0.5, -8.5, 22.8, clothIndigoMat], // West mat [-6.0, 28.8], facing East
+    [7.85, 29.2, -Math.PI * 0.5, 8.2, 22.8, clothTealMat],    // East mat [5.2, 29.2], facing West
   ];
-  farmerPlacements.forEach(([fx, fz, yaw, tunic], idx) => {
+  farmerPlacements.forEach(([fx, fz, yaw, shX, shZ, tunic], idx) => {
     const farmer = createVillager({
       tunicMat: tunic,
       pantsMat: clothNavyMat,
@@ -956,24 +1051,39 @@ export function buildLivingWorld(
     farmer.group.position.set(fx, groundHeightAt(fx, fz, 0), fz);
     farmer.group.rotation.y = yaw;
 
-    // 7-tooth handcrafted wooden grain rake (七齿木谷耙)
+    // Unified 7-tooth wooden grain rake (七齿木谷耙) mounted at origin of rightHandSocket
+    const rakeGroup = new THREE.Group();
+    const rakeShaftAxis = new THREE.Group();
+    // Negative X rotation pitches local -Y shaft FORWARD (+Z) out over the golden rice mat
+    rakeShaftAxis.rotation.set(-0.56, 0.06, -0.04);
+    rakeGroup.add(rakeShaftAxis);
+
     const rakePole = new THREE.Mesh(cylGeo, bambooPoleMat);
-    rakePole.scale.set(0.024, 1.48, 0.024);
-    rakePole.position.set(0.04, -0.35, 0.52);
-    rakePole.rotation.x = 0.86;
-    farmer.rightArm.add(rakePole);
+    rakePole.scale.set(0.023, 1.62, 0.023);
+    // Extends +0.36 behind palm (two-handed grip) and -1.26 forward-downward onto the rice mat
+    rakePole.position.set(0, -0.45, 0);
+    rakePole.castShadow = castShadow;
+    rakeShaftAxis.add(rakePole);
+
+    // Crossbar & 7 teeth firmly mounted at the far tip (y = -1.24) of the bamboo shaft
+    const rakeHead = new THREE.Group();
+    rakeHead.position.set(0, -1.24, 0);
+    rakeHead.rotation.x = 0.92; // orient 7 teeth nearly vertical to comb cleanly through the rice
+    rakeShaftAxis.add(rakeHead);
 
     const rakeBar = new THREE.Mesh(boxGeo, mats.darkTimber);
-    rakeBar.scale.set(0.62, 0.065, 0.065);
-    rakeBar.position.set(0.04, -0.82, 1.04);
-    farmer.rightArm.add(rakeBar);
+    rakeBar.scale.set(0.66, 0.068, 0.068);
+    rakeBar.castShadow = castShadow;
+    rakeHead.add(rakeBar);
 
     for (let t = -3; t <= 3; t++) {
       const tooth = new THREE.Mesh(cylGeo, mats.weatheredWoodDoor);
-      tooth.scale.set(0.015, 0.14, 0.015);
-      tooth.position.set(0.04 + t * 0.085, -0.89, 1.04);
-      farmer.rightArm.add(tooth);
+      tooth.scale.set(0.016, 0.14, 0.016);
+      tooth.position.set(t * 0.088, -0.072, 0);
+      rakeHead.add(tooth);
     }
+
+    farmer.rightHandSocket.add(rakeGroup);
 
     root.add(farmer.group);
     idleVillagers.push({
@@ -984,6 +1094,13 @@ export function buildLivingWorld(
       torso: farmer.torso,
       kind: 'rake',
       phaseOffset: idx * 2.1,
+      rakeGroup,
+      baseX: fx,
+      baseZ: fz,
+      baseYaw: yaw,
+      shelterX: shX,
+      shelterZ: shZ,
+      shelterYaw: 0,
     });
   });
 
@@ -1151,6 +1268,9 @@ export function buildLivingWorld(
       kind: 'wash',
       phaseOffset: idx * 1.9,
       ripple,
+      baseX: wx,
+      baseZ: wz,
+      baseYaw: idx === 0 ? 0.18 : -0.22,
     });
   });
 
@@ -1199,9 +1319,8 @@ export function buildLivingWorld(
   });
   elderA.group.position.set(benchX - 0.5, benchY, benchZ + 0.02);
   elderA.group.rotation.y = 0.35;
-  // Painted silk round fan (团扇) with bamboo rim & blue-green mountain motif
   const fanGroup = new THREE.Group();
-  fanGroup.position.set(0.06, -0.42, 0.14);
+  fanGroup.position.set(0, 0.02, 0.08);
   const fanHandle = new THREE.Mesh(cylGeo, bambooPoleMat);
   fanHandle.scale.set(0.014, 0.24, 0.014);
   fanGroup.add(fanHandle);
@@ -1220,7 +1339,7 @@ export function buildLivingWorld(
   fanMountain.scale.set(0.09, 0.07, 0.018);
   fanMountain.position.set(-0.02, 0.17, 0.008);
   fanGroup.add(fanMountain);
-  elderA.rightArm.add(fanGroup);
+  elderA.rightHandSocket.add(fanGroup);
   elderA.rightArm.rotation.x = -0.82;
   root.add(elderA.group);
   idleVillagers.push({
@@ -1231,6 +1350,9 @@ export function buildLivingWorld(
     torso: elderA.torso,
     kind: 'fan',
     phaseOffset: 0.4,
+    baseX: benchX - 0.5,
+    baseZ: benchZ + 0.02,
+    baseYaw: 0.35,
   });
 
   const elderB = createVillager({
@@ -1253,6 +1375,9 @@ export function buildLivingWorld(
     torso: elderB.torso,
     kind: 'chat',
     phaseOffset: 1.7,
+    baseX: benchX + 0.5,
+    baseZ: benchZ + 0.02,
+    baseYaw: -0.4,
   });
 
   // 2E. Three Joyful Children Playing across open He-Ping paths (completely clear of grain mats!)
@@ -1361,62 +1486,8 @@ export function buildLivingWorld(
     hat: 'bun',
     scale: 0.96,
   });
-  const umbGroup = new THREE.Group();
-  umbGroup.position.set(0.11, -0.1, 0.16);
-  umbGroup.rotation.set(-0.18, 0, -0.12);
-  const umbHandle = new THREE.Mesh(cylGeo, bambooPoleMat);
-  umbHandle.scale.set(0.016, 1.12, 0.016);
-  umbHandle.position.y = 0.36;
-  umbGroup.add(umbHandle);
-
-  const umbCanopyGeo = trackGeo(
-    createTurnedLatheGeometry(
-      [
-        [0.0, 0.23],
-        [0.16, 0.21],
-        [0.36, 0.155],
-        [0.54, 0.075],
-        [0.64, 0.0],
-      ],
-      18
-    )
-  );
-  const umbCanopy = new THREE.Mesh(
-    umbCanopyGeo,
-    trackMat(
-      new THREE.MeshStandardMaterial({
-        color: HANDCRAFTED_PAL.verm,
-        roughness: 0.5,
-        side: THREE.DoubleSide,
-      })
-    )
-  );
-  umbCanopy.position.y = 0.76;
-  umbGroup.add(umbCanopy);
-
-  // 8 slender bamboo ribs + golden top finial + cream rim + tassel
-  for (let r = 0; r < 8; r++) {
-    const a = (r / 8) * Math.PI * 2;
-    const rib = new THREE.Mesh(cylGeo, bambooPoleMat);
-    rib.scale.set(0.008, 0.64, 0.008);
-    rib.position.set(Math.cos(a) * 0.3, 0.87, Math.sin(a) * 0.3);
-    rib.rotation.z = Math.cos(a) * 1.24;
-    rib.rotation.x = -Math.sin(a) * 1.24;
-    umbGroup.add(rib);
-  }
-  const umbRim = new THREE.Mesh(
-    trackGeo(new THREE.TorusGeometry(0.635, 0.018, 6, 20)),
-    clothCreamMat
-  );
-  umbRim.rotation.x = Math.PI * 0.5;
-  umbRim.position.y = 0.76;
-  umbGroup.add(umbRim);
-  const umbFinial = new THREE.Mesh(sphereGeo, mats.gildedGold);
-  umbFinial.scale.setScalar(0.036);
-  umbFinial.position.y = 1.0;
-  umbGroup.add(umbFinial);
-
-  umbrellaWalker.rightArm.add(umbGroup);
+  const umbGroup = createHandOilPaperUmbrella(HANDCRAFTED_PAL.verm);
+  umbrellaWalker.rightHandSocket.add(umbGroup);
   umbrellaWalker.rightArm.rotation.x = -0.68;
   root.add(umbrellaWalker.group);
   walkingVillagers.push({
@@ -1569,6 +1640,9 @@ export function buildLivingWorld(
       torso: guest.torso,
       kind: 'tea',
       phaseOffset: idx * 2.4,
+      baseX: tx,
+      baseZ: tz,
+      baseYaw: yaw,
     });
   });
 
@@ -1604,6 +1678,9 @@ export function buildLivingWorld(
     torso: worshipper.torso,
     kind: 'bow',
     phaseOffset: 0.9,
+    baseX: 1.8,
+    baseZ: -1.6,
+    baseYaw: Math.PI,
   });
 
   // 2I. Two Hakka Women on the Sun-Warmed Huatai (化胎) Cobble Courtyard with Harvest Baskets
@@ -1644,6 +1721,9 @@ export function buildLivingWorld(
       torso: w.torso,
       kind: 'tend',
       phaseOffset: idx * 1.6,
+      baseX: hx,
+      baseZ: hz,
+      baseYaw: yaw,
     });
   });
 
@@ -1700,13 +1780,17 @@ export function buildLivingWorld(
     },
   ];
 
-  wingWalkers.forEach((ww) => {
+  const rainUmbrellaPalette = [0xc94e34, 0x3f7c8a, 0xd49a3c];
+  wingWalkers.forEach((ww, idx) => {
     const v = createVillager({
       tunicMat: ww.tunic,
       pantsMat: clothNavyMat,
       scarfMat: ww.scarf,
       hat: ww.hat,
     });
+    const rainUmbrella = createHandOilPaperUmbrella(rainUmbrellaPalette[idx % rainUmbrellaPalette.length]);
+    rainUmbrella.visible = false;
+    v.rightHandSocket.add(rainUmbrella);
     root.add(v.group);
     walkingVillagers.push({
       group: v.group,
@@ -1715,6 +1799,7 @@ export function buildLivingWorld(
       leftLeg: v.leftLeg,
       rightLeg: v.rightLeg,
       head: v.head,
+      rainUmbrella,
       waypoints: ww.path,
       speed: ww.speed,
       phaseOffset: ww.phase,
@@ -2195,6 +2280,8 @@ export function buildLivingWorld(
       waypoints,
       speed,
       phaseOffset,
+      baseX: posX,
+      baseZ: posZ,
       baseY,
     });
   };
@@ -2307,6 +2394,8 @@ export function buildLivingWorld(
       kind: 'cat_loaf',
       speed: 1.0,
       phaseOffset: 0.7,
+      baseX: cx,
+      baseZ: cz,
       baseY: cy,
     });
   }
@@ -2420,6 +2509,8 @@ export function buildLivingWorld(
       kind: 'buffalo',
       speed: 0.8,
       phaseOffset: 1.4,
+      baseX: bx,
+      baseZ: bz,
       baseY: by,
     });
   }
@@ -2514,6 +2605,8 @@ export function buildLivingWorld(
       kind: 'goat',
       speed: 1.0,
       phaseOffset: phase,
+      baseX: gx,
+      baseZ: gz,
       baseY: gy,
     });
   });
@@ -2603,6 +2696,17 @@ export function buildLivingWorld(
     const rightWing = makeWing(1);
     cg.add(leftWing, rightWing);
 
+    const roostSpots: Array<[number, number, number]> = [
+      [-21.5, -48.5, 0.4],
+      [-12.0, -52.5, -0.25],
+      [-2.5, -54.5, 0.15],
+      [7.5, -53.5, -0.35],
+      [16.8, -50.2, 0.5],
+      [23.5, -46.8, -0.6],
+    ];
+    const [roostX, roostZ, roostYaw] = roostSpots[i % roostSpots.length];
+    const roostY = groundHeightAt(roostX, roostZ, 0) + 6.5 + (i % 3) * 0.65;
+
     const sc = 0.88 + (i % 3) * 0.14;
     cg.scale.setScalar(sc);
     root.add(cg);
@@ -2617,6 +2721,10 @@ export function buildLivingWorld(
       alt: 18.5 + (i % 3) * 3.2,
       speed: 0.022 + (i % 3) * 0.004,
       phaseOffset: i / 6,
+      roostX,
+      roostY,
+      roostZ,
+      roostYaw,
     });
   }
 
@@ -2820,49 +2928,130 @@ export function buildLivingWorld(
   root.add(skyLanternGroup);
 
   // =========================================================================
-  // 7. ZERO-GC PER-FRAME ANIMATION UPDATE LOOP
+  // 7. ZERO-GC PER-FRAME TIME + WEATHER DYNAMIC BEHAVIOR FSM LOOP
   // =========================================================================
-  const update = (dt: number, t: number, weather: WeatherMode) => {
-    // 1. Walking villagers
+  let walkClock = 0;
+  let fowlClock = 0;
+  let poultryClock = 0;
+  let craneRoostSmooth = 0;
+  let farmerShelterSmooth = 0;
+  let lastTimeOfDay = 10.5;
+  let initialized = false;
+
+  const update = (dt: number, t: number, weather: WeatherMode, timeOfDay = 10.5) => {
+    const b = evaluateLivingBehavior(timeOfDay, weather);
+    const scrubbed = !initialized || Math.abs(timeOfDay - lastTimeOfDay) > 0.35;
+    initialized = true;
+    lastTimeOfDay = timeOfDay;
+
+    walkClock += dt * b.walkSpeedScale;
+    fowlClock += dt * (b.waterfowlState === 'swimming' ? 1.0 : 0.14);
+    poultryClock += dt * (b.poultryState === 'foraging' ? 1.0 : 0.0);
+
+    const targetCraneRoost = b.craneRoostBlend;
+    craneRoostSmooth = scrubbed
+      ? targetCraneRoost
+      : THREE.MathUtils.damp(craneRoostSmooth, targetCraneRoost, 1.8, dt);
+
+    const targetFarmerShelter = b.farmerState === 'resting_indoors' ? 1.0 : 0.0;
+    farmerShelterSmooth = scrubbed
+      ? targetFarmerShelter
+      : THREE.MathUtils.damp(farmerShelterSmooth, targetFarmerShelter, 2.4, dt);
+
+    // 1. Walking villagers (daytime stroll, rain umbrellas & slowed pace, indoors at night)
     for (let i = 0; i < walkingVillagers.length; i++) {
       const v = walkingVillagers[i];
-      const p = sampleClosedLoopPath(v.waypoints, t * v.speed + v.phaseOffset);
+      const shouldShow = v.isChild
+        ? b.villagerState === 'outdoor_active'
+        : b.villagerState !== 'night_rest';
+      v.group.visible = shouldShow;
+      if (!shouldShow) continue;
+
+      if (v.rainUmbrella) {
+        v.rainUmbrella.visible = b.villagersCarryUmbrellas;
+      }
+
+      const p = sampleClosedLoopPath(v.waypoints, walkClock * v.speed + v.phaseOffset);
       const y = groundHeightAt(p.x, p.z, 0);
-      const strideRate = v.isChild ? 9.5 : 5.2;
-      const swing = Math.sin(t * strideRate + v.phaseOffset * 10);
-      const bob = Math.abs(swing) * (v.isChild ? 0.072 : 0.038);
+      const strideRate = (v.isChild ? 9.5 : 5.2) * Math.max(0.35, b.walkSpeedScale);
+      const swing = Math.sin(walkClock * strideRate + v.phaseOffset * 10);
+      const bob = Math.abs(swing) * (v.isChild ? 0.072 : 0.038) * b.walkSpeedScale;
 
       v.group.position.set(p.x, y + bob, p.z);
       v.group.rotation.y = p.yaw;
-      v.leftLeg.rotation.x = swing * 0.48;
-      v.rightLeg.rotation.x = -swing * 0.48;
-      v.leftArm.rotation.x = -swing * 0.42;
-      if (!v.carryPole && !v.pinwheel && !v.hasUmbrella) {
-        v.rightArm.rotation.x = swing * 0.42;
+      v.leftLeg.rotation.x = swing * 0.48 * b.walkSpeedScale;
+      v.rightLeg.rotation.x = -swing * 0.48 * b.walkSpeedScale;
+      v.leftArm.rotation.x = -swing * 0.42 * b.walkSpeedScale;
+
+      const holdingUmb = Boolean(v.hasUmbrella || (v.rainUmbrella && v.rainUmbrella.visible));
+      if (holdingUmb) {
+        v.rightArm.rotation.x = -0.68;
+      } else if (!v.carryPole && !v.pinwheel) {
+        v.rightArm.rotation.x = swing * 0.42 * b.walkSpeedScale;
       }
       v.head.rotation.y = Math.sin(t * 1.3 + v.phaseOffset * 6) * 0.18;
 
       if (v.carryPole) {
-        v.carryPole.rotation.z = Math.sin(t * strideRate + v.phaseOffset * 10) * 0.055;
+        v.carryPole.rotation.z = Math.sin(walkClock * strideRate + v.phaseOffset * 10) * 0.055;
       }
       if (v.pinwheel) {
         v.pinwheel.rotation.z += dt * 7.8;
       }
     }
 
-    // 2. Storytelling idle villagers
+    // 2. Storytelling idle villagers (Farmers respond to Sun / Rain / Night!)
     for (let i = 0; i < idleVillagers.length; i++) {
       const iv = idleVillagers[i];
       const ph = t + iv.phaseOffset;
       switch (iv.kind) {
         case 'rake': {
-          const stroke = Math.sin(ph * 2.4);
-          iv.torso.rotation.x = 0.18 + stroke * 0.1;
-          iv.rightArm.rotation.x = -0.55 + stroke * 0.35;
-          iv.leftArm.rotation.x = -0.35 + stroke * 0.25;
+          const sx = iv.shelterX ?? iv.baseX;
+          const sz = iv.shelterZ ?? iv.baseZ;
+          const syaw = iv.shelterYaw ?? 0;
+          const fx = THREE.MathUtils.lerp(iv.baseX, sx, farmerShelterSmooth);
+          const fz = THREE.MathUtils.lerp(iv.baseZ, sz, farmerShelterSmooth);
+          iv.group.position.set(fx, groundHeightAt(fx, fz, 0), fz);
+
+          // Shortest-angle yaw blend between mat facing and veranda rest facing
+          const dyaw = Math.atan2(Math.sin(syaw - iv.baseYaw), Math.cos(syaw - iv.baseYaw));
+          iv.group.rotation.y = iv.baseYaw + dyaw * farmerShelterSmooth;
+
+          if (iv.rakeGroup) {
+            iv.rakeGroup.visible = b.farmerState !== 'resting_indoors';
+          }
+
+          if (b.farmerState === 'raking') {
+            // Sunny daytime: rhythmic two-handed grain turning with rake teeth skimming the rice mat
+            const stroke = Math.sin(ph * 2.4);
+            iv.torso.rotation.x = 0.16 + stroke * 0.06;
+            iv.rightArm.rotation.set(-0.62 + stroke * 0.14, -0.06, 0.06);
+            iv.leftArm.rotation.set(-0.56 + stroke * 0.12, 0.34, -0.14);
+            iv.head.rotation.x = 0.18;
+            iv.head.rotation.y = Math.sin(ph * 1.2) * 0.12;
+          } else if (b.farmerState === 'harvest_rush') {
+            // Rainy daytime: urgent rapid scooping & gathering grain before soaking
+            const rush = Math.sin(ph * 5.2);
+            iv.torso.rotation.x = 0.24 + rush * 0.08;
+            iv.rightArm.rotation.set(-0.68 + rush * 0.18, -0.08, 0.08);
+            iv.leftArm.rotation.set(-0.62 + rush * 0.16, 0.36, -0.16);
+            iv.head.rotation.x = 0.24;
+            iv.head.rotation.y = Math.sin(ph * 2.8) * 0.18;
+          } else {
+            // Night / Post-dusk: grain stowed, resting calmly under front veranda eaves
+            iv.torso.rotation.x = Math.sin(ph * 0.8) * 0.03;
+            iv.rightArm.rotation.set(-0.08, 0, 0);
+            iv.leftArm.rotation.set(-0.08, 0, 0);
+            iv.head.rotation.x = 0.0;
+            iv.head.rotation.y = Math.sin(ph * 0.7) * 0.16;
+          }
           break;
         }
         case 'wash': {
+          const activeWash = b.villagerState === 'outdoor_active';
+          iv.group.visible = activeWash;
+          if (iv.ripple) iv.ripple.visible = activeWash;
+          if (!activeWash) break;
+
           const scrub = Math.sin(ph * 4.2);
           iv.torso.rotation.x = 0.32 + scrub * 0.08;
           iv.leftArm.rotation.x = -0.78 + scrub * 0.24;
@@ -2876,23 +3065,37 @@ export function buildLivingWorld(
           break;
         }
         case 'fan': {
-          iv.rightArm.rotation.z = -0.15 + Math.sin(ph * 4.8) * 0.28;
+          const eldersOut = b.timeOfDay >= 6.2 && b.timeOfDay <= 21.2;
+          iv.group.visible = eldersOut;
+          if (!eldersOut) break;
+          const fanSpeed = b.weather === 'rain' || b.isNight ? 1.4 : 4.8;
+          iv.rightArm.rotation.z = -0.15 + Math.sin(ph * fanSpeed) * (b.isNight ? 0.08 : 0.28);
           iv.head.rotation.y = 0.15 + Math.sin(ph * 1.1) * 0.16;
           break;
         }
         case 'chat': {
+          const eldersOut = b.timeOfDay >= 6.2 && b.timeOfDay <= 21.2;
+          iv.group.visible = eldersOut;
+          if (!eldersOut) break;
           iv.head.rotation.x = Math.sin(ph * 2.2) * 0.1;
           iv.head.rotation.y = -0.15 + Math.sin(ph * 1.0) * 0.14;
           iv.leftArm.rotation.x = -0.35 + Math.sin(ph * 1.8) * 0.14;
           break;
         }
         case 'tea': {
+          const teaOut = b.weather !== 'rain' && b.timeOfDay >= 7.0 && b.timeOfDay <= 20.5;
+          iv.group.visible = teaOut;
+          if (!teaOut) break;
           const sip = Math.max(0, Math.sin(ph * 0.85));
           iv.rightArm.rotation.x = -0.35 - sip * 0.55;
           iv.head.rotation.x = sip * 0.16;
           break;
         }
         case 'bow': {
+          // Respectful ancestral hall incense offering during daytime & evening hours
+          const worshipOut = b.timeOfDay >= 6.0 && b.timeOfDay <= 21.5;
+          iv.group.visible = worshipOut;
+          if (!worshipOut) break;
           const bowCycle = Math.max(0, Math.sin(ph * 0.9));
           iv.torso.rotation.x = bowCycle * 0.32;
           iv.leftArm.rotation.x = -0.75;
@@ -2900,6 +3103,9 @@ export function buildLivingWorld(
           break;
         }
         case 'tend': {
+          const tendOut = b.villagerState === 'outdoor_active';
+          iv.group.visible = tendOut;
+          if (!tendOut) break;
           iv.rightArm.rotation.x = -0.45 + Math.sin(ph * 2.1) * 0.25;
           iv.head.rotation.y = Math.sin(ph * 1.2) * 0.22;
           break;
@@ -2907,116 +3113,183 @@ export function buildLivingWorld(
       }
     }
 
-    // 3. Animated Poultry
+    // 3. Animated Poultry (forage daytime -> huddle/shelter in rain -> roost quietly at night)
     for (let i = 0; i < poultryList.length; i++) {
       const p = poultryList[i];
-      const ph = t * p.speed + p.phaseOffset;
-      let tx: number;
-      let tz: number;
-      let yaw: number;
+      if (b.poultryState === 'foraging') {
+        const ph = poultryClock * p.speed + p.phaseOffset;
+        let tx: number;
+        let tz: number;
+        let yaw: number;
 
-      if (p.isChick && p.leaderIdx !== undefined) {
-        const mom = poultryList[p.leaderIdx];
-        const a = ph * 1.1 + p.phaseOffset * 2.3;
-        tx = mom.group.position.x + Math.cos(a) * 0.65;
-        tz = mom.group.position.z + Math.sin(a) * 0.65;
-        yaw = Math.atan2(-Math.sin(a), Math.cos(a));
+        if (p.isChick && p.leaderIdx !== undefined) {
+          const mom = poultryList[p.leaderIdx];
+          const a = ph * 1.1 + p.phaseOffset * 2.3;
+          tx = mom.group.position.x + Math.cos(a) * 0.65;
+          tz = mom.group.position.z + Math.sin(a) * 0.65;
+          yaw = Math.atan2(-Math.sin(a), Math.cos(a));
+        } else {
+          tx = p.baseX + Math.sin(ph * 0.65) * p.wanderR;
+          tz = p.baseZ + Math.cos(ph * 0.52) * p.wanderR * 0.78;
+          const dx = Math.cos(ph * 0.65) * p.wanderR * 0.65;
+          const dz = -Math.sin(ph * 0.52) * p.wanderR * 0.78 * 0.52;
+          yaw = Math.atan2(dx, dz);
+        }
+
+        const py = groundHeightAt(tx, tz, 0);
+        const hop = p.isChick ? Math.abs(Math.sin(t * 7.5 + p.phaseOffset * 4)) * 0.068 : 0;
+        p.group.position.set(tx, py + hop, tz);
+        p.group.rotation.y = yaw;
+
+        const peck = Math.max(0, Math.sin(t * 3.1 + p.phaseOffset * 5) - 0.55) * 1.45;
+        p.body.position.y = 0;
+        p.body.rotation.x = peck * 0.5;
+        p.head.rotation.x = peck * 0.62;
       } else {
-        tx = p.baseX + Math.sin(ph * 0.65) * p.wanderR;
-        tz = p.baseZ + Math.cos(ph * 0.52) * p.wanderR * 0.78;
-        const dx = Math.cos(ph * 0.65) * p.wanderR * 0.65;
-        const dz = -Math.sin(ph * 0.52) * p.wanderR * 0.78 * 0.52;
-        yaw = Math.atan2(dx, dz);
+        // Sheltering or night roosting: settled calmly near base / mother hen with tucked head
+        const restX = p.isChick && p.leaderIdx !== undefined
+          ? poultryList[p.leaderIdx].baseX + Math.cos(p.phaseOffset * 3) * 0.35
+          : p.baseX;
+        const restZ = p.isChick && p.leaderIdx !== undefined
+          ? poultryList[p.leaderIdx].baseZ + Math.sin(p.phaseOffset * 3) * 0.35
+          : p.baseZ;
+        const py = groundHeightAt(restX, restZ, 0);
+        p.group.position.set(restX, py, restZ);
+        p.body.position.y = -0.05;
+        p.body.rotation.x = 0.08;
+        p.head.rotation.x = 0.25 + Math.sin(t * 1.2 + p.phaseOffset) * 0.04;
       }
-
-      const py = groundHeightAt(tx, tz, 0);
-      const hop = p.isChick ? Math.abs(Math.sin(t * 7.5 + p.phaseOffset * 4)) * 0.068 : 0;
-      p.group.position.set(tx, py + hop, tz);
-      p.group.rotation.y = yaw;
-
-      const peck = Math.max(0, Math.sin(t * 3.1 + p.phaseOffset * 5) - 0.55) * 1.45;
-      p.body.rotation.x = peck * 0.5;
-      p.head.rotation.x = peck * 0.62;
     }
 
-    // 4. Pond Waterfowl
+    // 4. Pond Waterfowl (swim daytime -> calm shore rest at night)
     for (let i = 0; i < waterfowlList.length; i++) {
       const wf = waterfowlList[i];
+      const isResting = b.waterfowlState === 'shore_rest';
       const sample = samplePondSwimPath(
         wf.cx,
         wf.cz,
         wf.rx,
         wf.rz,
-        t * wf.speed + wf.phaseOffset,
+        fowlClock * wf.speed + wf.phaseOffset,
         wf.dir
       );
-      const bob = Math.sin(t * 2.6 + wf.phaseOffset * 3) * 0.024;
+      const bob = Math.sin(t * (isResting ? 1.4 : 2.6) + wf.phaseOffset * 3) * (isResting ? 0.012 : 0.024);
       wf.group.position.set(sample.x, -0.2 + bob, sample.z);
       wf.group.rotation.y = sample.yaw;
 
-      const dip = Math.max(0, Math.sin(t * 1.1 + wf.phaseOffset * 5) - 0.75) * 1.5;
-      wf.neck.rotation.x = dip * 0.45;
-
-      const wCycle = (t * 0.55 + wf.phaseOffset) % 1;
-      const wScale = 0.85 + wCycle * 1.35;
-      wf.wake.scale.set(wScale, 1, wScale);
-    }
-
-    // 5. Domestic Animals
-    for (let i = 0; i < quadrupeds.length; i++) {
-      const q = quadrupeds[i];
-      const ph = t + q.phaseOffset;
-
-      if (q.kind === 'dog_patrol' && q.waypoints) {
-        const s = sampleClosedLoopPath(q.waypoints, t * q.speed + q.phaseOffset);
-        const y = groundHeightAt(s.x, s.z, 0);
-        const trot = Math.sin(t * 9.2);
-        q.group.position.set(s.x, y + Math.abs(trot) * 0.042, s.z);
-        q.group.rotation.y = s.yaw;
-        q.tail.rotation.z = Math.sin(t * 11.5) * 0.42;
-        q.head.rotation.y = Math.sin(t * 2.1) * 0.16;
-        if (q.legs.length === 4) {
-          q.legs[0].rotation.x = trot * 0.45;
-          q.legs[1].rotation.x = -trot * 0.45;
-          q.legs[2].rotation.x = -trot * 0.45;
-          q.legs[3].rotation.x = trot * 0.45;
-        }
-      } else if (q.kind === 'puppy_hop') {
-        const hop = Math.abs(Math.sin(ph * 5.2)) * 0.11;
-        q.group.position.y = q.baseY + hop;
-        q.group.rotation.y = Math.sin(ph * 1.1) * 0.65;
-        q.tail.rotation.z = Math.sin(ph * 14.0) * 0.52;
-        q.head.rotation.z = Math.sin(ph * 2.2) * 0.18;
-      } else if (q.kind === 'cat_loaf') {
-        q.tail.rotation.y = Math.sin(ph * 2.2) * 0.32;
-        q.head.rotation.y = Math.sin(ph * 0.7) * 0.2;
-      } else if (q.kind === 'buffalo') {
-        q.head.rotation.x = 0.24 + Math.sin(ph * 1.2) * 0.14;
-        q.head.rotation.y = Math.sin(ph * 0.45) * 0.15;
-        q.tail.rotation.z = Math.sin(ph * 2.6) * 0.24;
-      } else if (q.kind === 'goat') {
-        q.head.rotation.x = 0.38 + Math.sin(ph * 1.9) * 0.2;
-        q.tail.rotation.z = Math.sin(ph * 5.2) * 0.25;
+      if (isResting) {
+        wf.neck.rotation.x = 0.28 + Math.sin(t * 0.8 + wf.phaseOffset) * 0.04;
+        wf.wake.scale.set(0.65, 1, 0.65);
+      } else {
+        const dip = Math.max(0, Math.sin(t * 1.1 + wf.phaseOffset * 5) - 0.75) * 1.5;
+        wf.neck.rotation.x = dip * 0.45;
+        const wCycle = (t * 0.55 + wf.phaseOffset) % 1;
+        const wScale = 0.85 + wCycle * 1.35;
+        wf.wake.scale.set(wScale, 1, wScale);
       }
     }
 
-    // 6. Soaring White Cranes
+    // 5. Domestic Animals (active daytime -> shelter in rain -> peaceful sleep at night)
+    for (let i = 0; i < quadrupeds.length; i++) {
+      const q = quadrupeds[i];
+      const ph = t + q.phaseOffset;
+      const resting = b.quadrupedState !== 'active';
+
+      if (q.kind === 'dog_patrol' && q.waypoints) {
+        if (resting) {
+          // Rests peacefully beside the front gate veranda
+          const rx = -4.2;
+          const rz = 23.0;
+          const ry = groundHeightAt(rx, rz, 0);
+          q.group.position.set(rx, ry - 0.14, rz);
+          q.group.rotation.y = 0.35;
+          q.tail.rotation.z = Math.sin(t * 1.8) * 0.08;
+          q.head.rotation.y = Math.sin(t * 0.6) * 0.08;
+          q.head.rotation.x = 0.22;
+          for (let l = 0; l < q.legs.length; l++) q.legs[l].rotation.x = 0;
+        } else {
+          const s = sampleClosedLoopPath(q.waypoints, walkClock * q.speed + q.phaseOffset);
+          const y = groundHeightAt(s.x, s.z, 0);
+          const trot = Math.sin(walkClock * 9.2);
+          q.group.position.set(s.x, y + Math.abs(trot) * 0.042, s.z);
+          q.group.rotation.y = s.yaw;
+          q.tail.rotation.z = Math.sin(t * 11.5) * 0.42;
+          q.head.rotation.y = Math.sin(t * 2.1) * 0.16;
+          q.head.rotation.x = 0;
+          if (q.legs.length === 4) {
+            q.legs[0].rotation.x = trot * 0.45;
+            q.legs[1].rotation.x = -trot * 0.45;
+            q.legs[2].rotation.x = -trot * 0.45;
+            q.legs[3].rotation.x = trot * 0.45;
+          }
+        }
+      } else if (q.kind === 'puppy_hop') {
+        if (resting) {
+          q.group.position.y = q.baseY - 0.08;
+          q.tail.rotation.z = Math.sin(ph * 1.6) * 0.08;
+          q.head.rotation.z = 0.12;
+        } else {
+          const hop = Math.abs(Math.sin(ph * 5.2)) * 0.11;
+          q.group.position.y = q.baseY + hop;
+          q.group.rotation.y = Math.sin(ph * 1.1) * 0.65;
+          q.tail.rotation.z = Math.sin(ph * 14.0) * 0.52;
+          q.head.rotation.z = Math.sin(ph * 2.2) * 0.18;
+        }
+      } else if (q.kind === 'cat_loaf') {
+        q.tail.rotation.y = Math.sin(ph * (resting ? 0.9 : 2.2)) * (resting ? 0.12 : 0.32);
+        q.head.rotation.y = Math.sin(ph * 0.7) * (resting ? 0.06 : 0.2);
+      } else if (q.kind === 'buffalo') {
+        if (resting) {
+          q.group.position.y = q.baseY - 0.26;
+          q.head.rotation.x = 0.32 + Math.sin(ph * 0.6) * 0.04;
+          q.head.rotation.y = 0;
+          q.tail.rotation.z = Math.sin(ph * 1.1) * 0.08;
+        } else {
+          q.group.position.y = q.baseY;
+          q.head.rotation.x = 0.24 + Math.sin(ph * 1.2) * 0.14;
+          q.head.rotation.y = Math.sin(ph * 0.45) * 0.15;
+          q.tail.rotation.z = Math.sin(ph * 2.6) * 0.24;
+        }
+      } else if (q.kind === 'goat') {
+        if (resting) {
+          q.group.position.y = q.baseY - 0.14;
+          q.head.rotation.x = 0.25;
+          q.tail.rotation.z = Math.sin(ph * 1.5) * 0.06;
+        } else {
+          q.group.position.y = q.baseY;
+          q.head.rotation.x = 0.38 + Math.sin(ph * 1.9) * 0.2;
+          q.tail.rotation.z = Math.sin(ph * 5.2) * 0.25;
+        }
+      }
+    }
+
+    // 6. White Cranes: Soar over valley in sunny daytime -> descend at dusk -> roost in rear camphor trees at night/rain!
     for (let i = 0; i < cranes.length; i++) {
       const c = cranes[i];
       const f = sampleFlockOrbit(c.cx, c.cz, c.rx, c.rz, c.alt, t * c.speed + c.phaseOffset);
-      c.group.position.set(f.x, f.y, f.z);
-      c.group.rotation.set(0, f.yaw, -f.bank);
-      const flap = Math.sin(t * 4.4 + c.phaseOffset * 12) * 0.46;
-      c.leftWing.rotation.z = flap;
-      c.rightWing.rotation.z = -flap;
+      const rb = craneRoostSmooth;
+      const cx = THREE.MathUtils.lerp(f.x, c.roostX, rb);
+      const cy = THREE.MathUtils.lerp(f.y, c.roostY, rb);
+      const cz = THREE.MathUtils.lerp(f.z, c.roostZ, rb);
+      c.group.position.set(cx, cy, cz);
+
+      const yawDiff = Math.atan2(Math.sin(c.roostYaw - f.yaw), Math.cos(c.roostYaw - f.yaw));
+      const yaw = f.yaw + yawDiff * rb;
+      const bank = -f.bank * (1 - rb);
+      c.group.rotation.set(0, yaw, bank);
+
+      // Wings flap in flight, fold smoothly along flanks when perched/roosting
+      const flap = Math.sin(t * 4.4 + c.phaseOffset * 12) * 0.46 * (1 - rb);
+      const folded = 1.02 * rb;
+      c.leftWing.rotation.z = flap + folded;
+      c.rightWing.rotation.z = -flap - folded;
     }
 
-    // 7. Fluttering Butterflies
-    const showButterflies = weather === 'sunny';
+    // 7. Fluttering Butterflies (sunny daytime only)
     for (let i = 0; i < butterflies.length; i++) {
       const bf = butterflies[i];
-      bf.group.visible = showButterflies;
-      if (!showButterflies) continue;
+      bf.group.visible = b.butterfliesActive;
+      if (!b.butterfliesActive) continue;
       const a = t * bf.speed + bf.phaseOffset;
       bf.group.position.set(
         bf.cx + Math.cos(a) * bf.rx,
@@ -3029,21 +3302,24 @@ export function buildLivingWorld(
       bf.rightWing.rotation.y = -flap;
     }
 
-    // 8. Curling Kitchen Chimney Smoke
-    for (let i = 0; i < smokePuffs.length; i++) {
-      const sp = smokePuffs[i];
-      const life = (t * 0.14 + sp.phase) % 1;
-      sp.mesh.position.set(
-        15.2 + Math.sin(life * 4.5 + t * 0.5) * (0.4 + life * 1.8) + life * 2.2,
-        5.4 + life * 8.2,
-        6.2 + Math.cos(life * 3.8 + t * 0.4) * (0.3 + life * 1.2) - life * 1.4
-      );
-      const sc = 0.22 + life * 1.15;
-      sp.mesh.scale.set(sc * 1.15, sc * 0.82, sc);
+    // 8. Curling Kitchen Chimney Smoke (peaks during Hakka meal cooking hours)
+    smokeGroup.visible = b.chimneySmokeActive;
+    if (b.chimneySmokeActive) {
+      for (let i = 0; i < smokePuffs.length; i++) {
+        const sp = smokePuffs[i];
+        const life = (t * 0.14 + sp.phase) % 1;
+        sp.mesh.position.set(
+          15.2 + Math.sin(life * 4.5 + t * 0.5) * (0.4 + life * 1.8) + life * 2.2,
+          5.4 + life * 8.2,
+          6.2 + Math.cos(life * 3.8 + t * 0.4) * (0.3 + life * 1.2) - life * 1.4
+        );
+        const sc = 0.22 + life * 1.15;
+        sp.mesh.scale.set(sc * 1.15, sc * 0.82, sc);
+      }
     }
 
-    // 9. Drifting Peach-Blossom Petals
-    petalPoints.visible = weather === 'sunny';
+    // 9. Drifting Peach-Blossom Petals (sunny daylight)
+    petalPoints.visible = b.petalsActive;
     if (petalPoints.visible) {
       const attr = petalGeo.attributes.position as THREE.BufferAttribute;
       for (let i = 0; i < petalCount; i++) {
@@ -3061,8 +3337,8 @@ export function buildLivingWorld(
       attr.needsUpdate = true;
     }
 
-    // 10. Rising Warm Paper Sky Lanterns
-    skyLanternGroup.visible = weather === 'lantern';
+    // 10. Rising Warm Paper Sky Lanterns (clear night)
+    skyLanternGroup.visible = b.skyLanternsActive;
     if (skyLanternGroup.visible) {
       for (let i = 0; i < skyLanterns.length; i++) {
         const sl = skyLanterns[i];

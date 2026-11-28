@@ -34,6 +34,8 @@ import { buildWeilongProps, type PropAnimationRefs } from './propsBuilder';
 import { buildLivingWorld, type LivingWorldRefs } from './livingWorldBuilder';
 import { createSoftPillowGeometry } from './sculptHelpers';
 import { HakkaAudioEngine } from './audioEngine';
+import { computeDayNightState, normalizeHour } from './dayNightCycle';
+import { evaluateLivingBehavior } from './livingBehavior';
 
 /**
  * Pillar 4: Subtle physical 35mm lens optics shader (natural cos^4 optical vignette,
@@ -115,7 +117,8 @@ export class WeilongSceneController {
   private renderer: THREE.WebGLRenderer;
   private scene: THREE.Scene;
   private camera: THREE.PerspectiveCamera;
-  private envMaps: Record<WeatherMode, THREE.Texture>;
+  private envMaps: Record<'sunny' | 'rain' | 'night', THREE.Texture>;
+  private activeEnvKey: 'sunny' | 'rain' | 'night' = 'sunny';
   private composer: EffectComposer | null = null;
   private bloomPass: UnrealBloomPass | null = null;
   private lensPass: ShaderPass | null = null;
@@ -137,11 +140,14 @@ export class WeilongSceneController {
     uHor: { value: THREE.Color };
     uHs: { value: THREE.Color };
     uGnd: { value: THREE.Color };
+    uTwilightCol: { value: THREE.Color };
     uSunDir: { value: THREE.Vector3 };
     uMoonDir: { value: THREE.Vector3 };
     uSunStr: { value: number };
     uMoonStr: { value: number };
     uStarStr: { value: number };
+    uTwilight: { value: number };
+    uRain: { value: number };
     uTime: { value: number };
   };
   private cloudGroup: THREE.Group;
@@ -151,10 +157,15 @@ export class WeilongSceneController {
   private fireflyPoints: THREE.Points;
   private umbrellaHeldGroup: THREE.Group;
 
-  // Game & Player State (100% free-walking + weighted momentum & spring suspension)
+  // Game, Day-Night Cycle & Player State (100% free-walking + weighted momentum & spring suspension)
   private mode: GameMode = 'title';
   private weather: WeatherMode = 'sunny';
   private cameraView: CameraViewMode = 'walk';
+  private timeOfDay = 10.5;
+  private timePlaying = true;
+  private timeSpeed = 1;
+  private timePeriodLabel = '辰巳 · 晨光';
+  private formattedTime = '10:30';
   private playerPos = new THREE.Vector3(0, 0, 31.0);
   private playerVelX = 0;
   private playerVelZ = 0;
@@ -179,8 +190,6 @@ export class WeilongSceneController {
   private nearbyInteractable: InteractableDef | null = null;
   private doumenOpen = false;
   private doumenAngle = 0;
-  private xrayActive = false;
-  private taijiActive = false;
   private holdingUmbrella = false;
   private gunSlitActive = false;
   private fiveElementsLit = 0;
@@ -257,23 +266,27 @@ export class WeilongSceneController {
     this.envMaps = {
       sunny: this.bakePhysicalOutdoorEnv(pmrem, 'sunny'),
       rain: this.bakePhysicalOutdoorEnv(pmrem, 'rain'),
-      lantern: this.bakePhysicalOutdoorEnv(pmrem, 'lantern'),
+      night: this.bakePhysicalOutdoorEnv(pmrem, 'night'),
     };
     this.scene.environment = this.envMaps.sunny;
     pmrem.dispose();
 
-    // Poetic Multi-Band Gouache Sky Dome (adapted from refindex.html 10_sky.js)
+    // Enhanced Atmospheric Sky Dome: Rayleigh/Mie scattering, vivid dawn/dusk horizon bands,
+    // drifting multi-octave high-altitude clouds, crisp sun corona, lunar maria & twinkling Milky Way!
     this.skyUniforms = {
       uZen: { value: new THREE.Color(0x2a76be) },
       uMid: { value: new THREE.Color(0x67b3e2) },
       uHor: { value: new THREE.Color(0xf6e6c8) },
       uHs: { value: new THREE.Color(0xfff1cc) },
       uGnd: { value: new THREE.Color(0x88b8a8) },
+      uTwilightCol: { value: new THREE.Color(0xf69664) },
       uSunDir: { value: new THREE.Vector3(46, 36, 32).normalize() },
       uMoonDir: { value: new THREE.Vector3(-24, 34, -46).normalize() },
       uSunStr: { value: 1.0 },
       uMoonStr: { value: 0.0 },
       uStarStr: { value: 0.0 },
+      uTwilight: { value: 0.0 },
+      uRain: { value: 0.0 },
       uTime: { value: 0.0 },
     };
     const poeticSkyMat = new THREE.ShaderMaterial({
@@ -294,66 +307,135 @@ export class WeilongSceneController {
         uniform vec3 uHor;
         uniform vec3 uHs;
         uniform vec3 uGnd;
+        uniform vec3 uTwilightCol;
         uniform vec3 uSunDir;
         uniform vec3 uMoonDir;
         uniform float uSunStr;
         uniform float uMoonStr;
         uniform float uStarStr;
+        uniform float uTwilight;
+        uniform float uRain;
         uniform float uTime;
         varying vec3 vDir;
 
         float sHash(vec2 p) {
-          return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453);
+          return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453123);
+        }
+
+        float vNoise(vec2 p) {
+          vec2 i = floor(p);
+          vec2 f = fract(p);
+          vec2 u = f * f * (3.0 - 2.0 * f);
+          return mix(
+            mix(sHash(i), sHash(i + vec2(1.0, 0.0)), u.x),
+            mix(sHash(i + vec2(0.0, 1.0)), sHash(i + vec2(1.0, 1.0)), u.x),
+            u.y
+          );
+        }
+
+        float cloudFbm(vec2 p) {
+          float v = 0.0;
+          float a = 0.52;
+          mat2 rot = mat2(0.80, -0.60, 0.60, 0.80);
+          for (int i = 0; i < 4; i++) {
+            v += a * vNoise(p);
+            p = rot * p * 2.06 + vec2(1.7, -0.9);
+            a *= 0.48;
+          }
+          return v;
         }
 
         void main() {
           vec3 d = normalize(vDir);
           float y = d.y;
-          vec3 col = mix(uHor, uMid, smoothstep(0.0, 0.24, y));
-          col = mix(col, uZen, smoothstep(0.20, 0.78, y));
+
+          // Multi-band Rayleigh atmospheric gradient
+          vec3 col = mix(uHor, uMid, smoothstep(-0.02, 0.25, y));
+          col = mix(col, uZen, smoothstep(0.18, 0.78, y));
           col = mix(col, uGnd, smoothstep(0.02, -0.18, y));
 
-          // Warm sunlit horizon scatter (refindex.html skyCol)
-          float sDot = max(dot(d, normalize(uSunDir)), 0.0);
-          float hBloom = pow(1.0 - clamp(abs(y), 0.0, 1.0), 3.4);
-          col = mix(col, uHs, hBloom * (0.28 + 0.42 * pow(sDot, 2.0)) * uSunStr);
+          vec3 sunD = normalize(uSunDir);
+          float sDot = max(dot(d, sunD), 0.0);
+          float horizonBand = pow(1.0 - clamp(abs(y), 0.0, 1.0), 3.6);
 
-          // Crisp golden painted sun disc & halo
+          // Mie forward scatter & golden/crimson dawn-dusk twilight ribbon (晨昏霞光)
+          float mieScatter = pow(sDot, 4.0) * 0.34 + pow(sDot, 16.0) * 0.28;
+          col = mix(col, uHs, horizonBand * (0.24 + 0.46 * pow(sDot, 2.0)) * (uSunStr + uTwilight * 0.65));
+          col += uTwilightCol * horizonBand * (0.36 + 0.52 * pow(sDot, 1.8)) * uTwilight * (1.0 - uRain * 0.7);
+          col += uHs * mieScatter * uSunStr * 0.45;
+
+          // Crisp golden painted sun disc & luminous atmospheric corona
           if (uSunStr > 0.01) {
-            float halo = pow(sDot, 28.0) * 0.45 + pow(sDot, 160.0) * 0.85;
-            float disc = smoothstep(0.9988, 0.9994, sDot);
-            col += vec3(1.0, 0.95, 0.80) * (halo + disc * 1.4) * uSunStr;
+            float halo = pow(sDot, 28.0) * 0.42 + pow(sDot, 180.0) * 0.92;
+            float disc = smoothstep(0.9987, 0.99935, sDot);
+            col += mix(vec3(1.0, 0.95, 0.82), vec3(1.0, 0.72, 0.44), uTwilight * 0.75) * (halo + disc * 1.55) * uSunStr;
           }
 
-          // Painted full moon with soft lunar seas & halo in lantern night
+          // Layered drifting high-altitude wispy cirrus & altocumulus clouds
+          if (y > 0.02) {
+            vec2 skyUv = d.xz / (y + 0.26);
+            vec2 driftA = skyUv * 0.62 + vec2(uTime * 0.0045, uTime * 0.0018);
+            vec2 driftB = skyUv * 1.28 + vec2(-uTime * 0.0032, uTime * 0.0028);
+            float wisp = cloudFbm(driftA) * 0.65 + cloudFbm(driftB) * 0.35;
+            float coverage = mix(0.51, 0.34, uRain);
+            float cloudMask = smoothstep(coverage, coverage + 0.28, wisp) * smoothstep(0.02, 0.16, y) * (1.0 - smoothstep(0.75, 0.98, y) * 0.35);
+
+            // Sunlit rim & warm twilight underside tint on clouds
+            vec3 cloudLit = mix(vec3(0.99, 0.97, 0.92), uTwilightCol * 1.15, uTwilight * 0.82);
+            cloudLit = mix(cloudLit, vec3(0.28, 0.36, 0.52), uStarStr * 0.88);
+            cloudLit = mix(cloudLit, vec3(0.74, 0.80, 0.83) * mix(0.32, 1.0, 1.0 - uStarStr), uRain * 0.85);
+            vec3 cloudShade = mix(uMid * 0.95, vec3(0.14, 0.20, 0.34), uStarStr * 0.85);
+            float sunRim = smoothstep(0.35, 0.95, sDot) * (uSunStr + uTwilight * 0.8);
+            vec3 cloudCol = mix(cloudShade, cloudLit, 0.58 + 0.42 * sunRim);
+            col = mix(col, cloudCol, cloudMask * mix(0.42, 0.62, uRain));
+          }
+
+          // Detailed full moon with lunar maria & cool silver corona at night
           if (uMoonStr > 0.01) {
             vec3 md = normalize(uMoonDir);
             float mDot = dot(d, md);
-            float mHalo = pow(max(mDot, 0.0), 22.0) * 0.32 + pow(max(mDot, 0.0), 140.0) * 0.55;
-            col += vec3(0.75, 0.85, 1.0) * mHalo * uMoonStr;
+            float mHalo = pow(max(mDot, 0.0), 20.0) * 0.28 + pow(max(mDot, 0.0), 150.0) * 0.58;
+            col += vec3(0.76, 0.87, 1.0) * mHalo * uMoonStr;
             float mDisc = smoothstep(0.9978, 0.9985, mDot);
             if (mDisc > 0.001) {
               vec3 up = vec3(0.0, 1.0, 0.0);
               vec3 mx = normalize(cross(up, md));
               vec3 my = cross(md, mx);
-              vec2 muv = vec2(dot(d - md, mx), dot(d - md, my)) * 18.0;
-              float maria = 0.88 + 0.12 * sin(muv.x * 2.2 + sin(muv.y * 2.6));
-              vec3 moonCol = vec3(1.0, 0.96, 0.85) * maria;
+              vec2 muv = vec2(dot(d - md, mx), dot(d - md, my)) * 20.0;
+              float maria = 0.86 + 0.14 * sin(muv.x * 2.1 + sin(muv.y * 2.5)) * cos(muv.y * 1.8 - muv.x * 0.9);
+              vec3 moonCol = vec3(1.0, 0.97, 0.88) * maria;
               col = mix(col, moonCol, mDisc * uMoonStr);
             }
           }
 
-          // Delicate twinkling starfield above horizon at night
-          if (uStarStr > 0.01 && y > 0.06) {
-            vec2 sp = vec2(atan(d.z, d.x), asin(clamp(y, -1.0, 1.0))) * 46.0;
-            vec2 cell = floor(sp);
-            vec2 f = fract(sp) - 0.5;
-            float rnd = sHash(cell);
-            if (rnd > 0.92) {
-              float dist = length(f);
-              float tw = 0.65 + 0.35 * sin(uTime * (2.2 + rnd * 4.0) + rnd * 50.0);
-              float star = smoothstep(0.16, 0.02, dist) * tw * smoothstep(0.06, 0.25, y);
-              col += vec3(1.0, 0.96, 0.86) * star * uStarStr * 1.1;
+          // Multi-scale twinkling starfield & subtle diagonal Milky Way band on clear nights
+          if (uStarStr > 0.01 && y > 0.05) {
+            float elevFade = smoothstep(0.05, 0.26, y);
+            // Soft Milky Way glow band across zenith
+            float mwAxis = abs(dot(d, normalize(vec3(0.55, 0.28, -0.78))));
+            float mwBand = exp(-mwAxis * mwAxis * 12.0) * (0.45 + 0.55 * vNoise(d.xz * 7.5 + 3.1));
+            col += vec3(0.18, 0.24, 0.42) * mwBand * elevFade * uStarStr * 0.42;
+
+            // Bright primary stars
+            vec2 sp1 = vec2(atan(d.z, d.x), asin(clamp(y, -1.0, 1.0))) * 44.0;
+            vec2 c1 = floor(sp1);
+            vec2 f1 = fract(sp1) - 0.5;
+            float r1 = sHash(c1);
+            if (r1 > 0.915) {
+              float tw = 0.62 + 0.38 * sin(uTime * (2.0 + r1 * 4.2) + r1 * 55.0);
+              float star = smoothstep(0.16, 0.015, length(f1)) * tw * elevFade;
+              vec3 starTint = mix(vec3(0.84, 0.92, 1.0), vec3(1.0, 0.94, 0.80), fract(r1 * 17.3));
+              col += starTint * star * uStarStr * 1.15;
+            }
+            // Fine secondary star dust
+            vec2 sp2 = vec2(atan(d.z, d.x), asin(clamp(y, -1.0, 1.0))) * 92.0;
+            vec2 c2 = floor(sp2);
+            vec2 f2 = fract(sp2) - 0.5;
+            float r2 = sHash(c2 + 19.7);
+            if (r2 > 0.945) {
+              float tw2 = 0.55 + 0.45 * sin(uTime * (3.1 + r2 * 3.5) + r2 * 40.0);
+              float star2 = smoothstep(0.14, 0.02, length(f2)) * tw2 * elevFade;
+              col += vec3(0.92, 0.95, 1.0) * star2 * uStarStr * 0.68;
             }
           }
 
@@ -363,12 +445,24 @@ export class WeilongSceneController {
         }
       `,
     });
-    this.poeticSky = new THREE.Mesh(new THREE.SphereGeometry(250, 32, 20), poeticSkyMat);
+    this.poeticSky = new THREE.Mesh(new THREE.SphereGeometry(250, 36, 22), poeticSkyMat);
     this.scene.add(this.poeticSky);
 
-    // Sculpted Painterly Cotton Clouds (refindex.html 66_air.js gouache clouds!)
-    this.cloudTopMat = new THREE.MeshBasicMaterial({ color: 0xfff8e8, fog: true });
-    this.cloudBotMat = new THREE.MeshBasicMaterial({ color: 0xefd3bc, fog: true });
+    // Sculpted Painterly Cotton Clouds (softly transparent so night stars shine cleanly)
+    this.cloudTopMat = new THREE.MeshBasicMaterial({
+      color: 0xfff8e8,
+      fog: true,
+      transparent: true,
+      opacity: 0.9,
+      depthWrite: false,
+    });
+    this.cloudBotMat = new THREE.MeshBasicMaterial({
+      color: 0xefd3bc,
+      fog: true,
+      transparent: true,
+      opacity: 0.86,
+      depthWrite: false,
+    });
     this.cloudGroup = this.buildSculptedClouds();
     this.scene.add(this.cloudGroup);
 
@@ -384,15 +478,16 @@ export class WeilongSceneController {
     if (!this.isSoftwareGl) {
       this.sunLight.castShadow = true;
       this.sunLight.shadow.mapSize.set(2048, 2048);
-      this.sunLight.shadow.radius = 2.6;
+      this.sunLight.shadow.radius = 2.4;
       this.sunLight.shadow.camera.left = -52;
       this.sunLight.shadow.camera.right = 52;
       this.sunLight.shadow.camera.top = 56;
       this.sunLight.shadow.camera.bottom = -56;
       this.sunLight.shadow.camera.near = 4;
       this.sunLight.shadow.camera.far = 165;
-      this.sunLight.shadow.bias = -0.00035;
-      this.sunLight.shadow.normalBias = 0.025;
+      // Tight shadow bias & normalBias to eliminate interior floor seam light-leak bands!
+      this.sunLight.shadow.bias = -0.00022;
+      this.sunLight.shadow.normalBias = 0.012;
     }
     this.scene.add(this.sunLight);
 
@@ -462,7 +557,7 @@ export class WeilongSceneController {
    */
   private bakePhysicalOutdoorEnv(
     pmrem: THREE.PMREMGenerator,
-    mode: WeatherMode
+    mode: 'sunny' | 'rain' | 'night'
   ): THREE.Texture {
     const envScene = new THREE.Scene();
     const disposables: Array<{ dispose: () => void }> = [];
@@ -750,6 +845,7 @@ export class WeilongSceneController {
 
   private handleKeyDown = (e: KeyboardEvent): void => {
     if (this.mode !== 'playing') return;
+    this.audio.unlock();
     if (['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Space'].includes(e.code)) {
       e.preventDefault();
     }
@@ -761,12 +857,6 @@ export class WeilongSceneController {
         this.applyWeather('sunny');
       } else if (e.code === 'Digit2') {
         this.applyWeather('rain');
-      } else if (e.code === 'Digit3') {
-        this.applyWeather('lantern');
-      } else if (e.code === 'KeyX') {
-        this.toggleXray();
-      } else if (e.code === 'KeyT') {
-        this.toggleTaijiOverlay();
       } else if (e.code === 'KeyV') {
         this.toggleCameraView();
       }
@@ -839,7 +929,7 @@ export class WeilongSceneController {
   // PUBLIC CONTROLS FOR REACT SHELL
   // =========================================================================
 
-  public setMode(mode: GameMode): void {
+  public setMode(mode: GameMode, fromUserGesture = false): void {
     this.mode = mode;
     if (mode !== 'playing') {
       this.keysHeld.clear();
@@ -849,7 +939,9 @@ export class WeilongSceneController {
       this.playerVelZ = 0;
       this.eyeYVel = 0;
     } else {
-      this.audio.unlock();
+      if (fromUserGesture) {
+        this.audio.unlock();
+      }
       // Reset camera rotation smoothly to player's facing direction
       this.playerYaw = this.targetYaw;
       this.playerPitch = this.targetPitch;
@@ -875,6 +967,21 @@ export class WeilongSceneController {
     this.emitHudSnapshot(true);
   }
 
+  public setPlayerPose(x: number, z: number, yaw: number, pitch = -0.02): void {
+    const gy = groundHeightAt(x, z, 0);
+    this.playerPos.set(x, gy, z);
+    this.eyeYVel = 0;
+    this.playerVelX = 0;
+    this.playerVelZ = 0;
+    this.playerYaw = yaw;
+    this.targetYaw = yaw;
+    this.playerPitch = pitch;
+    this.targetPitch = pitch;
+    this.cameraView = 'walk';
+    this.visitedNodes.add(detectNodeIdAt(x, z, gy));
+    this.emitHudSnapshot(true);
+  }
+
   public setCameraView(view: CameraViewMode): void {
     this.cameraView = view;
     this.gunSlitActive = false;
@@ -887,203 +994,161 @@ export class WeilongSceneController {
     this.setCameraView(this.cameraView === 'walk' ? 'aerial' : 'walk');
   }
 
+  public setTimeOfDay(hour: number): void {
+    this.timeOfDay = normalizeHour(hour);
+    this.applyAtmosphereForTime(true);
+    this.emitHudSnapshot(true);
+  }
+
+  public setTimePlaying(playing: boolean): void {
+    this.timePlaying = playing;
+    this.emitHudSnapshot(true);
+  }
+
+  public setTimeSpeed(speed: number): void {
+    this.timeSpeed = Math.max(1, Math.min(120, speed));
+    this.emitHudSnapshot(true);
+  }
+
+  public setVolume(vol: number): void {
+    this.audio.unlock();
+    this.audio.setVolume(vol);
+    this.emitHudSnapshot(true);
+  }
+
   public applyWeather(weather: WeatherMode): void {
     this.weather = weather;
     this.audio.setWeatherAmbience(weather);
+    this.applyAtmosphereForTime(true);
+    this.emitHudSnapshot(true);
+  }
+
+  /**
+   * Synchronizes sky dome, celestial light orbit, GI bounce, fog, clouds, wet dielectric clearcoat,
+   * lantern & window emissives, grain mats, fireflies, rain, and water reflections from 24h time & weather.
+   */
+  private applyAtmosphereForTime(forceEnvCheck = false): void {
+    const dn = computeDayNightState(this.timeOfDay, this.weather);
+    const behavior = evaluateLivingBehavior(this.timeOfDay, this.weather);
+
+    this.timePeriodLabel = dn.periodLabel;
+    this.formattedTime = dn.formattedTime;
+
     this.arch.skyDome.visible = false;
     this.poeticSky.visible = true;
-    this.scene.environment = this.envMaps[weather];
 
-    if (weather === 'sunny') {
-      this.renderer.toneMappingExposure = 1.06;
-      this.skyUniforms.uZen.value.setHex(0x2874bc);
-      this.skyUniforms.uMid.value.setHex(0x63b2e0);
-      this.skyUniforms.uHor.value.setHex(0xf7e6c4);
-      this.skyUniforms.uHs.value.setHex(0xfff1cc);
-      this.skyUniforms.uGnd.value.setHex(0x88b8a8);
-      this.skyUniforms.uSunStr.value = 1.0;
-      this.skyUniforms.uMoonStr.value = 0.0;
-      this.skyUniforms.uStarStr.value = 0.0;
-      this.cloudTopMat.color.setHex(0xfff8e8);
-      this.cloudBotMat.color.setHex(0xefd1b8);
-      this.cloudGroup.visible = true;
+    const desiredEnv: 'sunny' | 'rain' | 'night' =
+      this.weather === 'rain' ? 'rain' : dn.nightFactor > 0.52 ? 'night' : 'sunny';
+    if (forceEnvCheck || desiredEnv !== this.activeEnvKey) {
+      this.activeEnvKey = desiredEnv;
+      this.scene.environment = this.envMaps[desiredEnv];
+    }
 
-      this.scene.background = new THREE.Color(0x63b2e0);
-      (this.scene.fog as THREE.FogExp2).color.setHex(0xdae6e2);
-      (this.scene.fog as THREE.FogExp2).density = 0.0021;
-      this.scene.environmentIntensity = 0.68;
-      this.sunLight.color.setHex(0xfff0cf);
-      this.sunLight.intensity = 2.85;
-      this.sunLight.position.set(46, 36, 32);
-      this.hemiLight.color.setHex(0x98ccf0);
-      this.hemiLight.groundColor.setHex(0xa88a60);
-      this.hemiLight.intensity = 0.72;
-      this.groundBounceLight.color.setHex(0xf6cfa0);
-      this.groundBounceLight.intensity = 0.64;
-      this.skyRimLight.color.setHex(0x9bd2f8);
-      this.skyRimLight.intensity = 0.46;
+    this.renderer.toneMappingExposure = dn.exposure;
+    this.scene.environmentIntensity = dn.envIntensity;
 
-      // Sync shared physical optical uniforms (GI radiosity, SSS, wetness)
-      physicalEnvUniforms.uSunDir.value.set(46, 36, 32).normalize();
-      physicalEnvUniforms.uSunColor.value.setHex(0xfff0d2);
-      physicalEnvUniforms.uBounceColor.value.setHex(0xf0c990);
-      physicalEnvUniforms.uSkyColor.value.setHex(0x88c8ec);
-      physicalEnvUniforms.uWetness.value = 0.0;
-      physicalEnvUniforms.uNightFactor.value = 0.0;
+    // Sky shader uniforms
+    this.skyUniforms.uZen.value.setHex(dn.skyZenith);
+    this.skyUniforms.uMid.value.setHex(dn.skyMid);
+    this.skyUniforms.uHor.value.setHex(dn.skyHorizon);
+    this.skyUniforms.uHs.value.setHex(dn.skySunGlow);
+    this.skyUniforms.uGnd.value.setHex(dn.skyGround);
+    this.skyUniforms.uTwilightCol.value.setHex(
+      dn.dawnFactor >= dn.duskFactor ? 0xf8ad78 : 0xf27d52
+    );
+    this.skyUniforms.uSunDir.value.set(dn.sunDir[0], dn.sunDir[1], dn.sunDir[2]);
+    this.skyUniforms.uMoonDir.value.set(dn.moonDir[0], dn.moonDir[1], dn.moonDir[2]);
+    this.skyUniforms.uSunStr.value = dn.sunStrength;
+    this.skyUniforms.uMoonStr.value = dn.moonStrength;
+    this.skyUniforms.uStarStr.value = dn.starStrength;
+    this.skyUniforms.uTwilight.value = dn.twilightFactor;
+    this.skyUniforms.uRain.value = dn.rainFactor;
 
-      // Dry surface clearcoat calibration
-      this.mats.wettableMaterials.forEach((m) => {
-        const isTile = m === this.mats.roofTile || m === this.mats.roofTileDark;
-        m.clearcoat = isTile ? 0.08 : 0.0;
-        m.clearcoatRoughness = isTile ? 0.45 : 0.28;
-      });
-      this.mats.huataiCobble.roughness = 0.82;
-      this.mats.windowLattice.emissiveIntensity = 0.08;
-      this.mats.lanternPaper.emissiveIntensity = 0.42;
-      this.arch.lanternLights.forEach((l) => (l.intensity = 0.16));
-      if (this.bloomPass) {
-        this.bloomPass.strength = 0.22;
-        this.bloomPass.threshold = 0.94;
-      }
-      if (this.lensPass) {
-        this.lensPass.uniforms.uVignette.value = 0.20;
-      }
-      this.rainPoints.visible = false;
-      this.arch.rainCurtainMeshes.forEach((m) => (m.visible = false));
-      this.fireflyPoints.visible = false;
-    } else if (weather === 'rain') {
-      // 烟雨客乡 (Celadon Ink-Wash Misty Rain with physical wet stone & tile clearcoat film!)
-      this.renderer.toneMappingExposure = 1.02;
-      this.skyUniforms.uZen.value.setHex(0x52748e);
-      this.skyUniforms.uMid.value.setHex(0x84a0b2);
-      this.skyUniforms.uHor.value.setHex(0xc8d7d6);
-      this.skyUniforms.uHs.value.setHex(0xdbe5e2);
-      this.skyUniforms.uGnd.value.setHex(0x6c8684);
-      this.skyUniforms.uSunStr.value = 0.12;
-      this.skyUniforms.uMoonStr.value = 0.0;
-      this.skyUniforms.uStarStr.value = 0.0;
-      this.cloudTopMat.color.setHex(0xcfdce0);
-      this.cloudBotMat.color.setHex(0x8ca2b0);
-      this.cloudGroup.visible = true;
+    this.cloudTopMat.color.setHex(dn.cloudTopColor);
+    this.cloudBotMat.color.setHex(dn.cloudBotColor);
+    const cloudFade = Math.max(0, 1 - dn.nightFactor * 1.15);
+    this.cloudTopMat.opacity = 0.9 * cloudFade;
+    this.cloudBotMat.opacity = 0.86 * cloudFade;
+    this.cloudGroup.visible = cloudFade > 0.04;
 
-      this.scene.background = new THREE.Color(0x9bb2bc);
-      (this.scene.fog as THREE.FogExp2).color.setHex(0xa6bcc2);
-      (this.scene.fog as THREE.FogExp2).density = 0.0064;
-      this.scene.environmentIntensity = 0.64;
-      this.sunLight.color.setHex(0xdbe8ef);
-      this.sunLight.intensity = 1.3;
-      this.sunLight.position.set(16, 40, 18);
-      this.hemiLight.color.setHex(0xa8c2d0);
-      this.hemiLight.groundColor.setHex(0x5c6862);
-      this.hemiLight.intensity = 0.88;
-      this.groundBounceLight.color.setHex(0x9cb4b2);
-      this.groundBounceLight.intensity = 0.36;
-      this.skyRimLight.color.setHex(0xb8d4e0);
-      this.skyRimLight.intensity = 0.38;
+    (this.scene.background as THREE.Color).setHex(dn.skyMid);
+    const fog = this.scene.fog as THREE.FogExp2;
+    fog.color.setHex(dn.fogColor);
+    fog.density = dn.fogDensity;
 
-      physicalEnvUniforms.uSunDir.value.set(16, 40, 18).normalize();
-      physicalEnvUniforms.uSunColor.value.setHex(0xd6e6ee);
-      physicalEnvUniforms.uBounceColor.value.setHex(0x8fa8a4);
-      physicalEnvUniforms.uSkyColor.value.setHex(0x9cb8c6);
-      physicalEnvUniforms.uWetness.value = 1.0;
-      physicalEnvUniforms.uNightFactor.value = 0.0;
+    // Primary celestial directional light tracks Sun by day and Moon by night (keeping y >= 12 for crisp shadows)
+    const useMoon = dn.nightFactor > 0.5;
+    const ld = useMoon ? dn.moonDir : dn.sunDir;
+    const lightY = Math.max(0.24, Math.abs(ld[1]));
+    this.sunLight.position.set(ld[0] * 64, lightY * 58, ld[2] * 64);
+    this.sunLight.color.setHex(dn.sunLightColor);
+    this.sunLight.intensity = dn.sunLightIntensity;
 
-      // Engage physical rainwater dielectric film (IOR ~1.333 clearcoat sheen on tiles, slabs & courtyard!)
-      this.mats.wettableMaterials.forEach((m) => {
-        const isTile = m === this.mats.roofTile || m === this.mats.roofTileDark;
+    this.hemiLight.color.setHex(dn.hemiSkyColor);
+    this.hemiLight.groundColor.setHex(dn.hemiGroundColor);
+    this.hemiLight.intensity = dn.hemiIntensity;
+
+    this.groundBounceLight.color.setHex(dn.bounceLightColor);
+    this.groundBounceLight.intensity = dn.bounceLightIntensity;
+
+    this.skyRimLight.color.setHex(dn.rimLightColor);
+    this.skyRimLight.intensity = dn.rimLightIntensity;
+
+    // Shared physical environment shader uniforms
+    physicalEnvUniforms.uSunDir.value.set(ld[0], lightY, ld[2]).normalize();
+    physicalEnvUniforms.uSunColor.value.setHex(dn.sunLightColor);
+    physicalEnvUniforms.uBounceColor.value.setHex(dn.bounceLightColor);
+    physicalEnvUniforms.uSkyColor.value.setHex(dn.hemiSkyColor);
+    physicalEnvUniforms.uWetness.value = dn.rainFactor;
+    physicalEnvUniforms.uNightFactor.value = dn.nightFactor;
+
+    // Physical rainwater dielectric film on roof tiles, courtyard slabs & cobbles
+    const isRain = this.weather === 'rain';
+    this.mats.wettableMaterials.forEach((m) => {
+      const isTile = m === this.mats.roofTile || m === this.mats.roofTileDark;
+      if (isRain) {
         m.clearcoat = isTile ? 0.66 : 0.78;
         m.clearcoatRoughness = isTile ? 0.22 : 0.14;
-      });
-      this.mats.huataiCobble.roughness = 0.32;
-      this.mats.windowLattice.emissiveIntensity = 0.95;
-      this.mats.lanternPaper.emissiveIntensity = 1.25;
-      this.arch.lanternLights.forEach((l) => (l.intensity = 1.45));
-      if (this.bloomPass) {
-        this.bloomPass.strength = 0.18;
-        this.bloomPass.threshold = 0.90;
+      } else {
+        m.clearcoat = isTile ? 0.08 + dn.nightFactor * 0.06 : dn.nightFactor * 0.04;
+        m.clearcoatRoughness = isTile ? 0.42 : 0.30;
       }
-      if (this.lensPass) {
-        this.lensPass.uniforms.uVignette.value = 0.25;
-      }
-      this.rainPoints.visible = true;
-      this.arch.rainCurtainMeshes.forEach((m) => (m.visible = true));
-      this.fireflyPoints.visible = false;
-    } else {
-      // 上元灯夜 (Poetic Indigo Moonlit Lantern Festival Night with warm crimson-gold GI bounce!)
-      this.renderer.toneMappingExposure = 1.16;
-      this.skyUniforms.uZen.value.setHex(0x0b1630);
-      this.skyUniforms.uMid.value.setHex(0x1b335c);
-      this.skyUniforms.uHor.value.setHex(0x4b4868);
-      this.skyUniforms.uHs.value.setHex(0x7c5a64);
-      this.skyUniforms.uGnd.value.setHex(0x152236);
-      this.skyUniforms.uSunStr.value = 0.0;
-      this.skyUniforms.uMoonStr.value = 1.0;
-      this.skyUniforms.uStarStr.value = 1.0;
-      this.cloudTopMat.color.setHex(0x3a4d70);
-      this.cloudBotMat.color.setHex(0x1d2a44);
-      this.cloudGroup.visible = true;
+    });
+    this.mats.huataiCobble.roughness = isRain ? 0.32 : THREE.MathUtils.lerp(0.82, 0.68, dn.nightFactor);
 
-      this.scene.background = new THREE.Color(0x14223d);
-      (this.scene.fog as THREE.FogExp2).color.setHex(0x1b2b48);
-      (this.scene.fog as THREE.FogExp2).density = 0.0044;
-      this.scene.environmentIntensity = 0.34;
-      this.sunLight.color.setHex(0x88a8de);
-      this.sunLight.intensity = 0.68;
-      this.sunLight.position.set(-24, 34, -46);
-      this.hemiLight.color.setHex(0x3a5688);
-      this.hemiLight.groundColor.setHex(0x4a2e1a);
-      this.hemiLight.intensity = 0.52;
-      this.groundBounceLight.color.setHex(0xd47634);
-      this.groundBounceLight.intensity = 0.42;
-      this.skyRimLight.color.setHex(0x6b92d4);
-      this.skyRimLight.intensity = 0.34;
-
-      physicalEnvUniforms.uSunDir.value.set(-24, 34, -46).normalize();
-      physicalEnvUniforms.uSunColor.value.setHex(0x8caee4);
-      physicalEnvUniforms.uBounceColor.value.setHex(0xd47434);
-      physicalEnvUniforms.uSkyColor.value.setHex(0x2d4878);
-      physicalEnvUniforms.uWetness.value = 0.0;
-      physicalEnvUniforms.uNightFactor.value = 1.0;
-
-      this.mats.wettableMaterials.forEach((m) => {
-        const isTile = m === this.mats.roofTile || m === this.mats.roofTileDark;
-        m.clearcoat = isTile ? 0.14 : 0.04;
-        m.clearcoatRoughness = 0.38;
-      });
-      this.mats.huataiCobble.roughness = 0.68;
-      this.mats.windowLattice.emissiveIntensity = 1.75;
-      this.mats.lanternPaper.emissiveIntensity = 2.75;
-      this.arch.lanternLights.forEach((l) => {
-        l.distance = 28;
-        l.intensity = 6.4;
-      });
-      if (this.bloomPass) {
-        this.bloomPass.strength = 0.46;
-        this.bloomPass.threshold = 0.84;
-      }
-      if (this.lensPass) {
-        this.lensPass.uniforms.uVignette.value = 0.28;
-      }
-      this.rainPoints.visible = false;
-      this.arch.rainCurtainMeshes.forEach((m) => (m.visible = false));
-      this.fireflyPoints.visible = true;
+    // Warm lanterns & interior lattice windows glow automatically at dusk, night, or rain
+    const dingBoost = this.dingLanternLit ? 1.15 : 0;
+    this.mats.windowLattice.emissiveIntensity = 0.08 + dn.windowGlow * 1.68;
+    this.mats.lanternPaper.emissiveIntensity = 0.36 + dn.lanternGlow * 2.38 + dingBoost * 0.6;
+    const lanternIntensity = 0.14 + dn.lanternGlow * 6.2;
+    for (let i = 0; i < this.arch.lanternLights.length; i++) {
+      const l = this.arch.lanternLights[i];
+      l.distance = 28;
+      l.intensity = lanternIntensity;
     }
-    this.emitHudSnapshot(true);
-  }
 
-  public toggleXray(): void {
-    this.xrayActive = !this.xrayActive;
-    this.mats.rammedEarthXray.opacity = this.xrayActive ? 0.24 : 1.0;
-    this.mats.rammedEarthXray.needsUpdate = true;
-    this.audio.playInteractionSound('int_tianjie_xray');
-    this.emitHudSnapshot(true);
-  }
+    if (this.bloomPass) {
+      this.bloomPass.strength = 0.20 + dn.lanternGlow * 0.24;
+      this.bloomPass.threshold = THREE.MathUtils.lerp(0.94, 0.84, dn.nightFactor);
+    }
+    if (this.lensPass) {
+      this.lensPass.uniforms.uVignette.value = 0.20 + dn.nightFactor * 0.08 + dn.rainFactor * 0.04;
+    }
 
-  public toggleTaijiOverlay(): void {
-    this.taijiActive = !this.taijiActive;
-    this.props.taijiOverlay.visible = this.taijiActive;
-    this.audio.playInteractionSound('int_dragon_taiji');
-    this.emitHudSnapshot(true);
+    // Rain curtains, particles, fireflies, and grain drying mats/covers synced with FSM
+    this.rainPoints.visible = isRain;
+    for (let i = 0; i < this.arch.rainCurtainMeshes.length; i++) {
+      this.arch.rainCurtainMeshes[i].visible = isRain;
+    }
+    this.fireflyPoints.visible = behavior.firefliesActive;
+
+    for (let i = 0; i < this.props.grainMatGroups.length; i++) {
+      this.props.grainMatGroups[i].visible = behavior.grainMatsVisible;
+    }
+    for (let i = 0; i < this.props.grainTarpCovers.length; i++) {
+      this.props.grainTarpCovers[i].visible = behavior.grainMatsVisible && behavior.grainMatsCovered;
+    }
+    this.props.grainStaticRake.visible = behavior.grainMatsVisible && !behavior.grainMatsCovered;
   }
 
   public markArtifactInspected(artifactId: string): void {
@@ -1181,10 +1246,6 @@ export class WeilongSceneController {
         this.winnowerTimer = 4.2;
         break;
 
-      case 'int_tianjie_xray':
-        this.toggleXray();
-        break;
-
       case 'int_gallery_pulley':
         this.pulleyRaised = !this.pulleyRaised;
         break;
@@ -1194,7 +1255,7 @@ export class WeilongSceneController {
         this.birdsFlightTimer = 6.5;
         this.props.startledBirds.visible = true;
         this.gunSlitActive = !this.gunSlitActive;
-        this.camera.fov = this.gunSlitActive ? 34 : 62;
+        this.camera.fov = this.gunSlitActive ? 34 : 56;
         this.camera.updateProjectionMatrix();
         break;
 
@@ -1206,8 +1267,7 @@ export class WeilongSceneController {
           mat.emissiveIntensity = 1.45;
         }
         if (this.fiveElementsLit >= 5) {
-          this.props.fiveElementBeam.visible = true;
-          customMandarin = '金木水火土五行石已全部点亮！聚气化胎金光直指北方龙厅！';
+          customMandarin = '金木水火土五行石已全部点亮，护佑客家宗祠风调雨顺！';
         } else {
           customMandarin = `已点亮第 ${this.fiveElementsLit}/5 块五行石（${names[this.fiveElementsLit - 1]}），再轻触可齐聚五行。`;
         }
@@ -1227,10 +1287,6 @@ export class WeilongSceneController {
         customMandarin = `撕下老黄历新页：${entry}`;
         break;
       }
-
-      case 'int_dragon_taiji':
-        this.toggleTaijiOverlay();
-        break;
 
       default:
         break;
@@ -1333,14 +1389,28 @@ export class WeilongSceneController {
       }
     }
 
-    // 2. Ambient World, Water, Clouds & Living Community Animations
+    // 2. Smooth 24-Hour Day-Night Cycle, Water Optics, Clouds, Living FSM & Audio Ambience
+    if (this.mode === 'playing' && this.timePlaying) {
+      // Base 1x speed = 1 game hour every 30s (full 24h in 12min); 60x = full 24h in 12s!
+      this.timeOfDay = normalizeHour(this.timeOfDay + (dt / 30) * this.timeSpeed);
+    }
+    this.applyAtmosphereForTime(false);
+
+    const dnNow = computeDayNightState(this.timeOfDay, this.weather);
     this.skyUniforms.uTime.value = t;
     this.arch.updateWater(
       t,
-      this.weather === 'lantern' ? 1.0 : 0.0,
-      this.weather === 'rain' ? 1.0 : 0.0
+      dnNow.nightFactor,
+      dnNow.rainFactor,
+      dnNow.skyZenith,
+      dnNow.skyHorizon,
+      dnNow.sunLightColor,
+      dnNow.lanternGlow
     );
-    this.living.update(dt, t, this.weather);
+    this.living.update(dt, t, this.weather, this.timeOfDay);
+
+    const distToPond = Math.hypot(this.playerPos.x, this.playerPos.z - 42.5);
+    this.audio.updateAmbience(this.timeOfDay, this.weather, distToPond);
 
     // Gentle cloud drift across the valley sky
     for (const c of this.cloudGroup.children) {
@@ -1672,12 +1742,16 @@ export class WeilongSceneController {
       inspectedArtifacts: Array.from(this.inspectedArtifacts),
       fiveElementsLit: this.fiveElementsLit,
       holdingUmbrella: this.holdingUmbrella,
-      xrayActive: this.xrayActive,
-      taijiActive: this.taijiActive,
       doumenOpen: this.doumenOpen,
       gunSlitActive: this.gunSlitActive,
       weather: this.weather,
       cameraView: this.cameraView,
+      timeOfDay: this.timeOfDay,
+      timePlaying: this.timePlaying,
+      timeSpeed: this.timeSpeed,
+      timePeriodLabel: this.timePeriodLabel,
+      formattedTime: this.formattedTime,
+      volume: this.audio.getVolume(),
     });
   }
 
@@ -1708,7 +1782,7 @@ export class WeilongSceneController {
     (this.fireflyPoints.material as THREE.Material).dispose();
     this.envMaps.sunny.dispose();
     this.envMaps.rain.dispose();
-    this.envMaps.lantern.dispose();
+    this.envMaps.night.dispose();
     this.composer?.dispose();
     this.living.dispose();
     this.arch.dispose();

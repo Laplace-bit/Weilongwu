@@ -17,12 +17,14 @@ interface GameHudProps {
   onWeatherChange: (w: WeatherMode) => void;
   onToggleCameraView: () => void;
   onToggleMute: () => void;
+  onVolumeChange: (v: number) => void;
+  onTimeOfDayChange: (hour: number) => void;
+  onToggleTimePlaying: () => void;
+  onCycleTimeSpeed: () => void;
   onOpenMap: () => void;
   onOpenArtifacts: () => void;
   onPause: () => void;
   onTriggerInteract: () => void;
-  onToggleXray: () => void;
-  onToggleTaiji: () => void;
 }
 
 export const GameHud: React.FC<GameHudProps> = ({
@@ -34,12 +36,14 @@ export const GameHud: React.FC<GameHudProps> = ({
   onWeatherChange,
   onToggleCameraView,
   onToggleMute,
+  onVolumeChange,
+  onTimeOfDayChange,
+  onToggleTimePlaying,
+  onCycleTimeSpeed,
   onOpenMap,
   onOpenArtifacts,
   onPause,
   onTriggerInteract,
-  onToggleXray,
-  onToggleTaiji,
 }) => {
   const [dockCollapsed, setDockCollapsed] = useState(false);
 
@@ -84,7 +88,7 @@ export const GameHud: React.FC<GameHudProps> = ({
         </div>
       </div>
 
-      {/* TOP-RIGHT: Compact Square Utility Controls */}
+      {/* TOP-RIGHT: Compact Utility Controls + Sleek Audio Volume Control */}
       <div className="fixed top-4 right-4 flex items-center gap-2 pointer-events-auto">
         <button
           type="button"
@@ -123,30 +127,46 @@ export const GameHud: React.FC<GameHudProps> = ({
           </svg>
         </button>
 
-        <button
-          type="button"
-          tabIndex={-1}
-          aria-label={muted ? '取消静音' : '静音'}
-          title={muted ? '开启音效 (M)' : '静音 (M)'}
-          onClick={(e) => {
-            e.currentTarget.blur();
-            onToggleMute();
-          }}
-          className="w-10 h-10 flex items-center justify-center rounded border border-[#d9a84e]/30 text-[#f5efe6] hover:border-[#d9a84e] transition-colors cursor-pointer"
+        {/* Mute Toggle + Integrated Volume Slider */}
+        <div
+          className="h-10 flex items-center gap-2 px-2.5 rounded border border-[#d9a84e]/30 text-[#f5efe6]"
           style={{ backgroundColor: 'rgba(22, 35, 56, 0.86)' }}
         >
-          {muted ? (
-            <svg viewBox="0 0 24 24" className="w-5 h-5" fill="none" stroke="currentColor" strokeWidth="1.8">
-              <path d="M11 5 6 9H3v6h3l5 4V5Z" />
-              <path d="m16 9 5 6M21 9l-5 6" />
-            </svg>
-          ) : (
-            <svg viewBox="0 0 24 24" className="w-5 h-5" fill="none" stroke="currentColor" strokeWidth="1.8">
-              <path d="M11 5 6 9H3v6h3l5 4V5Z" />
-              <path d="M15.5 8.5a5 5 0 0 1 0 7M18.5 5.5a9 9 0 0 1 0 13" />
-            </svg>
-          )}
-        </button>
+          <button
+            type="button"
+            tabIndex={-1}
+            aria-label={muted ? '取消静音' : '静音'}
+            title={muted ? '开启音乐与环境音 (M)' : '静音 (M)'}
+            onClick={(e) => {
+              e.currentTarget.blur();
+              onToggleMute();
+            }}
+            className="w-6 h-6 flex items-center justify-center text-[#f5efe6] hover:text-[#ebb854] transition-colors cursor-pointer"
+          >
+            {muted || hud.volume <= 0.01 ? (
+              <svg viewBox="0 0 24 24" className="w-5 h-5" fill="none" stroke="currentColor" strokeWidth="1.8">
+                <path d="M11 5 6 9H3v6h3l5 4V5Z" />
+                <path d="m16 9 5 6M21 9l-5 6" />
+              </svg>
+            ) : (
+              <svg viewBox="0 0 24 24" className="w-5 h-5" fill="none" stroke="currentColor" strokeWidth="1.8">
+                <path d="M11 5 6 9H3v6h3l5 4V5Z" />
+                <path d="M15.5 8.5a5 5 0 0 1 0 7M18.5 5.5a9 9 0 0 1 0 13" />
+              </svg>
+            )}
+          </button>
+          <input
+            type="range"
+            min={0}
+            max={1}
+            step={0.02}
+            aria-label="音量调节"
+            title="背景音乐与环境音量"
+            value={muted ? 0 : hud.volume}
+            onChange={(e) => onVolumeChange(Number(e.target.value))}
+            className="w-16 h-1.5 accent-[#ebb854] cursor-pointer"
+          />
+        </div>
 
         <button
           type="button"
@@ -211,7 +231,7 @@ export const GameHud: React.FC<GameHudProps> = ({
         <div
           className="fixed left-1/2 -translate-x-1/2 max-w-xl w-[90vw] px-5 py-3 rounded border border-[#ebb854]/35 text-center transition-all"
           style={{
-            bottom: dockCollapsed ? '52px' : '116px',
+            bottom: dockCollapsed ? '52px' : '124px',
             backgroundColor: 'rgba(22, 35, 56, 0.90)',
           }}
         >
@@ -227,7 +247,7 @@ export const GameHud: React.FC<GameHudProps> = ({
         </div>
       )}
 
-      {/* COLLAPSIBLE UNIFIED BOTTOM CONTROL DOCK (ZERO TELEPORT — PURE FREE WALKING!) */}
+      {/* COLLAPSIBLE UNIFIED BOTTOM CONTROL DOCK: VIEW + WEATHER + 24H INTERACTIVE TIMELINE */}
       <div className="fixed bottom-4 inset-x-0 flex justify-center pointer-events-none px-4">
         <div
           className="flex flex-col items-center pointer-events-auto max-w-[96vw]"
@@ -247,15 +267,15 @@ export const GameHud: React.FC<GameHudProps> = ({
             className="px-3.5 py-1 text-[11px] text-[#e8dec9] hover:text-[#fbf5e8] rounded-t border border-b-0 border-[#ebb854]/30 cursor-pointer whitespace-nowrap"
             style={{ backgroundColor: 'rgba(22, 35, 56, 0.88)' }}
           >
-            {dockCollapsed ? '▴ 展开游览工具栏' : '▾ 收起工具栏'}
+            {dockCollapsed ? '▴ 展开游览与昼夜时间轴' : '▾ 收起工具栏'}
           </button>
 
           <div
-            className="flex flex-wrap sm:flex-nowrap items-center justify-center gap-1.5 px-3 py-2 rounded border border-[#ebb854]/30 shadow-xl"
-            style={{ backgroundColor: 'rgba(22, 35, 56, 0.90)' }}
+            className="flex flex-wrap lg:flex-nowrap items-center justify-center gap-2.5 px-3.5 py-2 rounded border border-[#ebb854]/30 shadow-xl"
+            style={{ backgroundColor: 'rgba(22, 35, 56, 0.92)' }}
           >
             {/* Walk vs Aerial Inspection View Toggle */}
-            <div className="flex items-center gap-1 pr-2 border-r border-[#f5efe6]/15">
+            <div className="flex items-center gap-1 pr-2.5 border-r border-[#f5efe6]/15">
               <button
                 type="button"
                 tabIndex={-1}
@@ -269,13 +289,13 @@ export const GameHud: React.FC<GameHudProps> = ({
                     : 'bg-white/10 text-[#fbf5e8] hover:bg-white/15'
                 }`}
               >
-                {cameraView === 'aerial' ? '返回自由步行 (V)' : '航拍俯瞰全景 (V)'}
+                {cameraView === 'aerial' ? '返回自由步行 (V)' : '航拍俯瞰 (V)'}
               </button>
             </div>
 
-            {/* Weather Segmented Switcher */}
-            <div className="flex items-center gap-1 pr-2 border-r border-[#f5efe6]/15">
-              {(['sunny', 'rain', 'lantern'] as WeatherMode[]).map((w) => (
+            {/* Weather Switcher (Sunny / Rain) */}
+            <div className="flex items-center gap-1 pr-2.5 border-r border-[#f5efe6]/15">
+              {(['sunny', 'rain'] as WeatherMode[]).map((w) => (
                 <button
                   key={w}
                   type="button"
@@ -295,38 +315,73 @@ export const GameHud: React.FC<GameHudProps> = ({
               ))}
             </div>
 
-            {/* Architectural Cutaways */}
-            <div className="flex items-center gap-1">
+            {/* 24-Hour Interactive Day-Night Timeline */}
+            <div className="flex items-center gap-2">
               <button
                 type="button"
                 tabIndex={-1}
+                aria-label={hud.timePlaying ? '暂停昼夜流逝' : '播放昼夜流逝'}
+                title={hud.timePlaying ? '暂停时间流逝' : '继续昼夜循环'}
                 onClick={(e) => {
                   e.currentTarget.blur();
-                  onToggleXray();
+                  onToggleTimePlaying();
                 }}
-                className={`px-2.5 py-1.5 text-xs rounded transition-colors cursor-pointer whitespace-nowrap ${
-                  hud.xrayActive
-                    ? 'bg-[#d9a84e] text-[#171310] font-semibold'
-                    : 'text-[#d8cebe] hover:text-[#faf5ed] hover:bg-white/10'
-                }`}
+                className="w-7 h-7 flex items-center justify-center rounded bg-white/10 hover:bg-white/20 text-[#fbf5e8] transition-colors cursor-pointer"
               >
-                夯土透视
+                {hud.timePlaying ? (
+                  <svg viewBox="0 0 24 24" className="w-3.5 h-3.5" fill="currentColor">
+                    <rect x="6" y="5" width="4" height="14" rx="1" />
+                    <rect x="14" y="5" width="4" height="14" rx="1" />
+                  </svg>
+                ) : (
+                  <svg viewBox="0 0 24 24" className="w-3.5 h-3.5" fill="currentColor">
+                    <polygon points="7,5 19,12 7,19" />
+                  </svg>
+                )}
               </button>
+
               <button
                 type="button"
                 tabIndex={-1}
+                aria-label="切换时间倍速"
+                title="点击切换昼夜流逝倍速 (1× / 5× / 20× / 60×)"
                 onClick={(e) => {
                   e.currentTarget.blur();
-                  onToggleTaiji();
+                  onCycleTimeSpeed();
                 }}
-                className={`px-2.5 py-1.5 text-xs rounded transition-colors cursor-pointer whitespace-nowrap ${
-                  hud.taijiActive
-                    ? 'bg-[#d9a84e] text-[#171310] font-semibold'
-                    : 'text-[#d8cebe] hover:text-[#faf5ed] hover:bg-white/10'
-                }`}
+                className="px-2 py-1 text-xs font-mono font-semibold rounded bg-white/10 hover:bg-white/20 text-[#f2c86b] transition-colors cursor-pointer tabular-nums min-w-[38px]"
               >
-                太极脉络
+                {hud.timeSpeed}×
               </button>
+
+              <div className="flex flex-col min-w-[190px] sm:min-w-[230px]">
+                <div className="flex items-center justify-between text-[11px] leading-none mb-1 tabular-nums">
+                  <span className="text-[#f7f1e6] font-mono font-semibold">
+                    {hud.formattedTime}
+                  </span>
+                  <span className="text-[#ebb854] font-serif-display tracking-wide">
+                    {hud.timePeriodLabel}
+                  </span>
+                </div>
+                <input
+                  type="range"
+                  min={0}
+                  max={23.95}
+                  step={0.05}
+                  aria-label="昼夜时间轴"
+                  data-testid="day-night-slider"
+                  value={hud.timeOfDay}
+                  onChange={(e) => onTimeOfDayChange(Number(e.target.value))}
+                  className="w-full h-1.5 accent-[#ebb854] cursor-pointer"
+                />
+                <div className="flex justify-between text-[9px] text-[#cfc4b2]/70 mt-0.5 leading-none">
+                  <span>00</span>
+                  <span>晨 06</span>
+                  <span>午 12</span>
+                  <span>暮 18</span>
+                  <span>24</span>
+                </div>
+              </div>
             </div>
           </div>
         </div>

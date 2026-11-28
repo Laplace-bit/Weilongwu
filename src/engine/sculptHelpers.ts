@@ -120,6 +120,115 @@ export function createSoftPillowGeometry(
 }
 
 /**
+ * Generates an airy, multi-layered 3D cluster of gently arched botanical sprig cards
+ * oriented across a crown volume with outward spherical normals for natural canopy shading,
+ * crisp leaf silhouettes, and dappled sky translucency (eliminating lumpy solid blobs).
+ */
+export function createFoliageCardClusterGeometry(
+  radius: number,
+  cardCount = 14,
+  seed = 1,
+  squashY = 0.78
+): THREE.BufferGeometry {
+  const positions: number[] = [];
+  const normals: number[] = [];
+  const uvs: number[] = [];
+  const indices: number[] = [];
+
+  const rand = (k: number) => {
+    const x = Math.sin(seed * 127.1 + k * 311.7) * 43758.5453;
+    return x - Math.floor(x);
+  };
+
+  const center = new THREE.Vector3();
+  const up = new THREE.Vector3(0, 1, 0);
+  const right = new THREE.Vector3();
+  const forward = new THREE.Vector3();
+  const tangentUp = new THREE.Vector3();
+  const v = new THREE.Vector3();
+  const n = new THREE.Vector3();
+
+  // Golden-angle Fibonacci distribution over the crown shell for balanced 360-degree fullness
+  const goldenAngle = Math.PI * (3 - Math.sqrt(5));
+  for (let i = 0; i < cardCount; i++) {
+    const t = (i + 0.5) / cardCount;
+    const yNorm = 1 - 1.65 * t; // Bias slightly toward upper/side canopy with gentle airy base
+    const rHoriz = Math.sqrt(Math.max(0.04, 1 - yNorm * yNorm));
+    const theta = i * goldenAngle + rand(i * 3 + 1) * 0.55;
+
+    const shellDist = radius * (0.34 + 0.42 * rand(i * 3 + 2));
+    center.set(
+      Math.cos(theta) * rHoriz * shellDist,
+      yNorm * shellDist * squashY,
+      Math.sin(theta) * rHoriz * shellDist
+    );
+
+    // Outward direction for the card + varied organic roll
+    forward.copy(center).normalize();
+    if (forward.lengthSq() < 0.01) forward.set(0, 1, 0);
+    right.crossVectors(up, forward);
+    if (right.lengthSq() < 0.01) right.set(1, 0, 0);
+    right.normalize();
+    tangentUp.crossVectors(forward, right).normalize();
+
+    const roll = (rand(i * 3 + 3) - 0.5) * 1.45;
+    const cosR = Math.cos(roll);
+    const sinR = Math.sin(roll);
+    const rx = right.x * cosR + tangentUp.x * sinR;
+    const ry = right.y * cosR + tangentUp.y * sinR;
+    const rz = right.z * cosR + tangentUp.z * sinR;
+    const ux = -right.x * sinR + tangentUp.x * cosR;
+    const uy = -right.y * sinR + tangentUp.y * cosR;
+    const uz = -right.z * sinR + tangentUp.z * cosR;
+
+    const cardW = radius * (0.76 + rand(i * 5 + 4) * 0.46);
+    const cardH = cardW * (0.88 + rand(i * 5 + 5) * 0.28);
+    const archDepth = cardW * 0.14;
+
+    // 3x2 gently curved sprig quad (6 vertices -> 4 triangles) so cards never look paper-flat
+    const baseIdx = positions.length / 3;
+    const cols = [-0.5, 0.0, 0.5];
+    const rows = [-0.5, 0.5];
+    for (let ryIdx = 0; ryIdx < 2; ryIdx++) {
+      const vt = rows[ryIdx];
+      for (let cxIdx = 0; cxIdx < 3; cxIdx++) {
+        const ut = cols[cxIdx];
+        const bow = (0.25 - ut * ut) * archDepth * 2.2;
+        v.set(
+          center.x + rx * ut * cardW + ux * vt * cardH + forward.x * bow,
+          center.y + ry * ut * cardW + uy * vt * cardH + forward.y * bow,
+          center.z + rz * ut * cardW + uz * vt * cardH + forward.z * bow
+        );
+        positions.push(v.x, v.y, v.z);
+
+        // Soft canopy-wide spherical normal blended with upward sky bias for rich volumetric foliage lighting
+        n.copy(v).normalize();
+        n.y = THREE.MathUtils.clamp(n.y * 0.72 + 0.34, -0.4, 1.0);
+        n.normalize();
+        normals.push(n.x, n.y, n.z);
+
+        uvs.push(cxIdx * 0.5, ryIdx === 0 ? 0 : 1);
+      }
+    }
+
+    // Two quads (left half + right half)
+    indices.push(
+      baseIdx + 0, baseIdx + 1, baseIdx + 4,
+      baseIdx + 0, baseIdx + 4, baseIdx + 3,
+      baseIdx + 1, baseIdx + 2, baseIdx + 5,
+      baseIdx + 1, baseIdx + 5, baseIdx + 4
+    );
+  }
+
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+  geo.setAttribute('normal', new THREE.Float32BufferAttribute(normals, 3));
+  geo.setAttribute('uv', new THREE.Float32BufferAttribute(uvs, 2));
+  geo.setIndex(indices);
+  return geo;
+}
+
+/**
  * Wrapper for smooth woodcarved LatheGeometry profiles (robes, jars, lanterns, animal bodies).
  */
 export function createTurnedLatheGeometry(
