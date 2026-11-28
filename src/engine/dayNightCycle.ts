@@ -97,6 +97,12 @@ export function normalizeHour(hour: number): number {
   return m < 0 ? m + 24 : m;
 }
 
+export function getLocalTimeOfDay(date: Date = new Date()): number {
+  return normalizeHour(
+    date.getHours() + date.getMinutes() / 60 + date.getSeconds() / 3600
+  );
+}
+
 export function formatHourClock(hour: number): string {
   const h = normalizeHour(hour);
   const hh = Math.floor(h);

@@ -943,6 +943,141 @@ export function resolvePlayerMovement(
 }
 
 /**
+ * Ray-vs-AABB slab test on the XZ plane for segment (ox, oz) -> (ox + dx, oz + dz).
+ * Returns intersection fraction t in [0, 1] or null if no hit.
+ */
+function rayIntersectAabbXZ(
+  ox: number,
+  oz: number,
+  dx: number,
+  dz: number,
+  minX: number,
+  maxX: number,
+  minZ: number,
+  maxZ: number
+): number | null {
+  let tmin = 0;
+  let tmax = 1;
+
+  if (Math.abs(dx) < 1e-8) {
+    if (ox < minX || ox > maxX) return null;
+  } else {
+    const invD = 1 / dx;
+    let t1 = (minX - ox) * invD;
+    let t2 = (maxX - ox) * invD;
+    if (t1 > t2) {
+      const tmp = t1;
+      t1 = t2;
+      t2 = tmp;
+    }
+    tmin = Math.max(tmin, t1);
+    tmax = Math.min(tmax, t2);
+    if (tmin > tmax) return null;
+  }
+
+  if (Math.abs(dz) < 1e-8) {
+    if (oz < minZ || oz > maxZ) return null;
+  } else {
+    const invD = 1 / dz;
+    let t1 = (minZ - oz) * invD;
+    let t2 = (maxZ - oz) * invD;
+    if (t1 > t2) {
+      const tmp = t1;
+      t1 = t2;
+      t2 = tmp;
+    }
+    tmin = Math.max(tmin, t1);
+    tmax = Math.min(tmax, t2);
+    if (tmin > tmax) return null;
+  }
+
+  return tmin >= 0 && tmin <= 1 ? tmin : null;
+}
+
+/**
+ * 2D segment intersection fraction t along ray (ox,oz)->(ox+dx,oz+dz) against segment (ax,az)->(bx,bz).
+ */
+function rayIntersectSegmentXZ(
+  ox: number,
+  oz: number,
+  dx: number,
+  dz: number,
+  ax: number,
+  az: number,
+  bx: number,
+  bz: number
+): number | null {
+  const sx = bx - ax;
+  const sz = bz - az;
+  const denom = dx * sz - dz * sx;
+  if (Math.abs(denom) < 1e-8) return null;
+  const qx = ax - ox;
+  const qz = az - oz;
+  const t = (qx * sz - qz * sx) / denom;
+  const u = (qx * dz - qz * dx) / denom;
+  if (t >= 0 && t <= 1 && u >= -0.02 && u <= 1.02) {
+    return t;
+  }
+  return null;
+}
+
+/**
+ * Casts a camera spring-arm ray from pivot (ox, oz) to desired camera position (tx, tz)
+ * against architectural masonry walls and curved Weilong partitions (ignoring low furniture props
+ * that shouldn't snap the camera). Returns the safe fraction in [0, 1].
+ */
+export function raycastCameraWalls(
+  ox: number,
+  oz: number,
+  tx: number,
+  tz: number,
+  doumenOpen: boolean,
+  wallPadding = 0.34
+): number {
+  const dx = tx - ox;
+  const dz = tz - oz;
+  const rayLen = Math.hypot(dx, dz);
+  if (rayLen < 1e-4) return 1;
+
+  let bestT = 1.0;
+
+  // 1. Straight architectural masonry walls (skip low furniture props prefixed with prop_)
+  for (let i = 0; i < STATIC_WALLS.length; i++) {
+    const w = STATIC_WALLS[i];
+    if (w.id.startsWith('prop_')) continue;
+    if (w.dynamicGate && doumenOpen) continue;
+    const hitT = rayIntersectAabbXZ(
+      ox,
+      oz,
+      dx,
+      dz,
+      w.minX - wallPadding,
+      w.maxX + wallPadding,
+      w.minZ - wallPadding,
+      w.maxZ + wallPadding
+    );
+    if (hitT !== null && hitT < bestT) {
+      bestT = hitT;
+    }
+  }
+
+  // 2. Curved Inner & Outer Weilong ring walls + radial room partitions
+  const segMargin = wallPadding / rayLen;
+  for (let i = 0; i < CURVED_WALL_SEGMENTS.length; i++) {
+    const seg = CURVED_WALL_SEGMENTS[i];
+    const hitT = rayIntersectSegmentXZ(ox, oz, dx, dz, seg.ax, seg.az, seg.bx, seg.bz);
+    if (hitT !== null) {
+      const safeT = Math.max(0.08, hitT - segMargin);
+      if (safeT < bestT) {
+        bestT = safeT;
+      }
+    }
+  }
+
+  return bestT;
+}
+
+/**
  * Deterministic-capable Jiaobei (筊杯) divination evaluator.
  */
 export function evaluateJiaobei(seedA: number, seedB: number): JiaobeiOutcome {

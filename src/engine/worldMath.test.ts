@@ -20,7 +20,11 @@ import {
   samplePondSwimPath,
   sampleFlockOrbit,
 } from './livingPaths';
-import { computeDayNightState, formatHourClock } from './dayNightCycle';
+import {
+  computeDayNightState,
+  formatHourClock,
+  getLocalTimeOfDay,
+} from './dayNightCycle';
 import { evaluateLivingBehavior } from './livingBehavior';
 import { ROOM_NODES, INTERACTABLES } from '../data/weilongData';
 
@@ -144,6 +148,12 @@ test('24-hour day-night cycle computes smooth lighting, twilight, moon/stars, an
   assert.equal(formatHourClock(6.5), '06:30');
   assert.equal(formatHourClock(22.25), '22:15');
   assert.equal(formatHourClock(-1), '23:00');
+  assert.equal(getLocalTimeOfDay(new Date(2026, 5, 1, 0, 0, 0)), 0);
+  assert.equal(getLocalTimeOfDay(new Date(2026, 5, 1, 14, 30, 0)), 14.5);
+  assert.equal(formatHourClock(getLocalTimeOfDay(new Date(2026, 5, 1, 17, 45, 30))), '17:45');
+  assert.ok(
+    Math.abs(getLocalTimeOfDay(new Date(2026, 5, 1, 23, 59, 30)) - (23 + 59.5 / 60)) < 1e-6
+  );
 
   const noon = computeDayNightState(12.0, 'sunny');
   const dusk = computeDayNightState(18.0, 'sunny');

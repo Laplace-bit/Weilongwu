@@ -1,13 +1,27 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import type { GameMode, HudSnapshot, SubtitleState, WeatherMode } from './types/game';
+import type {
+  CameraViewMode,
+  GameMode,
+  HudSnapshot,
+  SubtitleState,
+  WeatherMode,
+} from './types/game';
 import { WeilongSceneController } from './engine/WeilongScene';
 import { TitleOverlay } from './components/TitleOverlay';
 import { GameHud } from './components/GameHud';
+import { TouchControls } from './components/TouchControls';
 import { ZoneMapModal } from './components/ZoneMapModal';
 import { ArtifactInspectorModal } from './components/ArtifactInspectorModal';
 import { PauseModal } from './components/PauseModal';
+import {
+  formatHourClock,
+  getChineseShichenLabel,
+  getLocalTimeOfDay,
+} from './engine/dayNightCycle';
 
-const INITIAL_HUD: HudSnapshot = {
+function createInitialHud(): HudSnapshot {
+  const initialTime = getLocalTimeOfDay();
+  return {
   currentNodeId: 'node_02_heping',
   currentNodeName: '02 · 禾坪与斗门',
   currentZoneName: '外场域 · 山水序幕区',
@@ -15,6 +29,7 @@ const INITIAL_HUD: HudSnapshot = {
   playerX: 0,
   playerZ: 31.0,
   playerYaw: 0,
+  cameraYaw: 0,
   nearbyInteractable: null,
   visitedNodes: ['node_02_heping'],
   triggeredInteractions: [],
@@ -24,16 +39,36 @@ const INITIAL_HUD: HudSnapshot = {
   doumenOpen: false,
   gunSlitActive: false,
   weather: 'sunny',
-  cameraView: 'walk',
-  timeOfDay: 10.5,
-  timePlaying: true,
-  timeSpeed: 1,
-  timePeriodLabel: '辰巳 · 晨光',
-  formattedTime: '10:30',
-  volume: 0.72,
-};
+  cameraView: 'third_mid',
+  pointerLocked: false,
+  isSprinting: false,
+    timeOfDay: initialTime,
+    timePlaying: true,
+    timeSpeed: 1,
+    timePeriodLabel: getChineseShichenLabel(initialTime).label,
+    formattedTime: formatHourClock(initialTime),
+    volume: 0.72,
+  };
+}
 
 const TIME_SPEED_STEPS = [1, 5, 20, 60];
+const VALID_CAMERA_VIEWS: readonly CameraViewMode[] = [
+  'third_near',
+  'third_mid',
+  'third_far',
+  'first_person',
+  'aerial',
+];
+
+function detectTouchOrMobileMode(): boolean {
+  if (typeof window === 'undefined') return false;
+  const params = new URLSearchParams(window.location.search);
+  if (params.get('touch') === '1') return true;
+  if (params.get('touch') === '0') return false;
+  const coarse = window.matchMedia?.('(pointer: coarse)')?.matches ?? false;
+  const hasTouch = 'ontouchstart' in window || navigator.maxTouchPoints > 0;
+  return coarse || (hasTouch && window.innerWidth <= 1024) || window.innerWidth < 768;
+}
 
 export default function App() {
   const canvasMountRef = useRef<HTMLDivElement | null>(null);
@@ -44,12 +79,20 @@ export default function App() {
     const params = new URLSearchParams(window.location.search);
     return params.get('autostart') === '1' ? 'playing' : 'title';
   });
+  const [isTouchMode, setIsTouchMode] = useState<boolean>(() => detectTouchOrMobileMode());
   const [muted, setMuted] = useState(false);
-  const [hud, setHud] = useState<HudSnapshot>(INITIAL_HUD);
+  const [hud, setHud] = useState<HudSnapshot>(() => createInitialHud());
   const [subtitle, setSubtitle] = useState<SubtitleState | null>(null);
   const [mapOpen, setMapOpen] = useState(false);
   const [inspectorArtifactId, setInspectorArtifactId] = useState<string | null>(null);
   const [inspectorOpen, setInspectorOpen] = useState(false);
+
+  useEffect(() => {
+    const updateTouch = () => setIsTouchMode(detectTouchOrMobileMode());
+    window.addEventListener('resize', updateTouch);
+    window.addEventListener('touchstart', () => setIsTouchMode(true), { once: true, passive: true });
+    return () => window.removeEventListener('resize', updateTouch);
+  }, []);
 
   // Keep latest callbacks in refs so Three.js scene mounts strictly once
   const callbacksRef = useRef({
@@ -90,20 +133,21 @@ export default function App() {
     if (paramWeather === 'rain' || paramWeather === 'sunny') {
       controller.applyWeather(paramWeather);
     }
-    if (params.get('view') === 'aerial') {
-      controller.setCameraView('aerial');
+    const paramView = params.get('view') as CameraViewMode | null;
+    if (paramView && VALID_CAMERA_VIEWS.includes(paramView)) {
+      controller.setCameraView(paramView);
     }
     const paramPos = params.get('pos');
     if (paramPos) {
       const parts = paramPos.split(',').map(Number);
       if (parts.length >= 2 && Number.isFinite(parts[0]) && Number.isFinite(parts[1])) {
         const yaw = params.get('yaw') !== null ? Number(params.get('yaw')) : 0;
-        const pitch = params.get('pitch') !== null ? Number(params.get('pitch')) : -0.02;
+        const pitch = params.get('pitch') !== null ? Number(params.get('pitch')) : -0.16;
         controller.setPlayerPose(
           parts[0],
           parts[1],
           Number.isFinite(yaw) ? yaw : 0,
-          Number.isFinite(pitch) ? pitch : -0.02
+          Number.isFinite(pitch) ? pitch : -0.16
         );
       }
     }
@@ -173,6 +217,25 @@ export default function App() {
     controllerRef.current?.setTimeSpeed(nextSpeed);
   }, [hud.timeSpeed]);
 
+  const handleVirtualMove = useCallback((right: number, forward: number, autoSprint: boolean) => {
+    controllerRef.current?.audio.unlock();
+    controllerRef.current?.setVirtualMove(right, forward, autoSprint);
+  }, []);
+
+  const handleVirtualSprint = useCallback((active: boolean) => {
+    controllerRef.current?.audio.unlock();
+    controllerRef.current?.setVirtualSprint(active);
+  }, []);
+
+  const handleLookBack = useCallback((active: boolean) => {
+    controllerRef.current?.setLookBack(active);
+  }, []);
+
+  const handleCycleCamera = useCallback(() => {
+    controllerRef.current?.audio.unlock();
+    controllerRef.current?.toggleCameraView();
+  }, []);
+
   // Global keyboard shortcuts (Title start, Pause, Map, Artifacts, Mute)
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
@@ -190,7 +253,7 @@ export default function App() {
           setInspectorOpen(false);
         } else if (mapOpen) {
           setMapOpen(false);
-        } else {
+        } else if (!controllerRef.current?.isPointerLocked()) {
           setMode((m) => (m === 'playing' ? 'paused' : 'playing'));
         }
         return;
@@ -214,12 +277,12 @@ export default function App() {
   }, [mode, mapOpen, inspectorOpen, handleStart, handleToggleMute]);
 
   return (
-    <main className="relative w-screen h-screen overflow-hidden bg-[#141210]">
+    <main className="relative w-screen h-screen overflow-hidden bg-[#141210] touch-none">
       {/* Isolated WebGL Viewport Container */}
       <div
         ref={canvasMountRef}
         data-testid="weilong-canvas-container"
-        className="fixed inset-0 w-full h-full"
+        className="fixed inset-0 w-full h-full touch-none"
       />
 
       {/* Title Screen */}
@@ -227,31 +290,43 @@ export default function App() {
 
       {/* Active Exploration HUD */}
       {mode === 'playing' && !mapOpen && !inspectorOpen && (
-        <GameHud
-          hud={hud}
-          weather={hud.weather}
-          cameraView={hud.cameraView}
-          muted={muted}
-          subtitle={subtitle}
-          onWeatherChange={handleWeatherChange}
-          onToggleCameraView={() => {
-            controllerRef.current?.audio.unlock();
-            controllerRef.current?.toggleCameraView();
-          }}
-          onToggleMute={handleToggleMute}
-          onVolumeChange={handleVolumeChange}
-          onTimeOfDayChange={handleTimeOfDayChange}
-          onToggleTimePlaying={handleToggleTimePlaying}
-          onCycleTimeSpeed={handleCycleTimeSpeed}
-          onOpenMap={() => setMapOpen(true)}
-          onOpenArtifacts={() => {
-            setInspectorArtifactId((prev) => prev || 'art_qiaopi');
-            setInspectorOpen(true);
-            controllerRef.current?.markArtifactInspected(inspectorArtifactId || 'art_qiaopi');
-          }}
-          onPause={() => setMode('paused')}
-          onTriggerInteract={() => controllerRef.current?.triggerNearbyInteraction()}
-        />
+        <>
+          <GameHud
+            hud={hud}
+            weather={hud.weather}
+            cameraView={hud.cameraView}
+            isTouchMode={isTouchMode}
+            muted={muted}
+            subtitle={subtitle}
+            onWeatherChange={handleWeatherChange}
+            onToggleCameraView={handleCycleCamera}
+            onToggleMute={handleToggleMute}
+            onVolumeChange={handleVolumeChange}
+            onTimeOfDayChange={handleTimeOfDayChange}
+            onToggleTimePlaying={handleToggleTimePlaying}
+            onCycleTimeSpeed={handleCycleTimeSpeed}
+            onOpenMap={() => setMapOpen(true)}
+            onOpenArtifacts={() => {
+              setInspectorArtifactId((prev) => prev || 'art_qiaopi');
+              setInspectorOpen(true);
+              controllerRef.current?.markArtifactInspected(inspectorArtifactId || 'art_qiaopi');
+            }}
+            onPause={() => setMode('paused')}
+            onTriggerInteract={() => controllerRef.current?.triggerNearbyInteraction()}
+          />
+          {isTouchMode && (
+            <TouchControls
+              cameraView={hud.cameraView}
+              nearbyInteractable={hud.nearbyInteractable}
+              isSprinting={hud.isSprinting}
+              onMoveChange={handleVirtualMove}
+              onSprintToggle={handleVirtualSprint}
+              onLookBackChange={handleLookBack}
+              onCycleCamera={handleCycleCamera}
+              onTriggerInteract={() => controllerRef.current?.triggerNearbyInteraction()}
+            />
+          )}
+        </>
       )}
 
       {/* Read-Only Architectural Floorplan & Live Orientation Modal */}

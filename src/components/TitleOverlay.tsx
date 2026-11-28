@@ -101,7 +101,7 @@ export const TitleOverlay: React.FC<TitleOverlayProps> = ({ onStart }) => {
 
       {/* Single flat borderless bottom control-hint line */}
       <div className="text-xs text-[#e8dec9]/85 tracking-wide">
-        WASD / 方向键自由行走 · Shift 疾步 · 鼠标拖拽环顾 · E / 点击交互 · V 切换航拍俯瞰 · 1/2/3 晴雨灯夜 · G 方位图
+        WASD 自由奔行 · 鼠标环顾/滚轮变焦 · Shift 疾步 · V 切换跟随/越肩/第一人称/航拍 · B/中键回看 · E 交互 · 移动端支持摇杆与触控环顾
       </div>
     </div>
   );

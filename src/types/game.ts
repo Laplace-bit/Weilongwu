@@ -69,7 +69,12 @@ export interface SubtitleState {
   timestamp: number;
 }
 
-export type CameraViewMode = 'walk' | 'aerial';
+export type CameraViewMode =
+  | 'third_near'
+  | 'third_mid'
+  | 'third_far'
+  | 'first_person'
+  | 'aerial';
 
 export interface HudSnapshot {
   currentNodeId: string;
@@ -79,6 +84,7 @@ export interface HudSnapshot {
   playerX: number;
   playerZ: number;
   playerYaw: number;
+  cameraYaw: number;
   nearbyInteractable: InteractableDef | null;
   visitedNodes: string[];
   triggeredInteractions: string[];
@@ -89,6 +95,8 @@ export interface HudSnapshot {
   gunSlitActive: boolean;
   weather: WeatherMode;
   cameraView: CameraViewMode;
+  pointerLocked: boolean;
+  isSprinting: boolean;
   timeOfDay: number;
   timePlaying: boolean;
   timeSpeed: number;

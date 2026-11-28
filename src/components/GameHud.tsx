@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import type { CameraViewMode, HudSnapshot, SubtitleState, WeatherMode } from '../types/game';
 import {
   ARTIFACTS,
@@ -7,11 +7,13 @@ import {
   SURFACE_LABELS,
   WEATHER_LABELS,
 } from '../data/weilongData';
+import { GTA_CAMERA_PRESETS } from '../engine/gtaCamera';
 
 interface GameHudProps {
   hud: HudSnapshot;
   weather: WeatherMode;
   cameraView: CameraViewMode;
+  isTouchMode: boolean;
   muted: boolean;
   subtitle: SubtitleState | null;
   onWeatherChange: (w: WeatherMode) => void;
@@ -31,6 +33,7 @@ export const GameHud: React.FC<GameHudProps> = ({
   hud,
   weather,
   cameraView,
+  isTouchMode,
   muted,
   subtitle,
   onWeatherChange,
@@ -45,14 +48,24 @@ export const GameHud: React.FC<GameHudProps> = ({
   onPause,
   onTriggerInteract,
 }) => {
-  const [dockCollapsed, setDockCollapsed] = useState(false);
+  // On mobile/touch viewports, start the bottom dock collapsed so joystick & action buttons have full breathing room
+  const [dockCollapsed, setDockCollapsed] = useState(() => isTouchMode);
 
-  const nearby = cameraView === 'walk' ? hud.nearbyInteractable : null;
+  useEffect(() => {
+    if (isTouchMode) {
+      setDockCollapsed(true);
+    }
+  }, [isTouchMode]);
+
+  const isAerial = cameraView === 'aerial';
+  const isFirstPerson = cameraView === 'first_person';
+  const preset = GTA_CAMERA_PRESETS[cameraView];
+  const nearby = !isAerial ? hud.nearbyInteractable : null;
 
   return (
     <div className="fixed inset-0 z-10 pointer-events-none select-none">
       {/* Defensive Window Peephole Vignette when active */}
-      {hud.gunSlitActive && cameraView === 'walk' && (
+      {hud.gunSlitActive && !isAerial && (
         <div
           className="fixed inset-0 pointer-events-none"
           style={{
@@ -62,145 +75,151 @@ export const GameHud: React.FC<GameHudProps> = ({
         />
       )}
 
-      {/* TOP-LEFT: Architectural Location & Free-Walk Progress Readout */}
+      {/* TOP BAR: Responsive non-overlapping Left Location + Right Utility Cluster */}
       <div
-        className="fixed top-4 left-4 px-4 py-2.5 rounded border border-[#d9a84e]/25"
-        style={{ backgroundColor: 'rgba(22, 35, 56, 0.86)' }}
+        className="fixed top-3 inset-x-3 sm:top-4 sm:inset-x-4 flex items-start justify-between gap-2 pointer-events-none"
+        style={{ paddingTop: 'env(safe-area-inset-top)' }}
       >
-        <div className="flex items-baseline gap-2.5">
-          <span className="font-serif-display text-base font-bold text-[#f7f1e6] tracking-wider">
-            {cameraView === 'aerial' ? '航拍俯瞰 · 梅州双围龙屋全景' : hud.currentNodeName}
-          </span>
-          <span className="text-xs text-[#d9a84e] whitespace-nowrap">
-            {cameraView === 'aerial'
-              ? '拖拽环绕 · 滚轮缩放'
-              : SURFACE_LABELS[hud.currentSurface] ?? '青石板'}
-          </span>
-        </div>
-        <div className="flex items-center gap-2 text-xs text-[#cfc4b2]/85 mt-0.5 tabular-nums">
-          <span>{hud.currentZoneName}</span>
-          <span aria-hidden="true">·</span>
-          <span>足迹 {hud.visitedNodes.length}/{ROOM_NODES.length}</span>
-          <span aria-hidden="true">·</span>
-          <span>交互 {hud.triggeredInteractions.length}/{INTERACTABLES.length}</span>
-          <span aria-hidden="true">·</span>
-          <span>器物 {hud.inspectedArtifacts.length}/{ARTIFACTS.length}</span>
-        </div>
-      </div>
-
-      {/* TOP-RIGHT: Compact Utility Controls + Sleek Audio Volume Control */}
-      <div className="fixed top-4 right-4 flex items-center gap-2 pointer-events-auto">
-        <button
-          type="button"
-          tabIndex={-1}
-          aria-label="打开围龙屋建筑平面图"
-          title="建筑平面方位图 (G)"
-          onClick={(e) => {
-            e.currentTarget.blur();
-            onOpenMap();
-          }}
-          className="w-10 h-10 flex items-center justify-center rounded border border-[#d9a84e]/30 text-[#f5efe6] hover:border-[#d9a84e] transition-colors cursor-pointer"
-          style={{ backgroundColor: 'rgba(22, 35, 56, 0.86)' }}
-        >
-          <svg viewBox="0 0 24 24" className="w-5 h-5" fill="none" stroke="currentColor" strokeWidth="1.8">
-            <path d="M3 13a9 9 0 0 1 18 0" />
-            <path d="M6 13a6 6 0 0 1 12 0" />
-            <rect x="6" y="13" width="12" height="5" rx="1" />
-          </svg>
-        </button>
-
-        <button
-          type="button"
-          tabIndex={-1}
-          aria-label="打开 360 度器物图鉴"
-          title="360° 民俗器物图鉴 (C)"
-          onClick={(e) => {
-            e.currentTarget.blur();
-            onOpenArtifacts();
-          }}
-          className="w-10 h-10 flex items-center justify-center rounded border border-[#d9a84e]/30 text-[#f5efe6] hover:border-[#d9a84e] transition-colors cursor-pointer"
-          style={{ backgroundColor: 'rgba(22, 35, 56, 0.86)' }}
-        >
-          <svg viewBox="0 0 24 24" className="w-5 h-5" fill="none" stroke="currentColor" strokeWidth="1.8">
-            <path d="M5 6.5A2.5 2.5 0 0 1 7.5 4H19v15H7.5A2.5 2.5 0 0 0 5 21V6.5Z" />
-            <path d="M9 8h6M9 12h6" />
-          </svg>
-        </button>
-
-        {/* Mute Toggle + Integrated Volume Slider */}
+        {/* TOP-LEFT: Architectural Location & Free-Walk Progress Readout */}
         <div
-          className="h-10 flex items-center gap-2 px-2.5 rounded border border-[#d9a84e]/30 text-[#f5efe6]"
+          className="px-3 py-2 sm:px-4 sm:py-2.5 rounded border border-[#d9a84e]/25 min-w-0 max-w-[54vw] sm:max-w-none"
           style={{ backgroundColor: 'rgba(22, 35, 56, 0.86)' }}
         >
+          <div className="flex items-baseline gap-2 min-w-0">
+            <span className="font-serif-display text-sm sm:text-base font-bold text-[#f7f1e6] tracking-wider truncate">
+              {isAerial ? '航拍俯瞰 · 梅州双围龙屋' : hud.currentNodeName}
+            </span>
+            <span className="hidden sm:inline text-xs text-[#d9a84e] whitespace-nowrap shrink-0">
+              {isAerial
+                ? '拖拽环绕 · 滚轮/双指缩放'
+                : `${preset.label} · ${SURFACE_LABELS[hud.currentSurface] ?? '青石板'}`}
+            </span>
+          </div>
+          <div className="flex items-center gap-1.5 sm:gap-2 text-[11px] sm:text-xs text-[#cfc4b2]/85 mt-0.5 tabular-nums truncate">
+            <span className="hidden md:inline">{hud.currentZoneName}</span>
+            <span className="hidden md:inline" aria-hidden="true">·</span>
+            <span>足迹 {hud.visitedNodes.length}/{ROOM_NODES.length}</span>
+            <span aria-hidden="true">·</span>
+            <span>交互 {hud.triggeredInteractions.length}/{INTERACTABLES.length}</span>
+            <span className="hidden sm:inline" aria-hidden="true">·</span>
+            <span className="hidden sm:inline">器物 {hud.inspectedArtifacts.length}/{ARTIFACTS.length}</span>
+          </div>
+        </div>
+
+        {/* TOP-RIGHT: Compact Utility Controls + Desktop Volume Slider */}
+        <div className="flex items-center gap-1.5 sm:gap-2 pointer-events-auto shrink-0">
           <button
             type="button"
             tabIndex={-1}
-            aria-label={muted ? '取消静音' : '静音'}
-            title={muted ? '开启音乐与环境音 (M)' : '静音 (M)'}
+            aria-label="打开围龙屋建筑平面图"
+            title="建筑平面方位图 (G)"
             onClick={(e) => {
               e.currentTarget.blur();
-              onToggleMute();
+              onOpenMap();
             }}
-            className="w-6 h-6 flex items-center justify-center text-[#f5efe6] hover:text-[#ebb854] transition-colors cursor-pointer"
+            className="w-10 h-10 sm:w-10 sm:h-10 min-w-[40px] min-h-[40px] flex items-center justify-center rounded border border-[#d9a84e]/30 text-[#f5efe6] hover:border-[#d9a84e] transition-colors cursor-pointer"
+            style={{ backgroundColor: 'rgba(22, 35, 56, 0.86)' }}
           >
-            {muted || hud.volume <= 0.01 ? (
-              <svg viewBox="0 0 24 24" className="w-5 h-5" fill="none" stroke="currentColor" strokeWidth="1.8">
-                <path d="M11 5 6 9H3v6h3l5 4V5Z" />
-                <path d="m16 9 5 6M21 9l-5 6" />
-              </svg>
-            ) : (
-              <svg viewBox="0 0 24 24" className="w-5 h-5" fill="none" stroke="currentColor" strokeWidth="1.8">
-                <path d="M11 5 6 9H3v6h3l5 4V5Z" />
-                <path d="M15.5 8.5a5 5 0 0 1 0 7M18.5 5.5a9 9 0 0 1 0 13" />
-              </svg>
-            )}
+            <svg viewBox="0 0 24 24" className="w-5 h-5" fill="none" stroke="currentColor" strokeWidth="1.8">
+              <path d="M3 13a9 9 0 0 1 18 0" />
+              <path d="M6 13a6 6 0 0 1 12 0" />
+              <rect x="6" y="13" width="12" height="5" rx="1" />
+            </svg>
           </button>
-          <input
-            type="range"
-            min={0}
-            max={1}
-            step={0.02}
-            aria-label="音量调节"
-            title="背景音乐与环境音量"
-            value={muted ? 0 : hud.volume}
-            onChange={(e) => onVolumeChange(Number(e.target.value))}
-            className="w-16 h-1.5 accent-[#ebb854] cursor-pointer"
-          />
-        </div>
 
-        <button
-          type="button"
-          tabIndex={-1}
-          aria-label="暂停游览"
-          title="暂停 (Esc)"
-          onClick={(e) => {
-            e.currentTarget.blur();
-            onPause();
-          }}
-          className="w-10 h-10 flex items-center justify-center rounded border border-[#d9a84e]/30 text-[#f5efe6] hover:border-[#d9a84e] transition-colors cursor-pointer"
-          style={{ backgroundColor: 'rgba(22, 35, 56, 0.86)' }}
-        >
-          <svg viewBox="0 0 24 24" className="w-5 h-5" fill="currentColor">
-            <rect x="6" y="5" width="4" height="14" rx="1" />
-            <rect x="14" y="5" width="4" height="14" rx="1" />
-          </svg>
-        </button>
+          <button
+            type="button"
+            tabIndex={-1}
+            aria-label="打开 360 度器物图鉴"
+            title="360° 民俗器物图鉴 (C)"
+            onClick={(e) => {
+              e.currentTarget.blur();
+              onOpenArtifacts();
+            }}
+            className="w-10 h-10 min-w-[40px] min-h-[40px] flex items-center justify-center rounded border border-[#d9a84e]/30 text-[#f5efe6] hover:border-[#d9a84e] transition-colors cursor-pointer"
+            style={{ backgroundColor: 'rgba(22, 35, 56, 0.86)' }}
+          >
+            <svg viewBox="0 0 24 24" className="w-5 h-5" fill="none" stroke="currentColor" strokeWidth="1.8">
+              <path d="M5 6.5A2.5 2.5 0 0 1 7.5 4H19v15H7.5A2.5 2.5 0 0 0 5 21V6.5Z" />
+              <path d="M9 8h6M9 12h6" />
+            </svg>
+          </button>
+
+          {/* Mute Toggle + Integrated Volume Slider (Slider hidden on narrow mobile to avoid clutter) */}
+          <div
+            className="h-10 flex items-center gap-2 px-2 sm:px-2.5 rounded border border-[#d9a84e]/30 text-[#f5efe6]"
+            style={{ backgroundColor: 'rgba(22, 35, 56, 0.86)' }}
+          >
+            <button
+              type="button"
+              tabIndex={-1}
+              aria-label={muted ? '取消静音' : '静音'}
+              title={muted ? '开启音乐与环境音 (M)' : '静音 (M)'}
+              onClick={(e) => {
+                e.currentTarget.blur();
+                onToggleMute();
+              }}
+              className="w-6 h-6 flex items-center justify-center text-[#f5efe6] hover:text-[#ebb854] transition-colors cursor-pointer"
+            >
+              {muted || hud.volume <= 0.01 ? (
+                <svg viewBox="0 0 24 24" className="w-5 h-5" fill="none" stroke="currentColor" strokeWidth="1.8">
+                  <path d="M11 5 6 9H3v6h3l5 4V5Z" />
+                  <path d="m16 9 5 6M21 9l-5 6" />
+                </svg>
+              ) : (
+                <svg viewBox="0 0 24 24" className="w-5 h-5" fill="none" stroke="currentColor" strokeWidth="1.8">
+                  <path d="M11 5 6 9H3v6h3l5 4V5Z" />
+                  <path d="M15.5 8.5a5 5 0 0 1 0 7M18.5 5.5a9 9 0 0 1 0 13" />
+                </svg>
+              )}
+            </button>
+            <input
+              type="range"
+              min={0}
+              max={1}
+              step={0.02}
+              aria-label="音量调节"
+              title="背景音乐与环境音量"
+              value={muted ? 0 : hud.volume}
+              onChange={(e) => onVolumeChange(Number(e.target.value))}
+              className="hidden sm:block w-16 h-1.5 accent-[#ebb854] cursor-pointer"
+            />
+          </div>
+
+          <button
+            type="button"
+            tabIndex={-1}
+            aria-label="暂停游览"
+            title="暂停 (Esc / P)"
+            onClick={(e) => {
+              e.currentTarget.blur();
+              onPause();
+            }}
+            className="w-10 h-10 min-w-[40px] min-h-[40px] flex items-center justify-center rounded border border-[#d9a84e]/30 text-[#f5efe6] hover:border-[#d9a84e] transition-colors cursor-pointer"
+            style={{ backgroundColor: 'rgba(22, 35, 56, 0.86)' }}
+          >
+            <svg viewBox="0 0 24 24" className="w-5 h-5" fill="currentColor">
+              <rect x="6" y="5" width="4" height="14" rx="1" />
+              <rect x="14" y="5" width="4" height="14" rx="1" />
+            </svg>
+          </button>
+        </div>
       </div>
 
-      {/* CENTER RETICLE DOT (First-Person Walk Mode Only) */}
-      {cameraView === 'walk' && (
+      {/* CENTER RETICLE DOT (First-Person Mode Only, authentic GTA behavior) */}
+      {isFirstPerson && (
         <div
           className="fixed left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 w-1.5 h-1.5 rounded-full pointer-events-none"
           style={{
-            backgroundColor: nearby ? '#e8b954' : 'rgba(247, 241, 230, 0.55)',
+            backgroundColor: nearby ? '#e8b954' : 'rgba(247, 241, 230, 0.6)',
             boxShadow: '0 0 0 2px rgba(20, 17, 14, 0.45)',
           }}
         />
       )}
 
-      {/* CONTEXTUAL INTERACTION PROMPT (only visible when close to a prop) */}
-      {nearby && (
-        <div className="fixed left-1/2 top-[56%] -translate-x-1/2 pointer-events-auto">
+      {/* CONTEXTUAL INTERACTION PROMPT (Desktop center-lower prompt; Mobile uses right-thumb TouchControls button) */}
+      {nearby && !isTouchMode && (
+        <div className="fixed left-1/2 top-[58%] -translate-x-1/2 pointer-events-auto">
           <button
             type="button"
             tabIndex={-1}
@@ -229,16 +248,16 @@ export const GameHud: React.FC<GameHudProps> = ({
       {/* NON-INTRUSIVE HAKKA DIALECT + MANDARIN FOLKLORE SUBTITLE RIBBON */}
       {subtitle && (
         <div
-          className="fixed left-1/2 -translate-x-1/2 max-w-xl w-[90vw] px-5 py-3 rounded border border-[#ebb854]/35 text-center transition-all"
+          className="fixed left-1/2 -translate-x-1/2 max-w-xl w-[88vw] px-4 py-2.5 sm:px-5 sm:py-3 rounded border border-[#ebb854]/35 text-center transition-all"
           style={{
-            bottom: dockCollapsed ? '52px' : '124px',
+            bottom: isTouchMode ? '176px' : dockCollapsed ? '52px' : '124px',
             backgroundColor: 'rgba(22, 35, 56, 0.90)',
           }}
         >
-          <div className="font-serif-display text-base text-[#ebd08a] tracking-wide">
+          <div className="font-serif-display text-sm sm:text-base text-[#ebd08a] tracking-wide">
             {subtitle.hakkaQuote}
           </div>
-          <div className="text-xs md:text-sm text-[#f5efe6] mt-1">
+          <div className="text-xs sm:text-sm text-[#f5efe6] mt-1">
             {subtitle.mandarinSub}
           </div>
           <div className="text-[11px] text-[#c7bca9]/85 mt-1">
@@ -247,10 +266,13 @@ export const GameHud: React.FC<GameHudProps> = ({
         </div>
       )}
 
-      {/* COLLAPSIBLE UNIFIED BOTTOM CONTROL DOCK: VIEW + WEATHER + 24H INTERACTIVE TIMELINE */}
-      <div className="fixed bottom-4 inset-x-0 flex justify-center pointer-events-none px-4">
+      {/* COLLAPSIBLE UNIFIED BOTTOM CONTROL DOCK: GTA CAMERA + WEATHER + 24H INTERACTIVE TIMELINE */}
+      <div
+        className="fixed bottom-2 sm:bottom-4 inset-x-0 flex justify-center pointer-events-none px-3 sm:px-4 z-20"
+        style={{ paddingBottom: 'env(safe-area-inset-bottom)' }}
+      >
         <div
-          className="flex flex-col items-center pointer-events-auto max-w-[96vw]"
+          className="flex flex-col items-center pointer-events-auto max-w-[94vw]"
           style={{
             transform: dockCollapsed ? 'translateY(calc(100% - 26px))' : 'translateY(0)',
             transition: 'transform 180ms cubic-bezier(0.16, 1, 0.3, 1)',
@@ -267,34 +289,39 @@ export const GameHud: React.FC<GameHudProps> = ({
             className="px-3.5 py-1 text-[11px] text-[#e8dec9] hover:text-[#fbf5e8] rounded-t border border-b-0 border-[#ebb854]/30 cursor-pointer whitespace-nowrap"
             style={{ backgroundColor: 'rgba(22, 35, 56, 0.88)' }}
           >
-            {dockCollapsed ? '▴ 展开游览与昼夜时间轴' : '▾ 收起工具栏'}
+            {dockCollapsed
+              ? isTouchMode
+                ? `▴ 昼夜 · ${hud.formattedTime}`
+                : '▴ 展开视角与昼夜时间轴'
+              : '▾ 收起工具栏'}
           </button>
 
           <div
-            className="flex flex-wrap lg:flex-nowrap items-center justify-center gap-2.5 px-3.5 py-2 rounded border border-[#ebb854]/30 shadow-xl"
+            className="flex flex-wrap lg:flex-nowrap items-center justify-center gap-2 sm:gap-2.5 px-3 py-2 sm:px-3.5 rounded border border-[#ebb854]/30 shadow-xl"
             style={{ backgroundColor: 'rgba(22, 35, 56, 0.92)' }}
           >
-            {/* Walk vs Aerial Inspection View Toggle */}
-            <div className="flex items-center gap-1 pr-2.5 border-r border-[#f5efe6]/15">
+            {/* GTA Camera Mode Cycle Button (V) */}
+            <div className="flex items-center gap-1.5 pr-2 sm:pr-2.5 border-r border-[#f5efe6]/15">
               <button
                 type="button"
                 tabIndex={-1}
+                data-testid="camera-cycle-btn"
                 onClick={(e) => {
                   e.currentTarget.blur();
                   onToggleCameraView();
                 }}
                 className={`px-2.5 py-1.5 text-xs rounded transition-colors cursor-pointer whitespace-nowrap ${
-                  cameraView === 'aerial'
+                  isAerial
                     ? 'bg-[#ebb854] text-[#162338] font-semibold'
                     : 'bg-white/10 text-[#fbf5e8] hover:bg-white/15'
                 }`}
               >
-                {cameraView === 'aerial' ? '返回自由步行 (V)' : '航拍俯瞰 (V)'}
+                视角 · {preset.label} (V)
               </button>
             </div>
 
             {/* Weather Switcher (Sunny / Rain) */}
-            <div className="flex items-center gap-1 pr-2.5 border-r border-[#f5efe6]/15">
+            <div className="flex items-center gap-1 pr-2 sm:pr-2.5 border-r border-[#f5efe6]/15">
               {(['sunny', 'rain'] as WeatherMode[]).map((w) => (
                 <button
                   key={w}
@@ -354,7 +381,7 @@ export const GameHud: React.FC<GameHudProps> = ({
                 {hud.timeSpeed}×
               </button>
 
-              <div className="flex flex-col min-w-[190px] sm:min-w-[230px]">
+              <div className="flex flex-col min-w-[165px] sm:min-w-[220px]">
                 <div className="flex items-center justify-between text-[11px] leading-none mb-1 tabular-nums">
                   <span className="text-[#f7f1e6] font-mono font-semibold">
                     {hud.formattedTime}
@@ -383,6 +410,15 @@ export const GameHud: React.FC<GameHudProps> = ({
                 </div>
               </div>
             </div>
+
+            {/* Quiet Desktop GTA Mouse Control Hint (single inline text, no clutter) */}
+            {!isTouchMode && !isAerial && (
+              <div className="hidden xl:flex items-center pl-2.5 border-l border-[#f5efe6]/15 text-[11px] text-[#cfc4b2]/85 whitespace-nowrap">
+                {hud.pointerLocked
+                  ? '鼠标环顾中 · Esc 释放光标 · B/中键回看'
+                  : '点击画面锁定鼠标 · 滚轮变焦 · B/中键回看'}
+              </div>
+            )}
           </div>
         </div>
       </div>

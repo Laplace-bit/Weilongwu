@@ -32,10 +32,27 @@ import {
 import { buildWeilongArchitecture, type ArchitectureRefs } from './architectureBuilder';
 import { buildWeilongProps, type PropAnimationRefs } from './propsBuilder';
 import { buildLivingWorld, type LivingWorldRefs } from './livingWorldBuilder';
+import { buildPlayerAvatar, type PlayerAvatarRefs } from './playerAvatar';
 import { createSoftPillowGeometry } from './sculptHelpers';
 import { HakkaAudioEngine } from './audioEngine';
-import { computeDayNightState, normalizeHour } from './dayNightCycle';
+import {
+  computeDayNightState,
+  formatHourClock,
+  getChineseShichenLabel,
+  getLocalTimeOfDay,
+  normalizeHour,
+} from './dayNightCycle';
 import { evaluateLivingBehavior } from './livingBehavior';
+import {
+  GTA_CAMERA_PRESETS,
+  computeCameraRelativeMove,
+  computeSoftFollowYaw,
+  computeThirdPersonCameraPose,
+  cycleCameraView,
+  dampAngle,
+  normalizeAngle,
+  shortestAngleDelta,
+} from './gtaCamera';
 
 /**
  * Pillar 4: Subtle physical 35mm lens optics shader (natural cos^4 optical vignette,
@@ -90,9 +107,8 @@ const NODE_MAP = new Map(ROOM_NODES.map((n) => [n.id, n]));
 const INTERACTABLE_MAP = new Map(INTERACTABLES.map((i) => [i.id, i]));
 
 // Module-scoped scratch vectors for zero-GC animation loop
-const _forward = new THREE.Vector3();
-const _right = new THREE.Vector3();
-const _moveDir = new THREE.Vector3();
+const _camTargetPos = new THREE.Vector3();
+const _camLookTarget = new THREE.Vector3();
 const _rayOrigin = new THREE.Vector2();
 
 function detectSoftwareGl(): boolean {
@@ -126,6 +142,7 @@ export class WeilongSceneController {
   private arch: ArchitectureRefs;
   private props: PropAnimationRefs;
   private living: LivingWorldRefs;
+  private playerAvatar: PlayerAvatarRefs;
   public audio: HakkaAudioEngine;
 
   // Lighting & Poetic Atmosphere (1 shadow caster + zero-shadow GI bounce & sky rim)
@@ -157,23 +174,36 @@ export class WeilongSceneController {
   private fireflyPoints: THREE.Points;
   private umbrellaHeldGroup: THREE.Group;
 
-  // Game, Day-Night Cycle & Player State (100% free-walking + weighted momentum & spring suspension)
+  // Game, Day-Night Cycle & GTA Player / Camera Rig State
   private mode: GameMode = 'title';
   private weather: WeatherMode = 'sunny';
-  private cameraView: CameraViewMode = 'walk';
-  private timeOfDay = 10.5;
+  private cameraView: CameraViewMode = 'third_mid';
+  private timeOfDay = getLocalTimeOfDay();
   private timePlaying = true;
   private timeSpeed = 1;
-  private timePeriodLabel = '辰巳 · 晨光';
-  private formattedTime = '10:30';
+  private timePeriodLabel = getChineseShichenLabel(this.timeOfDay).label;
+  private formattedTime = formatHourClock(this.timeOfDay);
   private playerPos = new THREE.Vector3(0, 0, 31.0);
   private playerVelX = 0;
   private playerVelZ = 0;
   private eyeYVel = 0;
-  private playerYaw = 0; // 0 = looking North (-Z)
-  private playerPitch = -0.02;
-  private targetYaw = 0;
-  private targetPitch = -0.02;
+  private characterYaw = 0; // Character body heading (0 = facing North -Z)
+  private cameraYaw = 0; // GTA free-orbit camera yaw (0 = looking North -Z)
+  private cameraPitch = -0.18; // Slight downward GTA over-the-shoulder angle
+  private targetCameraYaw = 0;
+  private targetCameraPitch = -0.18;
+  private desiredThirdPersonDist = GTA_CAMERA_PRESETS.third_mid.distance;
+  private smoothedThirdPersonDist = GTA_CAMERA_PRESETS.third_mid.distance;
+  private smoothCamPos = new THREE.Vector3(0, 2.6, 36.0);
+  private smoothLookAt = new THREE.Vector3(0, 1.6, 29.8);
+  private cameraRigInitialized = false;
+  private timeSinceManualOrbit = 3.0;
+  private lookBackHeld = false;
+  private virtualMoveRight = 0;
+  private virtualMoveForward = 0;
+  private virtualAutoSprint = false;
+  private virtualSprintToggle = false;
+  private isSprintingNow = false;
   private aerialAngle = 0;
   private aerialPitch = 0.42;
   private aerialDist = 72;
@@ -212,14 +242,16 @@ export class WeilongSceneController {
   private jiaobeiFlipR = Math.PI;
   private birdsFlightTimer = 0;
 
-  // Input State
+  // Input State (Desktop Pointer Lock + Mouse Drag + Multi-Touch Orbit/Pinch)
   private keysHeld = new Set<string>();
-  private isDragging = false;
-  private dragStartX = 0;
-  private dragStartY = 0;
-  private lastPointerX = 0;
-  private lastPointerY = 0;
+  private pointerLocked = false;
+  private middleMouseDown = false;
+  private activePointers = new Map<
+    number,
+    { x: number; y: number; startX: number; startY: number; pointerType: string }
+  >();
   private dragMoved = false;
+  private lastPinchDist: number | null = null;
   private raycaster = new THREE.Raycaster();
 
   // Loop & Throttling
@@ -255,6 +287,7 @@ export class WeilongSceneController {
     this.renderer.domElement.style.display = 'block';
     this.renderer.domElement.style.width = '100%';
     this.renderer.domElement.style.height = '100%';
+    this.renderer.domElement.style.touchAction = 'none';
     container.appendChild(this.renderer.domElement);
 
     // Scene & Custom Physical Outdoor Sky + Courtyard Bounce IBL (baked per weather via PMREM)
@@ -508,11 +541,14 @@ export class WeilongSceneController {
     this.arch = buildWeilongArchitecture(this.mats, this.isSoftwareGl);
     this.props = buildWeilongProps(this.mats, this.isSoftwareGl);
     this.living = buildLivingWorld(this.mats, this.isSoftwareGl);
+    this.playerAvatar = buildPlayerAvatar(this.mats, this.isSoftwareGl);
+    this.playerAvatar.root.position.copy(this.playerPos);
     this.scene.add(this.arch.root);
     this.scene.add(this.props.root);
     this.scene.add(this.living.root);
+    this.scene.add(this.playerAvatar.root);
 
-    // Held Oil-Paper Umbrella attached to Camera
+    // Held Oil-Paper Umbrella attached to Camera (used in First-Person mode)
     this.umbrellaHeldGroup = this.buildHeldUmbrella();
     this.umbrellaHeldGroup.visible = false;
     this.camera.add(this.umbrellaHeldGroup);
@@ -795,21 +831,95 @@ export class WeilongSceneController {
     window.addEventListener('keyup', this.handleKeyUp);
     window.addEventListener('blur', this.handleWindowBlur);
     document.addEventListener('visibilitychange', this.handleVisibilityChange);
+    document.addEventListener('pointerlockchange', this.handlePointerLockChange);
+    document.addEventListener('pointerlockerror', this.handlePointerLockError);
+    document.addEventListener('mousemove', this.handleLockedMouseMove);
 
     const dom = this.renderer.domElement;
     dom.addEventListener('pointerdown', this.handlePointerDown);
     dom.addEventListener('wheel', this.handleWheel, { passive: true });
+    dom.addEventListener('contextmenu', this.handleContextMenu);
     window.addEventListener('pointermove', this.handlePointerMove);
     window.addEventListener('pointerup', this.handlePointerUp);
+    window.addEventListener('pointercancel', this.handlePointerUp);
     dom.addEventListener('webglcontextlost', this.handleContextLost);
 
     this.resizeObserver = new ResizeObserver(() => this.handleResize());
     this.resizeObserver.observe(this.container);
   }
 
+  private handleContextMenu = (e: MouseEvent): void => {
+    if (this.mode === 'playing') {
+      e.preventDefault();
+    }
+  };
+
+  private handlePointerLockChange = (): void => {
+    const locked = document.pointerLockElement === this.renderer.domElement;
+    this.pointerLocked = locked;
+    document.body.dataset.pointerLocked = locked ? 'true' : 'false';
+    if (!locked) {
+      this.middleMouseDown = false;
+    }
+    this.emitHudSnapshot(true);
+  };
+
+  private handlePointerLockError = (): void => {
+    this.pointerLocked = false;
+    document.body.dataset.pointerLocked = 'false';
+  };
+
+  private applyCameraOrbitDelta(dx: number, dy: number, isTouch: boolean): void {
+    const yawSens = isTouch ? 0.0058 : 0.0036;
+    const pitchSens = isTouch ? 0.0048 : 0.003;
+    this.timeSinceManualOrbit = 0;
+
+    if (this.cameraView === 'aerial') {
+      this.aerialAngle -= dx * (isTouch ? 0.006 : 0.0046);
+      this.aerialPitch = THREE.MathUtils.clamp(
+        this.aerialPitch + dy * (isTouch ? 0.0048 : 0.0036),
+        0.26,
+        1.25
+      );
+    } else if (this.cameraView === 'first_person') {
+      this.targetCameraYaw = normalizeAngle(this.targetCameraYaw - dx * yawSens);
+      this.targetCameraPitch = THREE.MathUtils.clamp(
+        this.targetCameraPitch - dy * pitchSens,
+        -0.82,
+        0.74
+      );
+    } else {
+      // Authentic GTA third-person free orbit: moving mouse/finger right turns view right, moving up looks up
+      this.targetCameraYaw = normalizeAngle(this.targetCameraYaw - dx * yawSens);
+      this.targetCameraPitch = THREE.MathUtils.clamp(
+        this.targetCameraPitch - dy * pitchSens,
+        -0.88,
+        0.58
+      );
+    }
+  }
+
+  private handleLockedMouseMove = (e: MouseEvent): void => {
+    if (!this.pointerLocked || this.mode !== 'playing') return;
+    // Clamp occasional browser pointer-lock spike values
+    const dx = THREE.MathUtils.clamp(e.movementX || 0, -140, 140);
+    const dy = THREE.MathUtils.clamp(e.movementY || 0, -140, 140);
+    if (dx === 0 && dy === 0) return;
+    this.applyCameraOrbitDelta(dx, dy, false);
+  };
+
   private handleWheel = (e: WheelEvent): void => {
-    if (this.mode !== 'playing' || this.cameraView !== 'aerial') return;
-    this.aerialDist = THREE.MathUtils.clamp(this.aerialDist + e.deltaY * 0.045, 28, 105);
+    if (this.mode !== 'playing') return;
+    if (this.cameraView === 'aerial') {
+      this.aerialDist = THREE.MathUtils.clamp(this.aerialDist + e.deltaY * 0.045, 28, 105);
+    } else if (this.cameraView !== 'first_person') {
+      const preset = GTA_CAMERA_PRESETS[this.cameraView];
+      this.desiredThirdPersonDist = THREE.MathUtils.clamp(
+        this.desiredThirdPersonDist + e.deltaY * 0.0045,
+        preset.minDistance,
+        preset.maxDistance
+      );
+    }
   };
 
   private handleContextLost = (e: Event): void => {
@@ -833,13 +943,18 @@ export class WeilongSceneController {
 
   private handleWindowBlur = (): void => {
     this.keysHeld.clear();
-    this.isDragging = false;
+    this.activePointers.clear();
+    this.lastPinchDist = null;
+    this.middleMouseDown = false;
+    this.lookBackHeld = false;
+    this.virtualMoveRight = 0;
+    this.virtualMoveForward = 0;
+    this.virtualAutoSprint = false;
   };
 
   private handleVisibilityChange = (): void => {
     if (document.hidden) {
-      this.keysHeld.clear();
-      this.isDragging = false;
+      this.handleWindowBlur();
     }
   };
 
@@ -871,45 +986,100 @@ export class WeilongSceneController {
   private handlePointerDown = (e: PointerEvent): void => {
     if (this.mode !== 'playing') return;
     this.audio.unlock();
-    this.isDragging = true;
-    this.dragMoved = false;
-    this.dragStartX = e.clientX;
-    this.dragStartY = e.clientY;
-    this.lastPointerX = e.clientX;
-    this.lastPointerY = e.clientY;
+
+    // Middle mouse button = GTA classic Rear-View Look-Back
+    if (e.pointerType === 'mouse' && e.button === 1) {
+      e.preventDefault();
+      this.middleMouseDown = true;
+      return;
+    }
+
+    // If pointer is already locked on desktop, left click triggers nearby interaction
+    if (this.pointerLocked && e.pointerType === 'mouse') {
+      if (e.button === 0 && this.nearbyInteractable) {
+        this.triggerInteractionById(this.nearbyInteractable.id);
+      }
+      return;
+    }
+
+    this.activePointers.set(e.pointerId, {
+      x: e.clientX,
+      y: e.clientY,
+      startX: e.clientX,
+      startY: e.clientY,
+      pointerType: e.pointerType,
+    });
+
+    if (this.activePointers.size === 1) {
+      this.dragMoved = false;
+      this.lastPinchDist = null;
+    } else if (this.activePointers.size === 2) {
+      this.dragMoved = true;
+      const pts = Array.from(this.activePointers.values());
+      this.lastPinchDist = Math.hypot(pts[0].x - pts[1].x, pts[0].y - pts[1].y);
+    }
   };
 
   private handlePointerMove = (e: PointerEvent): void => {
-    if (!this.isDragging || this.mode !== 'playing') return;
-    const dx = e.clientX - this.lastPointerX;
-    const dy = e.clientY - this.lastPointerY;
-    this.lastPointerX = e.clientX;
-    this.lastPointerY = e.clientY;
+    if (this.mode !== 'playing' || this.pointerLocked) return;
+    const prev = this.activePointers.get(e.pointerId);
+    if (!prev) return;
 
-    if (Math.hypot(e.clientX - this.dragStartX, e.clientY - this.dragStartY) > 6) {
+    const dx = e.clientX - prev.x;
+    const dy = e.clientY - prev.y;
+    prev.x = e.clientX;
+    prev.y = e.clientY;
+
+    if (Math.hypot(e.clientX - prev.startX, e.clientY - prev.startY) > 6) {
       this.dragMoved = true;
     }
-    if (this.cameraView === 'aerial') {
-      this.aerialAngle -= dx * 0.005;
-      this.aerialPitch = THREE.MathUtils.clamp(this.aerialPitch + dy * 0.004, 0.28, 1.25);
-    } else {
-      this.targetYaw -= dx * 0.0045;
-      this.targetPitch = THREE.MathUtils.clamp(this.targetPitch - dy * 0.0038, -0.78, 0.72);
+
+    // Two-finger pinch-to-zoom on mobile/touchpad
+    if (this.activePointers.size >= 2) {
+      const pts = Array.from(this.activePointers.values());
+      const curDist = Math.hypot(pts[0].x - pts[1].x, pts[0].y - pts[1].y);
+      if (this.lastPinchDist !== null) {
+        const delta = this.lastPinchDist - curDist;
+        if (this.cameraView === 'aerial') {
+          this.aerialDist = THREE.MathUtils.clamp(this.aerialDist + delta * 0.16, 28, 105);
+        } else if (this.cameraView !== 'first_person') {
+          const preset = GTA_CAMERA_PRESETS[this.cameraView];
+          this.desiredThirdPersonDist = THREE.MathUtils.clamp(
+            this.desiredThirdPersonDist + delta * 0.02,
+            preset.minDistance,
+            preset.maxDistance
+          );
+        }
+      }
+      this.lastPinchDist = curDist;
+      return;
     }
+
+    this.applyCameraOrbitDelta(dx, dy, prev.pointerType !== 'mouse');
   };
 
   private handlePointerUp = (e: PointerEvent): void => {
-    if (!this.isDragging) return;
-    this.isDragging = false;
-    if (this.mode !== 'playing') return;
+    if (e.pointerType === 'mouse' && e.button === 1) {
+      this.middleMouseDown = false;
+      return;
+    }
 
-    // Clean click (without drag) raycasts strictly against lightweight interactable hit spheres
+    const tracked = this.activePointers.get(e.pointerId);
+    if (!tracked) return;
+    this.activePointers.delete(e.pointerId);
+
+    if (this.activePointers.size < 2) {
+      this.lastPinchDist = null;
+    }
+    if (this.mode !== 'playing' || this.activePointers.size > 0) return;
+
+    // Clean click/tap (without drag): raycast interactables first; on desktop mouse also lock pointer for GTA look!
     if (!this.dragMoved) {
       const rect = this.renderer.domElement.getBoundingClientRect();
       _rayOrigin.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
       _rayOrigin.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
       this.raycaster.setFromCamera(_rayOrigin, this.camera);
-      this.raycaster.far = 14;
+      this.raycaster.far = 16;
       const hits = this.raycaster.intersectObjects(this.props.interactableMeshes, false);
       if (hits.length > 0) {
         const id = hits[0].object.userData?.interactableId as string | undefined;
@@ -918,22 +1088,81 @@ export class WeilongSceneController {
           return;
         }
       }
-      // Fallback: if standing close to an interactable, click also triggers it
-      if (this.nearbyInteractable) {
+
+      if (tracked.pointerType === 'mouse' && e.button === 0 && this.cameraView !== 'aerial') {
+        // GTA PC feel: clicking canvas engages free mouse-look via Pointer Lock (graceful fallback if blocked)
+        this.requestPointerLock();
+      } else if (this.nearbyInteractable) {
         this.triggerInteractionById(this.nearbyInteractable.id);
       }
     }
   };
 
   // =========================================================================
-  // PUBLIC CONTROLS FOR REACT SHELL
+  // PUBLIC CONTROLS FOR REACT SHELL & MOBILE TOUCH CONTROLS
   // =========================================================================
+
+  public requestPointerLock(): void {
+    try {
+      const dom = this.renderer.domElement;
+      if (
+        this.mode === 'playing' &&
+        typeof dom.requestPointerLock === 'function' &&
+        document.pointerLockElement !== dom
+      ) {
+        const res = dom.requestPointerLock() as unknown as Promise<void> | undefined;
+        if (res && typeof res.catch === 'function') {
+          res.catch(() => {
+            // Silently fall back to drag-to-orbit if sandbox/browser blocks pointer lock
+          });
+        }
+      }
+    } catch {
+      // Drag-to-orbit fallback remains seamlessly active
+    }
+  }
+
+  public exitPointerLock(): void {
+    try {
+      if (document.pointerLockElement && typeof document.exitPointerLock === 'function') {
+        document.exitPointerLock();
+      }
+    } catch {
+      // Ignore
+    }
+  }
+
+  public isPointerLocked(): boolean {
+    return this.pointerLocked;
+  }
+
+  public setVirtualMove(right: number, forward: number, autoSprint = false): void {
+    this.virtualMoveRight = THREE.MathUtils.clamp(right, -1, 1);
+    this.virtualMoveForward = THREE.MathUtils.clamp(forward, -1, 1);
+    this.virtualAutoSprint = autoSprint;
+  }
+
+  public setVirtualSprint(active: boolean): void {
+    this.virtualSprintToggle = active;
+    this.emitHudSnapshot(true);
+  }
+
+  public setLookBack(active: boolean): void {
+    this.lookBackHeld = active;
+  }
 
   public setMode(mode: GameMode, fromUserGesture = false): void {
     this.mode = mode;
     if (mode !== 'playing') {
+      this.exitPointerLock();
       this.keysHeld.clear();
-      this.isDragging = false;
+      this.activePointers.clear();
+      this.lastPinchDist = null;
+      this.middleMouseDown = false;
+      this.lookBackHeld = false;
+      this.virtualMoveRight = 0;
+      this.virtualMoveForward = 0;
+      this.virtualAutoSprint = false;
       this.gunSlitActive = false;
       this.playerVelX = 0;
       this.playerVelZ = 0;
@@ -942,12 +1171,14 @@ export class WeilongSceneController {
       if (fromUserGesture) {
         this.audio.unlock();
       }
-      // Reset camera rotation smoothly to player's facing direction
-      this.playerYaw = this.targetYaw;
-      this.playerPitch = this.targetPitch;
-      this.camera.fov = this.cameraView === 'aerial' ? 46 : 56;
+      this.cameraYaw = this.targetCameraYaw;
+      this.cameraPitch = this.targetCameraPitch;
+      this.cameraRigInitialized = false;
+      const preset = GTA_CAMERA_PRESETS[this.cameraView];
+      this.camera.fov = preset.fov;
       this.camera.updateProjectionMatrix();
     }
+    this.syncAvatarAndUmbrellaVisibility();
     this.emitHudSnapshot(true);
   }
 
@@ -956,42 +1187,84 @@ export class WeilongSceneController {
     this.playerVelX = 0;
     this.playerVelZ = 0;
     this.eyeYVel = 0;
-    this.playerYaw = 0;
-    this.targetYaw = 0;
-    this.playerPitch = -0.02;
-    this.targetPitch = -0.02;
-    this.cameraView = 'walk';
+    this.characterYaw = 0;
+    this.cameraYaw = 0;
+    this.targetCameraYaw = 0;
+    this.cameraPitch = -0.18;
+    this.targetCameraPitch = -0.18;
+    this.cameraView = 'third_mid';
+    this.desiredThirdPersonDist = GTA_CAMERA_PRESETS.third_mid.distance;
+    this.smoothedThirdPersonDist = GTA_CAMERA_PRESETS.third_mid.distance;
+    this.cameraRigInitialized = false;
     this.gunSlitActive = false;
-    this.camera.fov = 56;
+    this.camera.fov = GTA_CAMERA_PRESETS.third_mid.fov;
     this.camera.updateProjectionMatrix();
+    this.playerAvatar.root.position.copy(this.playerPos);
+    this.playerAvatar.root.rotation.y = this.characterYaw;
+    this.syncAvatarAndUmbrellaVisibility();
     this.emitHudSnapshot(true);
   }
 
-  public setPlayerPose(x: number, z: number, yaw: number, pitch = -0.02): void {
+  public setPlayerPose(x: number, z: number, yaw: number, pitch = -0.16): void {
     const gy = groundHeightAt(x, z, 0);
     this.playerPos.set(x, gy, z);
     this.eyeYVel = 0;
     this.playerVelX = 0;
     this.playerVelZ = 0;
-    this.playerYaw = yaw;
-    this.targetYaw = yaw;
-    this.playerPitch = pitch;
-    this.targetPitch = pitch;
-    this.cameraView = 'walk';
+    this.characterYaw = normalizeAngle(yaw);
+    this.cameraYaw = normalizeAngle(yaw);
+    this.targetCameraYaw = normalizeAngle(yaw);
+    this.cameraPitch = pitch;
+    this.targetCameraPitch = pitch;
+    if (this.cameraView === 'aerial') {
+      this.cameraView = 'third_mid';
+    }
+    this.cameraRigInitialized = false;
+    this.playerAvatar.root.position.copy(this.playerPos);
+    this.playerAvatar.root.rotation.y = this.characterYaw;
     this.visitedNodes.add(detectNodeIdAt(x, z, gy));
+    this.syncAvatarAndUmbrellaVisibility();
     this.emitHudSnapshot(true);
   }
 
   public setCameraView(view: CameraViewMode): void {
+    const prevView = this.cameraView;
     this.cameraView = view;
     this.gunSlitActive = false;
-    this.camera.fov = view === 'aerial' ? 46 : 56;
+    const preset = GTA_CAMERA_PRESETS[view];
+    if (!preset.isAerial && !preset.isFirstPerson) {
+      this.desiredThirdPersonDist = preset.distance;
+      if (prevView === 'first_person' || prevView === 'aerial') {
+        this.cameraRigInitialized = false;
+        this.targetCameraPitch = THREE.MathUtils.clamp(this.targetCameraPitch, -0.5, 0.25);
+        if (Math.abs(this.targetCameraPitch) < 0.04) {
+          this.targetCameraPitch = -0.16;
+        }
+      }
+    } else if (preset.isFirstPerson) {
+      // Align first-person look cleanly with camera heading
+      this.characterYaw = this.cameraYaw;
+      this.targetCameraPitch = THREE.MathUtils.clamp(this.targetCameraPitch, -0.45, 0.45);
+    }
+    if (preset.isAerial) {
+      this.exitPointerLock();
+    }
+    this.camera.fov = preset.fov;
     this.camera.updateProjectionMatrix();
+    this.syncAvatarAndUmbrellaVisibility();
     this.emitHudSnapshot(true);
   }
 
   public toggleCameraView(): void {
-    this.setCameraView(this.cameraView === 'walk' ? 'aerial' : 'walk');
+    this.setCameraView(cycleCameraView(this.cameraView));
+  }
+
+  private syncAvatarAndUmbrellaVisibility(): void {
+    const isFirstPersonPlaying =
+      this.mode === 'playing' && this.cameraView === 'first_person';
+    this.playerAvatar.setVisible(!isFirstPersonPlaying);
+    this.umbrellaHeldGroup.visible = isFirstPersonPlaying && this.holdingUmbrella;
+    this.playerAvatar.umbrellaInHand.visible = !isFirstPersonPlaying && this.holdingUmbrella;
   }
 
   public setTimeOfDay(hour: number): void {
@@ -1184,7 +1457,7 @@ export class WeilongSceneController {
 
       case 'int_xiatang_umbrella':
         this.holdingUmbrella = !this.holdingUmbrella;
-        this.umbrellaHeldGroup.visible = this.holdingUmbrella;
+        this.syncAvatarAndUmbrellaVisibility();
         if (def.artifactId) this.callbacks.onInspectArtifact(def.artifactId);
         break;
 
@@ -1368,24 +1641,28 @@ export class WeilongSceneController {
       const orbitY = 29.5 + Math.sin(this.titleTime * 0.8) * 1.4;
       this.camera.position.set(orbitX, orbitY, orbitZ);
       this.camera.lookAt(0, 2.5, -5.0);
+      this.playerAvatar.update(dt, 0, false, this.walkPhase, 0, this.holdingUmbrella, t);
     } else if (this.mode === 'playing') {
       if (this.cameraView === 'aerial') {
-        if (this.keysHeld.has('KeyA') || this.keysHeld.has('ArrowLeft')) this.aerialAngle -= dt * 0.9;
-        if (this.keysHeld.has('KeyD') || this.keysHeld.has('ArrowRight')) this.aerialAngle += dt * 0.9;
-        if (this.keysHeld.has('KeyW') || this.keysHeld.has('ArrowUp')) {
-          this.aerialDist = Math.max(28, this.aerialDist - dt * 22);
-        }
-        if (this.keysHeld.has('KeyS') || this.keysHeld.has('ArrowDown')) {
-          this.aerialDist = Math.min(105, this.aerialDist + dt * 22);
-        }
+        const aerialTurn =
+          (this.keysHeld.has('KeyD') || this.keysHeld.has('ArrowRight') ? 1 : 0) -
+          (this.keysHeld.has('KeyA') || this.keysHeld.has('ArrowLeft') ? 1 : 0) +
+          this.virtualMoveRight;
+        const aerialZoom =
+          (this.keysHeld.has('KeyW') || this.keysHeld.has('ArrowUp') ? 1 : 0) -
+          (this.keysHeld.has('KeyS') || this.keysHeld.has('ArrowDown') ? 1 : 0) +
+          this.virtualMoveForward;
+        this.aerialAngle += aerialTurn * dt * 0.95;
+        this.aerialDist = THREE.MathUtils.clamp(this.aerialDist - aerialZoom * dt * 24, 28, 105);
         const horiz = Math.cos(this.aerialPitch) * this.aerialDist;
         const cy = Math.sin(this.aerialPitch) * this.aerialDist + 1.8;
         const cx = Math.sin(this.aerialAngle) * horiz;
         const cz = Math.cos(this.aerialAngle) * horiz - 3.5;
         this.camera.position.set(cx, cy, cz);
         this.camera.lookAt(0, 2.5, -5.0);
+        this.playerAvatar.update(dt, 0, false, this.walkPhase, 0, this.holdingUmbrella, t);
       } else {
-        this.updatePlayerMovement(dt);
+        this.updatePlayerMovement(dt, t);
       }
     }
 
@@ -1590,42 +1867,77 @@ export class WeilongSceneController {
     }
   }
 
-  private updatePlayerMovement(dt: number): void {
-    // Keyboard look turn with Q / E optional or ArrowLeft / ArrowRight when desired
-    if (this.keysHeld.has('KeyQ')) this.targetYaw += dt * 1.9;
+  private updatePlayerMovement(dt: number, timeSec: number): void {
+    const preset = GTA_CAMERA_PRESETS[this.cameraView];
+    const isFirstPerson = preset.isFirstPerson;
 
-    // Exponentially damp camera look angles
-    const lookSmooth = 1 - Math.exp(-14 * dt);
-    this.playerYaw += (this.targetYaw - this.playerYaw) * lookSmooth;
-    this.playerPitch += (this.targetPitch - this.playerPitch) * lookSmooth;
-
-    // Compute horizontal movement vector relative to yaw (yaw = 0 faces -Z North)
-    _forward.set(-Math.sin(this.playerYaw), 0, -Math.cos(this.playerYaw));
-    _right.set(Math.cos(this.playerYaw), 0, -Math.sin(this.playerYaw));
-    _moveDir.set(0, 0, 0);
-
-    if (this.keysHeld.has('KeyW') || this.keysHeld.has('ArrowUp')) _moveDir.add(_forward);
-    if (this.keysHeld.has('KeyS') || this.keysHeld.has('ArrowDown')) _moveDir.sub(_forward);
-    if (this.keysHeld.has('KeyD') || this.keysHeld.has('ArrowRight')) _moveDir.add(_right);
-    if (this.keysHeld.has('KeyA') || this.keysHeld.has('ArrowLeft')) _moveDir.sub(_right);
-
-    const isSprinting = this.keysHeld.has('ShiftLeft') || this.keysHeld.has('ShiftRight');
-    const maxSpeed = isSprinting ? 8.5 : 5.4;
-
-    // Weighted horizontal inertia: smooth acceleration on start & weighty natural deceleration on stop
-    let targetVx = 0;
-    let targetVz = 0;
-    if (_moveDir.lengthSq() > 0.001) {
-      _moveDir.normalize();
-      targetVx = _moveDir.x * maxSpeed;
-      targetVz = _moveDir.z * maxSpeed;
+    // Optional Q camera orbit left
+    if (this.keysHeld.has('KeyQ')) {
+      this.targetCameraYaw = normalizeAngle(this.targetCameraYaw + dt * 1.9);
+      this.timeSinceManualOrbit = 0;
     }
-    const accelRate = _moveDir.lengthSq() > 0.001 ? 13.5 : 10.5;
+
+    // Track time since manual orbit for GTA gentle auto-follow
+    this.timeSinceManualOrbit = Math.min(10, this.timeSinceManualOrbit + dt);
+
+    // Combine Keyboard (WASD / Arrows) + Mobile Analog Joystick intents
+    const keyFwd =
+      (this.keysHeld.has('KeyW') || this.keysHeld.has('ArrowUp') ? 1 : 0) -
+      (this.keysHeld.has('KeyS') || this.keysHeld.has('ArrowDown') ? 1 : 0);
+    const keyRight =
+      (this.keysHeld.has('KeyD') || this.keysHeld.has('ArrowRight') ? 1 : 0) -
+      (this.keysHeld.has('KeyA') || this.keysHeld.has('ArrowLeft') ? 1 : 0);
+
+    const inputForward = THREE.MathUtils.clamp(keyFwd + this.virtualMoveForward, -1, 1);
+    const inputRight = THREE.MathUtils.clamp(keyRight + this.virtualMoveRight, -1, 1);
+
+    // Smooth GTA camera yaw & pitch damping (shortest-arc yaw prevents +/-PI spin)
+    this.cameraYaw = dampAngle(this.cameraYaw, this.targetCameraYaw, 18, dt);
+    this.cameraPitch = THREE.MathUtils.damp(this.cameraPitch, this.targetCameraPitch, 18, dt);
+
+    // Compute camera-relative movement vector & character heading (signature GTA feel)
+    const move = computeCameraRelativeMove(inputForward, inputRight, this.cameraYaw);
+
+    const isSprinting =
+      move.magnitude > 0.12 &&
+      (this.keysHeld.has('ShiftLeft') ||
+        this.keysHeld.has('ShiftRight') ||
+        this.virtualSprintToggle ||
+        this.virtualAutoSprint);
+    this.isSprintingNow = isSprinting;
+
+    const maxSpeed = isSprinting ? 8.6 : 5.2;
+    const targetVx = move.moveX * maxSpeed;
+    const targetVz = move.moveZ * maxSpeed;
+
+    // Weighted horizontal inertia: responsive start & weighty natural deceleration on stop
+    const accelRate = move.magnitude > 0.01 ? (isSprinting ? 12.5 : 14.0) : 11.0;
     this.playerVelX = THREE.MathUtils.damp(this.playerVelX, targetVx, accelRate, dt);
     this.playerVelZ = THREE.MathUtils.damp(this.playerVelZ, targetVz, accelRate, dt);
 
     const horizSpeed = Math.hypot(this.playerVelX, this.playerVelZ);
     let targetGroundY = groundHeightAt(this.playerPos.x, this.playerPos.z, this.playerPos.y);
+
+    // Character body rotation: turns smoothly into movement direction in 3rd-person, matches camera in 1st-person
+    const prevCharYaw = this.characterYaw;
+    if (isFirstPerson) {
+      this.characterYaw = this.cameraYaw;
+    } else if (move.facingYaw !== null && move.magnitude > 0.05) {
+      this.characterYaw = dampAngle(this.characterYaw, move.facingYaw, 12.5, dt);
+    }
+    const turnRate = shortestAngleDelta(prevCharYaw, this.characterYaw) / Math.max(dt, 0.008);
+
+    // GTA Soft Auto-Follow: gently swings camera behind character when walking without recent manual look
+    if (!isFirstPerson && !this.pointerLocked && this.activePointers.size === 0) {
+      this.targetCameraYaw = computeSoftFollowYaw(
+        this.targetCameraYaw,
+        this.characterYaw,
+        horizSpeed,
+        inputForward,
+        this.timeSinceManualOrbit,
+        dt
+      );
+    }
 
     if (horizSpeed > 0.03) {
       const prevX = this.playerPos.x;
@@ -1643,7 +1955,6 @@ export class WeilongSceneController {
       );
 
       const movedDist = Math.hypot(res.x - prevX, res.z - prevZ);
-      // Dampen velocity cleanly if colliding against stone masonry
       if (movedDist < horizSpeed * dt * 0.25) {
         this.playerVelX *= 0.45;
         this.playerVelZ *= 0.45;
@@ -1656,10 +1967,11 @@ export class WeilongSceneController {
         this.thresholdBumpTimer = 0.45;
       }
 
-      // Gait-synced camera stride + 6-surface procedural footstep foley
-      this.walkPhase += movedDist * 2.25;
+      // Gait-synced stride + 6-surface procedural footstep foley
+      this.walkPhase += movedDist * (isSprinting ? 2.45 : 2.25);
       this.stepDistAccum += movedDist;
-      if (this.stepDistAccum >= 1.65) {
+      const stepStride = isSprinting ? 1.85 : 1.62;
+      if (this.stepDistAccum >= stepStride) {
         this.stepDistAccum = 0;
         const surf = surfaceTypeAt(this.playerPos.x, this.playerPos.z, this.playerPos.y);
         this.audio.playFootstep(surf);
@@ -1680,6 +1992,32 @@ export class WeilongSceneController {
       thresholdLift = Math.sin((this.thresholdBumpTimer / 0.45) * Math.PI) * 0.16;
     }
 
+    // Update playable 3D character avatar transform & procedural gait animation
+    this.playerAvatar.root.position.set(
+      this.playerPos.x,
+      this.playerPos.y + thresholdLift * 0.65,
+      this.playerPos.z
+    );
+    this.playerAvatar.root.rotation.y = this.characterYaw;
+    this.playerAvatar.update(
+      dt,
+      horizSpeed,
+      isSprinting,
+      this.walkPhase,
+      turnRate,
+      this.holdingUmbrella,
+      timeSec
+    );
+
+    // Dynamic GTA Sprint FOV Kick (smoothly widens FOV when sprinting, narrows for gun-slit peep)
+    const targetFov = this.gunSlitActive
+      ? 34
+      : preset.fov + (isSprinting ? preset.sprintFovBoost : 0);
+    if (Math.abs(this.camera.fov - targetFov) > 0.05) {
+      this.camera.fov = THREE.MathUtils.damp(this.camera.fov, targetFov, 7.5, dt);
+      this.camera.updateProjectionMatrix();
+    }
+
     // Decaying trauma camera shake (e.g. Watchtower Gong boom)
     let shakePitch = 0;
     let shakeYaw = 0;
@@ -1690,13 +2028,85 @@ export class WeilongSceneController {
       shakeYaw = (Math.random() - 0.5) * mag;
     }
 
-    const strideFactor = Math.min(1, horizSpeed / 5.4);
-    const gaitBob = Math.sin(this.walkPhase) * 0.036 * strideFactor;
-    const gaitRoll = Math.cos(this.walkPhase * 0.5) * 0.0045 * strideFactor;
-    const eyeHeight = 1.66 + gaitBob + thresholdLift;
-    this.camera.position.set(this.playerPos.x, this.playerPos.y + eyeHeight, this.playerPos.z);
-    this.camera.rotation.order = 'YXZ';
-    this.camera.rotation.set(this.playerPitch + shakePitch, this.playerYaw + shakeYaw, gaitRoll);
+    const lookBackActive =
+      this.lookBackHeld || this.middleMouseDown || this.keysHeld.has('KeyB');
+
+    if (isFirstPerson) {
+      const strideFactor = Math.min(1, horizSpeed / 5.2);
+      const gaitBob = Math.sin(this.walkPhase) * 0.036 * strideFactor;
+      const gaitRoll = Math.cos(this.walkPhase * 0.5) * 0.0045 * strideFactor;
+      const eyeHeight = preset.pivotHeight + gaitBob + thresholdLift;
+      const effectiveYaw = lookBackActive
+        ? normalizeAngle(this.cameraYaw + Math.PI)
+        : this.cameraYaw;
+
+      this.camera.position.set(
+        this.playerPos.x,
+        this.playerPos.y + eyeHeight,
+        this.playerPos.z
+      );
+      this.camera.rotation.order = 'YXZ';
+      this.camera.rotation.set(
+        this.cameraPitch + shakePitch,
+        effectiveYaw + shakeYaw,
+        gaitRoll
+      );
+    } else {
+      // Smooth third-person spring-arm distance (pulls in quickly on walls, releases gracefully when clear)
+      const pose = computeThirdPersonCameraPose({
+        playerX: this.playerPos.x,
+        playerY: this.playerPos.y + thresholdLift * 0.4,
+        playerZ: this.playerPos.z,
+        cameraYaw: this.cameraYaw + shakeYaw,
+        cameraPitch: this.cameraPitch + shakePitch,
+        desiredDistance: this.desiredThirdPersonDist,
+        shoulderOffset: preset.shoulderOffset,
+        pivotHeight: preset.pivotHeight,
+        lookAhead: preset.lookAhead,
+        lookBack: lookBackActive,
+        doumenOpen: this.doumenOpen,
+      });
+
+      const distLambda = pose.resolvedDistance < this.smoothedThirdPersonDist ? 24 : 7.5;
+      this.smoothedThirdPersonDist = THREE.MathUtils.damp(
+        this.smoothedThirdPersonDist,
+        pose.resolvedDistance,
+        distLambda,
+        dt
+      );
+
+      // Recompute final position using smoothed arm distance so wall recovery is silky smooth
+      const finalPose = computeThirdPersonCameraPose({
+        playerX: this.playerPos.x,
+        playerY: this.playerPos.y + thresholdLift * 0.4,
+        playerZ: this.playerPos.z,
+        cameraYaw: this.cameraYaw + shakeYaw,
+        cameraPitch: this.cameraPitch + shakePitch,
+        desiredDistance: this.smoothedThirdPersonDist,
+        shoulderOffset: preset.shoulderOffset,
+        pivotHeight: preset.pivotHeight,
+        lookAhead: preset.lookAhead,
+        lookBack: lookBackActive,
+        doumenOpen: this.doumenOpen,
+      });
+
+      _camTargetPos.set(finalPose.camX, finalPose.camY, finalPose.camZ);
+      _camLookTarget.set(finalPose.lookX, finalPose.lookY, finalPose.lookZ);
+
+      if (!this.cameraRigInitialized || lookBackActive) {
+        this.smoothCamPos.copy(_camTargetPos);
+        this.smoothLookAt.copy(_camLookTarget);
+        this.cameraRigInitialized = true;
+      } else {
+        const posAlpha = 1 - Math.exp(-16 * dt);
+        const lookAlpha = 1 - Math.exp(-20 * dt);
+        this.smoothCamPos.lerp(_camTargetPos, posAlpha);
+        this.smoothLookAt.lerp(_camLookTarget, lookAlpha);
+      }
+
+      this.camera.position.copy(this.smoothCamPos);
+      this.camera.lookAt(this.smoothLookAt);
+    }
 
     // Track visited space & find nearest interactable within reach
     const nodeId = detectNodeIdAt(this.playerPos.x, this.playerPos.z, this.playerPos.y);
@@ -1728,6 +2138,8 @@ export class WeilongSceneController {
       this.lastHudEmitMs = performance.now();
     }
 
+    document.body.dataset.cameraView = this.cameraView;
+
     this.callbacks.onHudUpdate({
       currentNodeId: node.id,
       currentNodeName: `${node.number} · ${node.name}`,
@@ -1735,7 +2147,8 @@ export class WeilongSceneController {
       currentSurface: surf,
       playerX: this.playerPos.x,
       playerZ: this.playerPos.z,
-      playerYaw: this.playerYaw,
+      playerYaw: this.characterYaw,
+      cameraYaw: this.cameraYaw,
       nearbyInteractable: this.nearbyInteractable,
       visitedNodes: Array.from(this.visitedNodes),
       triggeredInteractions: Array.from(this.triggeredInteractions),
@@ -1746,6 +2159,8 @@ export class WeilongSceneController {
       gunSlitActive: this.gunSlitActive,
       weather: this.weather,
       cameraView: this.cameraView,
+      pointerLocked: this.pointerLocked,
+      isSprinting: this.isSprintingNow || this.virtualSprintToggle,
       timeOfDay: this.timeOfDay,
       timePlaying: this.timePlaying,
       timeSpeed: this.timeSpeed,
@@ -1757,6 +2172,7 @@ export class WeilongSceneController {
 
   public dispose(): void {
     this.disposed = true;
+    this.exitPointerLock();
     cancelAnimationFrame(this.frameId);
     clearTimeout(this.frameId);
 
@@ -1764,11 +2180,16 @@ export class WeilongSceneController {
     window.removeEventListener('keyup', this.handleKeyUp);
     window.removeEventListener('blur', this.handleWindowBlur);
     document.removeEventListener('visibilitychange', this.handleVisibilityChange);
+    document.removeEventListener('pointerlockchange', this.handlePointerLockChange);
+    document.removeEventListener('pointerlockerror', this.handlePointerLockError);
+    document.removeEventListener('mousemove', this.handleLockedMouseMove);
     const dom = this.renderer.domElement;
     dom.removeEventListener('pointerdown', this.handlePointerDown);
     dom.removeEventListener('wheel', this.handleWheel);
+    dom.removeEventListener('contextmenu', this.handleContextMenu);
     window.removeEventListener('pointermove', this.handlePointerMove);
     window.removeEventListener('pointerup', this.handlePointerUp);
+    window.removeEventListener('pointercancel', this.handlePointerUp);
     dom.removeEventListener('webglcontextlost', this.handleContextLost);
     this.resizeObserver?.disconnect();
 
@@ -1784,6 +2205,7 @@ export class WeilongSceneController {
     this.envMaps.rain.dispose();
     this.envMaps.night.dispose();
     this.composer?.dispose();
+    this.playerAvatar.dispose();
     this.living.dispose();
     this.arch.dispose();
     this.props.dispose();

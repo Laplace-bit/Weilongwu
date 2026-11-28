@@ -14,6 +14,11 @@
     margin: 0;
     padding: 0;
     overflow: hidden;
+    overscroll-behavior: none;
+    touch-action: manipulation;
+    -webkit-user-select: none;
+    user-select: none;
+    -webkit-tap-highlight-color: transparent;
     font-family: var(--font-sans);
     background-color: #162338;
     color: #fbf5e8;
