@@ -1,5 +1,15 @@
 import type { SurfaceType, WeatherMode } from '../types/game';
 import { computeThunderDelaySec } from './weatherPhysics';
+import { HwameiSpatialSyrinxPlayer } from './hwameiSyrinxAudio';
+import type { SyrinxMotorParams } from './hwameiSongEngine';
+import {
+  AvianRepertoireGrammar,
+  LINGNAN_BULBUL_PROFILE,
+  MOUNTAIN_THRUSH_PROFILE,
+  PitchContourEvaluator,
+  type AvianSyllable,
+} from './avianSongArchitecture';
+import type { SpatialAcousticParams } from './hwameiAcoustics';
 
 export interface HakkaAudioConfig {
   /**
@@ -78,6 +88,11 @@ export class HakkaAudioEngine {
   private thunderTimers: number[] = [];
   private bgmStep = 0;
 
+  // Spatialized 4x-oversampled physical avian syrinx synthesizer for the courtyard Hwamei
+  private hwameiSyrinx = new HwameiSpatialSyrinxPlayer();
+  // Reusable generative grammar driving distant mountain forest songbirds (Thrush / Bulbul)
+  private valleyBirdGrammar = new AvianRepertoireGrammar();
+
   // Cached environmental mix targets
   private lastTimeOfDay = 10.5;
   private lastWeather: WeatherMode = 'sunny';
@@ -134,6 +149,7 @@ export class HakkaAudioEngine {
       this.startBgmLoop();
       this.startBirdsongLoop();
       this.applyAmbienceMix();
+      void this.hwameiSyrinx.init(this.ctx, this.ambienceBus);
     }
 
     if (this.ctx.state === 'suspended') {
@@ -525,46 +541,104 @@ export class HakkaAudioEngine {
     vib.stop(now + duration + 0.05);
   }
 
+  /**
+   * Feeds live physical syrinx motor parameters & 3D spatial propagation acoustics
+   * for the courtyard Hwamei birdcage each frame.
+   */
+  public updateHwameiSyrinx(syrinx: SyrinxMotorParams, spatial: SpatialAcousticParams): void {
+    if (!this.ctx || this.ctx.state !== 'running') return;
+    this.hwameiSyrinx.update(syrinx, spatial, this.muted);
+  }
+
   private startBirdsongLoop(): void {
     if (this.birdTimer !== null) return;
     this.birdTimer = window.setInterval(() => {
       if (!this.ctx || this.ctx.state !== 'running' || this.muted) return;
       const h = ((this.lastTimeOfDay % 24) + 24) % 24;
-      const isSunnyDay = this.lastWeather === 'sunny' && h >= 5.8 && h <= 18.2;
+      const isSunnyDay = this.lastWeather === 'sunny' && h >= 5.6 && h <= 18.2;
       if (!isSunnyDay) return;
-      if (Math.random() > 0.52) return;
+      // Sparse, whisper-soft distant valley thrushes & Lingnan bulbuls so the courtyard Hwamei stays the hero voice
+      if (Math.random() > 0.28) return;
 
-      // Gentle Lingnan mountain warbler 2-3 note trill
-      const base = 1850 + Math.random() * 900;
-      this.playAmbienceChirp(base, base * 1.28, 0.11, 0.022, 0);
-      this.playAmbienceChirp(base * 1.24, base * 0.94, 0.12, 0.02, 0.14);
-      if (Math.random() > 0.4) {
-        this.playAmbienceChirp(base * 1.05, base * 1.38, 0.14, 0.018, 0.29);
+      const profile =
+        Math.random() < 0.55 ? MOUNTAIN_THRUSH_PROFILE : LINGNAN_BULBUL_PROFILE;
+      const schedule = profile.evaluateCircadian(this.lastTimeOfDay, this.lastWeather);
+      const shortSchedule = { ...schedule, motifsMin: 1, motifsMax: 2 };
+      const bout = this.valleyBirdGrammar.composeBout(
+        profile,
+        shortSchedule,
+        false,
+        Math.random
+      );
+      const chosenMotif = bout[0];
+      if (!chosenMotif) return;
+
+      const pan = (Math.random() * 2 - 1) * 0.85;
+      const distanceVol = 0.0065 + Math.random() * 0.0045;
+      let cursorDelay = 0.04;
+      for (const syl of chosenMotif.syllables.slice(0, 4)) {
+        this.playCurvedValleySyllable(syl, distanceVol, cursorDelay, pan);
+        cursorDelay += syl.durationSec + Math.max(0.03, syl.gapAfterSec);
       }
-    }, 3400);
+    }, 6400);
   }
 
-  private playAmbienceChirp(
-    freqStart: number,
-    freqEnd: number,
-    duration: number,
+  /**
+   * Renders a soft, distant mountain bird syllable using `PitchContourEvaluator` spline curves
+   * with air-absorption lowpass filtering and stereo hillside placement.
+   */
+  private playCurvedValleySyllable(
+    syl: AvianSyllable,
     volume: number,
-    delay: number
+    delay: number,
+    pan: number
   ): void {
     if (!this.ctx || !this.ambienceBus) return;
+    const dur = Math.max(0.06, Math.min(1.1, syl.durationSec));
+    const samples = Math.max(16, Math.min(96, Math.round(dur * 80)));
+    const freqCurve = new Float32Array(samples);
+    const gainCurve = new Float32Array(samples);
+    const phaseSeed = Math.random() * Math.PI * 2;
+
+    for (let i = 0; i < samples; i++) {
+      const localSec = (i / (samples - 1)) * dur * 0.999;
+      const pt = PitchContourEvaluator.evaluateSyllable(syl, localSec, phaseSeed);
+      freqCurve[i] = Math.max(220, Math.min(6200, pt.freqHz));
+      gainCurve[i] = Math.max(0.00005, volume * pt.energy01);
+    }
+    gainCurve[0] = 0.00005;
+    gainCurve[samples - 1] = 0.00005;
+
     const now = this.ctx.currentTime + delay;
     const osc = this.ctx.createOscillator();
-    const gain = this.ctx.createGain();
     osc.type = 'sine';
-    osc.frequency.setValueAtTime(freqStart, now);
-    osc.frequency.exponentialRampToValueAtTime(Math.max(80, freqEnd), now + duration);
-    gain.gain.setValueAtTime(0.0001, now);
-    gain.gain.linearRampToValueAtTime(volume, now + duration * 0.25);
-    gain.gain.exponentialRampToValueAtTime(0.0004, now + duration);
-    osc.connect(gain);
-    gain.connect(this.ambienceBus);
+    osc.frequency.setValueCurveAtTime(freqCurve, now, dur);
+
+    // Subtle hillside air-absorption filter so distant birds feel far behind the rear ridge
+    const lpf = this.ctx.createBiquadFilter();
+    lpf.type = 'lowpass';
+    lpf.frequency.value = 2850;
+    lpf.Q.value = 0.7;
+
+    const gain = this.ctx.createGain();
+    gain.gain.setValueCurveAtTime(gainCurve, now, dur);
+
+    osc.connect(lpf);
+    lpf.connect(gain);
+
+    if (typeof this.ctx.createStereoPanner === 'function') {
+      const panner = this.ctx.createStereoPanner();
+      panner.pan.value = Math.max(-1, Math.min(1, pan));
+      gain.connect(panner);
+      panner.connect(this.ambienceBus);
+      if (this.delayNode) panner.connect(this.delayNode);
+    } else {
+      gain.connect(this.ambienceBus);
+      if (this.delayNode) gain.connect(this.delayNode);
+    }
+
     osc.start(now);
-    osc.stop(now + duration + 0.02);
+    osc.stop(now + dur + 0.03);
   }
 
   /**
@@ -689,9 +763,10 @@ export class HakkaAudioEngine {
         break;
 
       case 'int_skywell_birdcage':
-        this.playTone(1950, 2650, 0.12, 'sine', 0.08, 0);
-        this.playTone(2550, 1850, 0.11, 'sine', 0.08, 0.14);
-        this.playTone(2150, 2900, 0.14, 'sine', 0.07, 0.28);
+        // Authentic bamboo cage rattle & brass hook clink; the live physical syrinx sings immediately!
+        this.playNoiseBurst(1650, 3.2, 0.09, 0.065, 0);
+        this.playTone(980, 740, 0.06, 'triangle', 0.045, 0.03);
+        this.playTone(1340, 1180, 0.07, 'sine', 0.035, 0.11);
         break;
 
       case 'int_doumen_gate':
@@ -817,6 +892,8 @@ export class HakkaAudioEngine {
     this.cricketOscA = null;
     this.cricketOscB = null;
     this.cricketLfo = null;
+
+    this.hwameiSyrinx.dispose();
 
     if (this.ctx) {
       void this.ctx.close();

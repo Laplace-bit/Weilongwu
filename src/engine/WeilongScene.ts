@@ -54,6 +54,17 @@ import {
   normalizeAngle,
   shortestAngleDelta,
 } from './gtaCamera';
+import { HwameiSongController, type HwameiAnimState } from './hwameiSongEngine';
+import {
+  computeHwameiSpatialAcoustics,
+  type SpatialAcousticParams,
+} from './hwameiAcoustics';
+
+// Pre-allocated scratch vectors for zero-GC per-frame Hwamei spatial audio
+const _hwameiWorldPos = new THREE.Vector3();
+const _listenerForward = new THREE.Vector3();
+const _listenerRight = new THREE.Vector3();
+const _worldUp = new THREE.Vector3(0, 1, 0);
 
 /**
  * Pillar 4: Subtle physical 35mm lens optics shader (natural cos^4 optical vignette,
@@ -245,10 +256,13 @@ export class WeilongSceneController {
   private almanacIdx = 0;
   private studyLampBright = 1.2;
 
-  // Active Prop Animation Timers
+  // Active Prop Animation Timers & Physical Hwamei Song Engine
   private millSpinTimer = 0;
   private cradleRockTimer = 0;
   private birdcageSwingTimer = 0;
+  private hwameiSong = new HwameiSongController();
+  private lastHwameiAnim: HwameiAnimState | null = null;
+  private lastHwameiSpatial: SpatialAcousticParams | null = null;
   private bellowsTimer = 0;
   private leichaTimer = 0;
   private winnowerTimer = 0;
@@ -1686,7 +1700,8 @@ export class WeilongSceneController {
         break;
 
       case 'int_skywell_birdcage':
-        this.birdcageSwingTimer = 4.0;
+        this.birdcageSwingTimer = 4.2;
+        this.hwameiSong.excite(7.0);
         break;
 
       case 'int_rear_mill':
@@ -1997,14 +2012,38 @@ export class WeilongSceneController {
       this.props.cradleBody.rotation.z = THREE.MathUtils.damp(this.props.cradleBody.rotation.z, 0, 5, dt);
     }
 
-    // Birdcage swinging + lively Chinese Hwamei songbird animation (head turns, singing trill, tail dip)
+    // Birdcage swinging + physical avian syrinx Chinese Hwamei songbird & 3D spatial sound propagation
     if (this.birdcageSwingTimer > 0) {
       this.birdcageSwingTimer = Math.max(0, this.birdcageSwingTimer - dt);
-      this.props.birdcageGroup.rotation.z = Math.sin(t * 5.2) * 0.16 * Math.min(1, this.birdcageSwingTimer * 0.4);
+      this.props.birdcageGroup.rotation.z =
+        Math.sin(t * 5.2) * 0.16 * Math.min(1, this.birdcageSwingTimer * 0.4);
     } else {
       this.props.birdcageGroup.rotation.z = Math.sin(t * 1.4) * 0.022;
     }
-    this.props.updateHwameiBird(t, dt, Math.min(1, this.birdcageSwingTimer * 0.5));
+
+    const hwameiOut = this.hwameiSong.update(dt, this.timeOfDay, this.weather);
+    this.lastHwameiAnim = hwameiOut.anim;
+    this.props.updateHwameiBird(t, dt, hwameiOut.anim);
+
+    // Real-time 3D acoustic propagation from perched Hwamei world position to camera listener
+    this.props.birdcageGroup.getWorldPosition(_hwameiWorldPos);
+    _hwameiWorldPos.y -= 1.10; // Perch height inside the hanging cage
+    this.camera.getWorldDirection(_listenerForward);
+    _listenerRight.crossVectors(_listenerForward, _worldUp);
+    if (_listenerRight.lengthSq() < 1e-6) {
+      _listenerRight.set(1, 0, 0);
+    } else {
+      _listenerRight.normalize();
+    }
+    const hwameiSpatial = computeHwameiSpatialAcoustics(
+      _hwameiWorldPos,
+      this.camera.position,
+      _listenerForward,
+      _listenerRight,
+      { doumenOpen: this.doumenOpen }
+    );
+    this.lastHwameiSpatial = hwameiSpatial;
+    this.audio.updateHwameiSyrinx(hwameiOut.syrinx, hwameiSpatial);
 
     // Kitchen bellows & Leicha mortar pestle
     if (this.bellowsTimer > 0) {
@@ -2427,6 +2466,17 @@ export class WeilongSceneController {
     }
 
     document.body.dataset.cameraView = this.cameraView;
+    if (this.lastHwameiAnim) {
+      document.body.dataset.hwameiSinging = this.lastHwameiAnim.isSinging ? '1' : '0';
+      document.body.dataset.hwameiSleeping = this.lastHwameiAnim.isSleeping ? '1' : '0';
+      document.body.dataset.hwameiMotif = this.lastHwameiAnim.currentMotif;
+    }
+    if (this.lastHwameiSpatial) {
+      document.body.dataset.hwameiDist = this.lastHwameiSpatial.distance.toFixed(2);
+      document.body.dataset.hwameiGain = this.lastHwameiSpatial.directGain.toFixed(3);
+      document.body.dataset.hwameiWalls = String(this.lastHwameiSpatial.wallCrossings);
+      document.body.dataset.hwameiLpf = String(Math.round(this.lastHwameiSpatial.lowpassHz));
+    }
 
     this.callbacks.onHudUpdate({
       currentNodeId: node.id,
