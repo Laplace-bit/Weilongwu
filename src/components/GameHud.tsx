@@ -8,6 +8,7 @@ import {
   WEATHER_LABELS,
 } from '../data/weilongData';
 import { GTA_CAMERA_PRESETS } from '../engine/gtaCamera';
+import { MinimapHud } from './MinimapHud';
 
 interface GameHudProps {
   hud: HudSnapshot;
@@ -205,6 +206,13 @@ export const GameHud: React.FC<GameHudProps> = ({
           </button>
         </div>
       </div>
+
+      {/* GTA-STYLE REAL-TIME ARCHITECTURAL MINIMAP (Desktop bottom-left / Mobile top-left below header) */}
+      <MinimapHud
+        hud={hud}
+        isTouchMode={isTouchMode}
+        onOpenFullMap={onOpenMap}
+      />
 
       {/* CENTER RETICLE DOT (First-Person Mode Only, authentic GTA behavior) */}
       {isFirstPerson && (

@@ -12,11 +12,13 @@ import {
   sampleInnerWeilongCurve,
   sampleOuterWeilongCurve,
   isValidTreePosition,
+  isPavedTreeSite,
   buildCurvedRingWallSegments,
   buildCircleColliders,
 } from './worldMath';
 import {
   sampleClosedLoopPath,
+  sampleOpenPolyline,
   samplePondSwimPath,
   sampleFlockOrbit,
 } from './livingPaths';
@@ -26,6 +28,7 @@ import {
   getLocalTimeOfDay,
 } from './dayNightCycle';
 import { evaluateLivingBehavior } from './livingBehavior';
+import { FreeRoamSystem, ROAM_PROFILES } from './freeRoamSystem';
 import { ROOM_NODES, INTERACTABLES } from '../data/weilongData';
 
 test('architectural floor elevation rises monotonically along South-to-North ritual axis', () => {
@@ -243,3 +246,92 @@ test('living-world closed loops, pond waterfowl bounds, and soaring bird orbits 
   const crane = sampleFlockOrbit(0, 6, 36, 30, 24, 0.25);
   assert.ok(crane.y > 20 && Number.isFinite(crane.yaw) && crane.bank > 0);
 });
+
+test('paved tree site detector identifies all concrete/stone planter sites vs natural soil meadows', () => {
+  // He-Ping concrete apron peach trees & pond-apron willows must require planters
+  assert.equal(isPavedTreeSite(-18.2, 24.4), 'heping', 'He-Ping west peach tree sits on concrete');
+  assert.equal(isPavedTreeSite(18.2, 24.4), 'heping', 'He-Ping east peach tree sits on concrete');
+  assert.ok(isPavedTreeSite(-14.6, 34.4) !== null, 'Pond-apron west willow sits on paved margin');
+  assert.ok(isPavedTreeSite(14.6, 34.4) !== null, 'Pond-apron east willow sits on paved margin');
+  assert.equal(isPavedTreeSite(-16.0, 39.2), 'granite', 'Pond granite apron sits on paved stone');
+
+  // Natural hillside forest & meadows sit on open earth
+  assert.equal(isPavedTreeSite(0, -52.0), null, 'Rear forest is natural earth');
+  assert.equal(isPavedTreeSite(-36.0, 20.0), null, 'West meadow is natural grass');
+  assert.equal(isPavedTreeSite(42.0, 18.0), null, 'East meadow is natural grass');
+});
+
+test('open polyline sampler interpolates monotonically with smooth heading and continuous living blends', () => {
+  const path = [
+    { x: 0, z: 0 },
+    { x: 0, z: 10 },
+    { x: 10, z: 10 },
+  ];
+  const p0 = sampleOpenPolyline(path, 0);
+  const pMid = sampleOpenPolyline(path, 0.5);
+  const pEnd = sampleOpenPolyline(path, 1);
+  assert.ok(Math.abs(p0.x) < 1e-6 && Math.abs(p0.z) < 1e-6);
+  assert.ok(Math.abs(pMid.x) < 1e-5 && Math.abs(pMid.z - 10) < 1e-5);
+  assert.ok(Math.abs(pEnd.x - 10) < 1e-5 && Math.abs(pEnd.z - 10) < 1e-5);
+  assert.ok(Number.isFinite(p0.yaw) && Number.isFinite(pMid.yaw) && Number.isFinite(pEnd.yaw));
+
+  // Progressive grain drying: dawn spreading -> midday full spread -> dusk gathering -> night stowed
+  const dawn = evaluateLivingBehavior(7.0, 'sunny');
+  const noon = evaluateLivingBehavior(12.0, 'sunny');
+  const dusk = evaluateLivingBehavior(17.7, 'sunny');
+  const night = evaluateLivingBehavior(22.5, 'sunny');
+  const rain = evaluateLivingBehavior(11.0, 'rain');
+
+  assert.ok(dawn.grainSpreadProgress > 0.1 && dawn.grainSpreadProgress < 0.9, 'Dawn grain spread should be in progress');
+  assert.ok(noon.grainSpreadProgress > 0.95 && noon.grainMatDeployed > 0.95, 'Midday grain should be fully spread');
+  assert.ok(dusk.grainSpreadProgress > 0.05 && dusk.grainSpreadProgress < 0.95, 'Dusk grain should be gathering gradually');
+  assert.equal(night.grainSpreadProgress, 0, 'Night grain should be completely gathered');
+  assert.equal(night.farmerHomeBlend, 1, 'Farmers should be indoors at night');
+  assert.equal(rain.grainSpreadProgress, 0, 'Rain target grain spread should drop to 0');
+  assert.ok(rain.grainBasketFill > 0.8, 'Rain target basket fill should be high during rush');
+});
+
+test('FreeRoamSystem drives multi-species autonomous roaming, collision safety, social play, and minimap blips', () => {
+  const roam = new FreeRoamSystem(2026);
+  const aDog = roam.registerAgent('dog_test', ROAM_PROFILES.dog_patrol, -8.0, 28.0, 0);
+  const aKid = roam.registerAgent('kid_test', ROAM_PROFILES.child_playful, -6.2, 28.2, Math.PI);
+  const aHen = roam.registerAgent('hen_test', ROAM_PROFILES.hen, 9.0, 27.0, 0);
+  const aBuffalo = roam.registerAgent('buffalo_test', ROAM_PROFILES.buffalo, 34.0, 10.0, 0);
+
+  const initialPos = new Map([
+    [aDog.id, { x: aDog.x, z: aDog.z }],
+    [aKid.id, { x: aKid.x, z: aKid.z }],
+    [aHen.id, { x: aHen.x, z: aHen.z }],
+    [aBuffalo.id, { x: aBuffalo.x, z: aBuffalo.z }],
+  ]);
+
+  let sawSocialEpisode = false;
+  // Simulate 50 seconds of world time at 10Hz steps
+  for (let step = 0; step < 500; step++) {
+    roam.update(0.1, true);
+    if (aDog.socialPose !== 'none' || aKid.socialPose !== 'none') {
+      sawSocialEpisode = true;
+    }
+    for (const agent of [aDog, aKid, aHen, aBuffalo]) {
+      assert.ok(Number.isFinite(agent.x) && Number.isFinite(agent.z), `${agent.id} coordinates must remain finite`);
+      assert.ok(Math.abs(agent.x) <= 68 && Math.abs(agent.z) <= 68, `${agent.id} must remain inside world bounds`);
+    }
+  }
+
+  let movedCount = 0;
+  for (const agent of [aDog, aKid, aHen, aBuffalo]) {
+    const start = initialPos.get(agent.id)!;
+    if (Math.hypot(agent.x - start.x, agent.z - start.z) > 0.4) {
+      movedCount++;
+    }
+  }
+  assert.ok(movedCount >= 3, `Expected at least 3 autonomous agents to roam across the map, got ${movedCount}`);
+  assert.ok(sawSocialEpisode, 'Dog and child placed near each other should trigger an emergent social/play episode');
+
+  const blips = roam.getMinimapBlips();
+  assert.equal(blips.length, 4, 'Minimap blips should mirror all registered autonomous agents');
+  for (const blip of blips) {
+    assert.ok(Number.isFinite(blip.x) && Number.isFinite(blip.z));
+  }
+});
+

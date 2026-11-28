@@ -48,6 +48,7 @@ function createInitialHud(): HudSnapshot {
     timePeriodLabel: getChineseShichenLabel(initialTime).label,
     formattedTime: formatHourClock(initialTime),
     volume: 0.72,
+    minimapBlips: [],
   };
 }
 

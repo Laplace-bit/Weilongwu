@@ -1,4 +1,5 @@
 import type { SurfaceType, WeatherMode } from '../types/game';
+import { computeThunderDelaySec } from './weatherPhysics';
 
 export interface HakkaAudioConfig {
   /**
@@ -74,6 +75,7 @@ export class HakkaAudioEngine {
   // Scheduler timers for procedural Guzheng/Xiao BGM & daytime birdsong
   private bgmTimer: number | null = null;
   private birdTimer: number | null = null;
+  private thunderTimers: number[] = [];
   private bgmStep = 0;
 
   // Cached environmental mix targets
@@ -183,7 +185,83 @@ export class HakkaAudioEngine {
 
   public setWeatherAmbience(weather: WeatherMode): void {
     this.lastWeather = weather;
+    if (weather !== 'rain') {
+      this.clearPendingThunder();
+    }
     this.applyAmbienceMix();
+  }
+
+  private clearPendingThunder(): void {
+    for (let i = 0; i < this.thunderTimers.length; i++) {
+      window.clearTimeout(this.thunderTimers[i]);
+    }
+    this.thunderTimers.length = 0;
+  }
+
+  /**
+   * Schedules a distance-delayed natural rolling valley thunder sound after a lightning flash.
+   * Routed through ambienceBus -> masterGain so user volume & mute controls apply seamlessly.
+   */
+  public playThunder(distanceMeters = 720, intensity = 0.78): void {
+    if (!this.ctx || !this.unlocked || !this.noiseBuffer || !this.ambienceBus) return;
+    if (this.lastWeather !== 'rain' || this.muted || this.volume <= 0.001) return;
+
+    const delayMs = Math.round(computeThunderDelaySec(distanceMeters) * 1000);
+    const timerId = window.setTimeout(() => {
+      const idx = this.thunderTimers.indexOf(timerId);
+      if (idx >= 0) this.thunderTimers.splice(idx, 1);
+      if (!this.ctx || !this.noiseBuffer || !this.ambienceBus) return;
+      if (this.lastWeather !== 'rain' || this.muted) return;
+
+      const now = this.ctx.currentTime;
+      const distAtten = Math.max(0.35, Math.min(1.0, 1.18 - distanceMeters / 1800));
+      const peakGain = Math.min(0.28, 0.22 * intensity * distAtten);
+
+      // Layer 1: Soft low-mid atmospheric thunder crack (gentle 70ms onset, never harsh)
+      const crackSrc = this.ctx.createBufferSource();
+      crackSrc.buffer = this.noiseBuffer;
+      crackSrc.loop = true;
+      const crackFilter = this.ctx.createBiquadFilter();
+      crackFilter.type = 'lowpass';
+      crackFilter.frequency.setValueAtTime(340 * distAtten + 110, now);
+      crackFilter.frequency.exponentialRampToValueAtTime(82, now + 1.45);
+      crackFilter.Q.value = 0.85;
+      const crackGain = this.ctx.createGain();
+      crackGain.gain.setValueAtTime(0.0001, now);
+      crackGain.gain.linearRampToValueAtTime(peakGain * 0.78, now + 0.09);
+      crackGain.gain.exponentialRampToValueAtTime(peakGain * 0.22, now + 0.75);
+      crackGain.gain.exponentialRampToValueAtTime(0.0001, now + 2.2);
+      crackSrc.connect(crackFilter);
+      crackFilter.connect(crackGain);
+      crackGain.connect(this.ambienceBus);
+      crackSrc.start(now);
+      crackSrc.stop(now + 2.3);
+
+      // Layer 2: Deep rolling valley rumble with secondary echo swell (3.8-4.8s)
+      const rumbleDuration = 3.8 + distAtten * 1.1;
+      const rumbleSrc = this.ctx.createBufferSource();
+      rumbleSrc.buffer = this.noiseBuffer;
+      rumbleSrc.loop = true;
+      const rumbleFilter = this.ctx.createBiquadFilter();
+      rumbleFilter.type = 'lowpass';
+      rumbleFilter.frequency.setValueAtTime(118, now);
+      rumbleFilter.frequency.exponentialRampToValueAtTime(52, now + rumbleDuration);
+      rumbleFilter.Q.value = 1.25;
+      const rumbleGain = this.ctx.createGain();
+      rumbleGain.gain.setValueAtTime(0.0001, now + 0.05);
+      rumbleGain.gain.linearRampToValueAtTime(peakGain, now + 0.35);
+      rumbleGain.gain.linearRampToValueAtTime(peakGain * 0.45, now + 1.15);
+      // Secondary distant mountain-ridge echo swell
+      rumbleGain.gain.linearRampToValueAtTime(peakGain * 0.68, now + 1.75);
+      rumbleGain.gain.exponentialRampToValueAtTime(0.0001, now + rumbleDuration);
+      rumbleSrc.connect(rumbleFilter);
+      rumbleFilter.connect(rumbleGain);
+      rumbleGain.connect(this.ambienceBus);
+      rumbleSrc.start(now + 0.04);
+      rumbleSrc.stop(now + rumbleDuration + 0.15);
+    }, delayMs);
+
+    this.thunderTimers.push(timerId);
   }
 
   /**
@@ -716,6 +794,7 @@ export class HakkaAudioEngine {
       window.clearInterval(this.birdTimer);
       this.birdTimer = null;
     }
+    this.clearPendingThunder();
     if (this.externalBgmAudio) {
       this.externalBgmAudio.pause();
       this.externalBgmAudio = null;

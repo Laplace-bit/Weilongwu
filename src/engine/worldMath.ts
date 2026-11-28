@@ -518,10 +518,10 @@ export function buildCircleColliders(): CircleCollider2D[] {
   add('prop_music_drum', -9.9, -20.9, 0.56);
   add('prop_qiaopi_trunk', 9.9, -20.9, 0.62);
   add('prop_carpentry_bench', 17.0, -16.6, 0.78);
-  // Foreground weeping willows & hero camphor trunks
+  // Foreground weeping willows (stone tree basins on granite apron) & hero camphor trunks
   for (const [wx, wz, r] of [
-    [-17.4, 39.2, 0.48],
-    [17.4, 39.6, 0.48],
+    [-17.8, 39.2, 1.18],
+    [17.8, 39.6, 1.18],
     [-13.8, 49.4, 0.45],
     [13.4, 49.6, 0.45],
     [0.8, 50.8, 0.48],
@@ -534,8 +534,47 @@ export function buildCircleColliders(): CircleCollider2D[] {
   ] as [number, number, number][]) {
     add(`tree_trunk_${wx}_${wz}`, wx, wz, r);
   }
+  // He-Ping forecourt peach blossom octagonal brick-and-stone tree planters (种树坛子)
+  for (const [px, pz, r] of [
+    [-27.0, 25.2, 1.12],
+    [27.0, 25.6, 1.12],
+    [-30.5, 32.0, 1.08],
+    [30.5, 31.8, 1.08],
+    [-21.8, 36.2, 1.05],
+    [21.8, 36.0, 1.05],
+  ] as [number, number, number][]) {
+    add(`planter_peach_${px}_${pz}`, px, pz, r);
+  }
+  // Courtyard handcrafted animal shelters (doghouse & courtyard chicken coop)
+  add('animal_doghouse', -9.6, 22.85, 0.78);
+  add('animal_heping_coop', 13.4, 22.95, 1.02);
 
   return circles;
+}
+
+/**
+ * Classifies whether a tree or shrub coordinate (x, z) sits on hardened concrete,
+ * granite apron, or Huatai cobbled paving — requiring a dedicated traditional
+ * stone/brick/terracotta planter with soil instead of growing directly out of pavement.
+ */
+export function isPavedTreeSite(x: number, z: number): 'heping' | 'granite' | 'huatai' | null {
+  // He-Ping concrete/rammed-lime forecourt
+  if (Math.abs(x) <= 37.2 && z >= 21.3 && z <= 37.0) {
+    return 'heping';
+  }
+  // Southern granite apron flanking the Half-Moon Pond
+  if (Math.abs(x) <= 37.2 && z > 37.0 && z <= 41.3) {
+    return 'granite';
+  }
+  // Front wing granite veranda flanks
+  if (Math.abs(x) >= 18.0 && Math.abs(x) <= 24.5 && z >= 16.0 && z < 21.3) {
+    return 'granite';
+  }
+  // Huatai cobble courtyard inside Inner Weilong
+  if (Math.abs(x) <= 23.0 && z >= -20.5 && z <= -5.5) {
+    return 'huatai';
+  }
+  return null;
 }
 
 /**

@@ -66,6 +66,72 @@ export function sampleClosedLoopPath(
   return { x: waypoints[0].x, z: waypoints[0].z, yaw: 0 };
 }
 
+export interface OpenPathSample2D {
+  x: number;
+  z: number;
+  yaw: number;
+  moving: boolean;
+}
+
+/**
+ * Samples an open multi-waypoint polyline at normalized progress t in [0, 1] with uniform arc-length speed.
+ * Used for continuous walk-home / walk-to-nest routines so actors travel smoothly through doorways
+ * without ever teleporting or popping invisible (supports both live play and timeline scrubbing).
+ */
+export function sampleOpenPolyline(
+  waypoints: readonly PathPoint2D[],
+  progress: number
+): OpenPathSample2D {
+  const n = waypoints.length;
+  if (n === 0) {
+    return { x: 0, z: 0, yaw: 0, moving: false };
+  }
+  if (n === 1) {
+    return { x: waypoints[0].x, z: waypoints[0].z, yaw: 0, moving: false };
+  }
+
+  const p = Math.max(0, Math.min(1, progress));
+  let totalLen = 0;
+  const segLens: number[] = [];
+  for (let i = 0; i < n - 1; i++) {
+    const a = waypoints[i];
+    const b = waypoints[i + 1];
+    const len = Math.hypot(b.x - a.x, b.z - a.z);
+    segLens.push(len);
+    totalLen += len;
+  }
+
+  if (totalLen <= 1e-6) {
+    return { x: waypoints[0].x, z: waypoints[0].z, yaw: 0, moving: false };
+  }
+
+  const moving = p > 0.008 && p < 0.992;
+  let dist = p * totalLen;
+
+  for (let i = 0; i < n - 1; i++) {
+    const segLen = segLens[i];
+    if (dist <= segLen || i === n - 2) {
+      const a = waypoints[i];
+      const b = waypoints[i + 1];
+      const f = segLen > 1e-6 ? Math.min(1, Math.max(0, dist / segLen)) : 0;
+      const x = a.x + (b.x - a.x) * f;
+      const z = a.z + (b.z - a.z) * f;
+      const yaw = Math.atan2(b.x - a.x, b.z - a.z);
+      return { x, z, yaw, moving };
+    }
+    dist -= segLen;
+  }
+
+  const last = waypoints[n - 1];
+  const prev = waypoints[n - 2];
+  return {
+    x: last.x,
+    z: last.z,
+    yaw: Math.atan2(last.x - prev.x, last.z - prev.z),
+    moving: false,
+  };
+}
+
 /**
  * Clamps and samples an elliptical swimming loop strictly inside the semicircular Half-Moon Pond
  * (center (0, 38.6), water surface extending south z > 38.6 up to radius (16.2, 10.8)).

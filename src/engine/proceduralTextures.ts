@@ -73,6 +73,7 @@ export interface MaterialLibrary {
   rammedEarth: THREE.MeshStandardMaterial;
   roofTile: THREE.MeshPhysicalMaterial;
   roofTileDark: THREE.MeshPhysicalMaterial;
+  roofSheathing: THREE.MeshStandardMaterial;
   graniteSlab: THREE.MeshPhysicalMaterial;
   granitePlinth: THREE.MeshPhysicalMaterial;
   courtyardEarth: THREE.MeshPhysicalMaterial;
@@ -98,6 +99,7 @@ export interface MaterialLibrary {
   grassDecal: THREE.MeshStandardMaterial;
   mossDecal: THREE.MeshStandardMaterial;
   forestGround: THREE.MeshStandardMaterial;
+  gardenSoil: THREE.MeshStandardMaterial;
   lanternPaper: THREE.MeshStandardMaterial;
   contactShadow: THREE.MeshBasicMaterial;
   plaqueLongxi: THREE.MeshStandardMaterial;
@@ -207,6 +209,7 @@ interface WorldPatinaOptions {
   bounceReceive?: number;
   crimsonBleed?: number;
   wettable?: boolean;
+  roofRunoff?: boolean;
 }
 
 export interface SubsurfaceOptions {
@@ -262,8 +265,9 @@ function attachWorldPatinaShader(
   const bounceReceive = (opts.bounceReceive ?? 0.24).toFixed(4);
   const crimsonBleed = (opts.crimsonBleed ?? 0.16).toFixed(4);
   const isWettable = opts.wettable ? '1.0' : '0.0';
+  const hasRoofRunoff = opts.roofRunoff ? '1.0' : '0.0';
 
-  mat.customProgramCacheKey = () => `handcrafted_patina_${opts.key}_gi_v3`;
+  mat.customProgramCacheKey = () => `handcrafted_patina_${opts.key}_gi_v4`;
   mat.onBeforeCompile = (shader) => {
     shader.uniforms.uSunDir = physicalEnvUniforms.uSunDir;
     shader.uniforms.uSunColor = physicalEnvUniforms.uSunColor;
@@ -271,6 +275,7 @@ function attachWorldPatinaShader(
     shader.uniforms.uSkyColor = physicalEnvUniforms.uSkyColor;
     shader.uniforms.uWetness = physicalEnvUniforms.uWetness;
     shader.uniforms.uNightFactor = physicalEnvUniforms.uNightFactor;
+    shader.uniforms.uTime = physicalEnvUniforms.uTime;
 
     shader.vertexShader = shader.vertexShader
       .replace(
@@ -305,6 +310,7 @@ function attachWorldPatinaShader(
         uniform vec3 uSkyColor;
         uniform float uWetness;
         uniform float uNightFactor;
+        uniform float uTime;
         varying vec3 vPatinaWorldPos;
         varying vec3 vPatinaWorldNormal;
         ${GLSL_PATINA_NOISE}`
@@ -314,6 +320,8 @@ function attachWorldPatinaShader(
         `#include <color_fragment>
         float patinaRoughMod = 0.0;
         float patinaWetPuddle = 0.0;
+        float patinaRoofStream = 0.0;
+        float patinaGroundRipple = 0.0;
         {
           vec2 wpXZ = vPatinaWorldPos.xz;
           vec3 wn = normalize(vPatinaWorldNormal);
@@ -336,13 +344,78 @@ function attachWorldPatinaShader(
           vec3 jadeMoss = mix(vec3(0.18, 0.34, 0.22), vec3(0.32, 0.45, 0.24), nBrush);
           diffuseColor.rgb = mix(diffuseColor.rgb, jadeMoss, clamp(mossMask, 0.0, 0.42));
 
-          // 3. Physical rain-wetness porosity darkening (water fills surface pores -> deeper albedo)
-          if (${isWettable} > 0.5 && uWetness > 0.01) {
+          // 3. Physical rain-wetness porosity darkening, calibrated exterior-only roof rivulets,
+          //    and outdoor-only ground water-film sheen, drainage flow & impact ripples.
+          if (${isWettable} > 0.5 && uWetness > 0.01 && gl_FrontFacing) {
             float upMask = smoothstep(0.28, 0.82, wn.y);
-            float puddleNoise = patinaFbm(wpXZ * 0.28 + vec2(3.1, -4.7));
-            patinaWetPuddle = smoothstep(0.40, 0.72, puddleNoise) * upMask;
-            float dampAmount = uWetness * (0.28 * upMask + 0.45 * patinaWetPuddle + 0.12);
-            diffuseColor.rgb *= (1.0 - dampAmount * 0.28);
+
+            if (${hasRoofRunoff} > 0.5) {
+              // Strictly exterior upward roof slopes only (gl_FrontFacing + wn.y > 0.14)
+              if (wn.y > 0.14) {
+                float dampRoof = uWetness * (0.24 * upMask + 0.08);
+                diffuseColor.rgb *= (1.0 - dampRoof * 0.24);
+                // Project horizontal normal to determine tile groove & down-slope flow axes
+                vec2 slopeDir = normalize(vec2(wn.x, wn.z) + vec2(0.0001, 0.0002));
+                vec2 crossDir = vec2(-slopeDir.y, slopeDir.x);
+                float across = dot(wpXZ, crossDir);
+                float downSlope = dot(wpXZ, slopeDir);
+                // Restrained, narrow barrel-tile valley rivulets proportional to rainfall
+                float grooveWave = pow(0.5 + 0.5 * sin(across * 25.5), 6.5);
+                float flowPulse1 = 0.5 + 0.5 * sin(downSlope * 7.2 - uTime * 4.8 + across * 2.4);
+                float flowPulse2 = 0.5 + 0.5 * sin(downSlope * 12.5 - uTime * 7.6 - across * 4.1);
+                float pulse = smoothstep(0.46, 0.94, flowPulse1 * 0.62 + flowPulse2 * 0.38);
+                patinaRoofStream = grooveWave * pulse * pow(uWetness, 1.25) * smoothstep(0.14, 0.65, wn.y);
+                // Delicate dark-wet specular glint along tile valleys (never brighter than falling rain)
+                vec3 runoffGlint = mix(vec3(0.46, 0.58, 0.68), uSkyColor * 0.92, 0.45);
+                diffuseColor.rgb = mix(diffuseColor.rgb, runoffGlint, clamp(patinaRoofStream * 0.13, 0.0, 0.14));
+              }
+            } else {
+              // Analytical open-sky mask so indoor hall floors stay dry while skywells & courtyards get wet & drain
+              float ax = abs(wpXZ.x);
+              float wz = wpXZ.y;
+              float covered = 0.0;
+              if (ax < 20.1 && wz > 16.0 && wz < 22.3) covered = 1.0;
+              else if (ax < 10.7 && wz > 4.6 && wz < 11.3) covered = 1.0;
+              else if (ax < 12.7 && wz > -6.6 && wz < 1.2) covered = 1.0;
+              else if (ax > 4.95 && ax < 10.7 && wz > 10.6 && wz < 16.5) covered = 1.0;
+              else if (ax > 5.05 && ax < 10.7 && wz > 0.1 && wz < 5.6) covered = 1.0;
+              else if (ax > 10.4 && ax < 21.5 && wz > -6.2 && wz < 18.9) covered = 1.0;
+              else if (wz < 9.9) {
+                float dzOval = 9.65 - wz;
+                float rIn = length(vec2(wpXZ.x / 23.5, dzOval / 32.5));
+                float rOut = length(vec2(wpXZ.x / 31.2, dzOval / 37.8));
+                if ((rIn > 0.89 && rIn < 1.12) || (rOut > 0.91 && rOut < 1.10)) covered = 1.0;
+              }
+              float openSky = 1.0 - covered;
+              if (openSky > 0.5) {
+                float puddleNoise = patinaFbm(wpXZ * 0.26 + vec2(3.1, -4.7));
+                // Natural drainage pooling near Front/Rear Skywell gutters & down He-Ping slope toward pond
+                float frontSkywell = (1.0 - smoothstep(3.8, 5.1, ax)) * (1.0 - smoothstep(2.0, 2.8, abs(wz - 13.6)));
+                float rearSkywell = (1.0 - smoothstep(4.0, 5.2, ax)) * (1.0 - smoothstep(1.8, 2.6, abs(wz - 2.8)));
+                float hepingSlope = smoothstep(22.4, 24.0, wz) * (1.0 - smoothstep(35.8, 37.2, wz));
+                float drainBias = clamp(frontSkywell * 0.28 + rearSkywell * 0.28 + hepingSlope * 0.18, 0.0, 0.34);
+                patinaWetPuddle = smoothstep(0.36, 0.68, puddleNoise + drainBias) * upMask;
+                float dampAmount = uWetness * (0.34 * upMask + 0.48 * patinaWetPuddle + 0.10);
+                diffuseColor.rgb *= (1.0 - dampAmount * 0.30);
+
+                // Subtle downhill courtyard sheet-flow streaks draining toward skywell gutters & pond
+                float flowCoord = hepingSlope > 0.2 ? wz * 2.4 - uTime * 1.9 : length(wpXZ - vec2(0.0, wz > 8.0 ? 13.6 : 2.8)) * 3.2 + uTime * 1.4;
+                float sheetFlow = pow(0.5 + 0.5 * sin(flowCoord + puddleNoise * 5.0), 5.0) * patinaWetPuddle * upMask;
+                diffuseColor.rgb = mix(diffuseColor.rgb, uSkyColor * 0.68 + vec3(0.10), clamp(sheetFlow * uWetness * 0.14, 0.0, 0.16));
+
+                // Crisp raindrop impact rings on pooled outdoor stone & courtyard water film
+                if (upMask > 0.55 && patinaWetPuddle > 0.18) {
+                  vec2 rCell = floor(wpXZ * 1.95);
+                  vec2 rF = fract(wpXZ * 1.95) - 0.5;
+                  float rSeed = patinaHash(rCell);
+                  float rPhase = fract(uTime * 1.25 + rSeed * 6.2831);
+                  float rDist = abs(length(rF) - rPhase * 0.42);
+                  float rRing = (1.0 - smoothstep(0.0, 0.042, rDist)) * (1.0 - rPhase) * step(0.35, rSeed);
+                  patinaGroundRipple = rRing * patinaWetPuddle * uWetness;
+                  diffuseColor.rgb += mix(vec3(0.28, 0.36, 0.42), uSkyColor * 0.55, 0.5) * patinaGroundRipple * 0.34;
+                }
+              }
+            }
           }
 
           // 4. Warm earthy ground-contact AO along vertical bases
@@ -367,9 +440,14 @@ function attachWorldPatinaShader(
         '#include <roughnessmap_fragment>',
         `#include <roughnessmap_fragment>
         roughnessFactor = clamp(roughnessFactor + patinaRoughMod, 0.12, 0.98);
-        if (${isWettable} > 0.5 && uWetness > 0.01) {
-          float rainSmooth = uWetness * (0.34 + 0.52 * patinaWetPuddle);
-          roughnessFactor = mix(roughnessFactor, 0.14, clamp(rainSmooth, 0.0, 0.88));
+        if (${isWettable} > 0.5 && uWetness > 0.01 && gl_FrontFacing) {
+          if (${hasRoofRunoff} > 0.5) {
+            float roofWetMix = clamp(uWetness * 0.42 + patinaRoofStream * 0.48, 0.0, 0.85);
+            roughnessFactor = mix(roughnessFactor, 0.34, roofWetMix);
+          } else {
+            float rainSmooth = uWetness * (0.24 + 0.62 * patinaWetPuddle) + patinaGroundRipple * 0.3;
+            roughnessFactor = mix(roughnessFactor, 0.09, clamp(rainSmooth, 0.0, 0.90));
+          }
         }`
       )
       .replace(
@@ -1856,6 +1934,38 @@ export function createMaterialLibrary(renderer: THREE.WebGLRenderer): MaterialLi
   const skyRainTex = makeSkyDomeTexture('rain', aniso);
   const skyNightTex = makeSkyDomeTexture('night', aniso);
 
+  // Rich dark loamy humus soil for stone/terracotta tree & shrub planters
+  const soilCanvas = (() => {
+    const S = 256;
+    const rand = mulberry32(9317);
+    const [c, ctx] = makeCanvas(S, S);
+    const [h, hctx] = makeCanvas(S, S);
+    ctx.fillStyle = '#3b2b1e';
+    ctx.fillRect(0, 0, S, S);
+    hctx.fillStyle = '#707070';
+    hctx.fillRect(0, 0, S, S);
+    for (let i = 0; i < 2400; i++) {
+      const x = rand() * S;
+      const y = rand() * S;
+      const rad = 1.2 + rand() * 3.8;
+      const shade = rand();
+      ctx.fillStyle =
+        shade < 0.34 ? '#2c1f15' : shade < 0.72 ? '#493524' : shade < 0.92 ? '#5d4530' : '#73604a';
+      ctx.beginPath();
+      ctx.arc(x, y, rad, 0, Math.PI * 2);
+      ctx.fill();
+      const hv = Math.round(52 + rand() * 168);
+      hctx.fillStyle = `rgb(${hv},${hv},${hv})`;
+      hctx.beginPath();
+      hctx.arc(x, y, rad, 0, Math.PI * 2);
+      hctx.fill();
+    }
+    return {
+      map: createTexture(c, aniso, true, 2, 2),
+      normal: createTexture(heightCanvasToNormalCanvas(h, 3.0), aniso, false, 2, 2),
+    };
+  })();
+
   textures.push(
     lime.map,
     lime.normal,
@@ -1895,7 +2005,9 @@ export function createMaterialLibrary(renderer: THREE.WebGLRenderer): MaterialLi
     mossDecalTex,
     skySunnyTex,
     skyRainTex,
-    skyNightTex
+    skyNightTex,
+    soilCanvas.map,
+    soilCanvas.normal
   );
 
   const limeWall = new THREE.MeshStandardMaterial({
@@ -1947,7 +2059,7 @@ export function createMaterialLibrary(renderer: THREE.WebGLRenderer): MaterialLi
     ior: 1.52,
     clearcoat: 0.08,
     clearcoatRoughness: 0.45,
-    side: THREE.DoubleSide,
+    side: THREE.FrontSide,
     shadowSide: THREE.DoubleSide,
   });
 
@@ -1960,7 +2072,22 @@ export function createMaterialLibrary(renderer: THREE.WebGLRenderer): MaterialLi
     ior: 1.52,
     clearcoat: 0.1,
     clearcoatRoughness: 0.42,
+    side: THREE.FrontSide,
     shadowSide: THREE.DoubleSide,
+  });
+
+  // Solid opaque matte interior cedar roof boarding (望板) beneath clay tiles — completely blocks exterior runoff & sky glints from indoors
+  const roofSheathing = new THREE.MeshStandardMaterial({
+    color: 0x583b26,
+    map: timber.map,
+    normalMap: timber.normal,
+    normalScale: new THREE.Vector2(0.45, 0.45),
+    roughness: 0.96,
+    metalness: 0.0,
+    envMapIntensity: 0.22,
+    side: THREE.FrontSide,
+    depthWrite: true,
+    depthTest: true,
   });
 
   const graniteSlab = new THREE.MeshPhysicalMaterial({
@@ -2227,6 +2354,15 @@ export function createMaterialLibrary(renderer: THREE.WebGLRenderer): MaterialLi
     metalness: 0.0,
   });
 
+  const gardenSoil = new THREE.MeshStandardMaterial({
+    color: 0xd9c7b2,
+    map: soilCanvas.map,
+    normalMap: soilCanvas.normal,
+    normalScale: new THREE.Vector2(1.05, 1.05),
+    roughness: 0.95,
+    metalness: 0.0,
+  });
+
   const lanternPaper = new THREE.MeshStandardMaterial({
     color: 0xe64d2e,
     emissive: 0xff8b36,
@@ -2246,13 +2382,24 @@ export function createMaterialLibrary(renderer: THREE.WebGLRenderer): MaterialLi
 
   // Pillar 1 & 3: Attach handcrafted GI radiosity, color bleeding, crevice AO & rain-wetness shaders
   attachWorldPatinaShader(roofTile, {
-    key: 'roof_tile',
+    key: 'roof_tile_runoff',
     macroFreq: 0.11,
     macroStrength: 0.18,
     mossStrength: 0.14,
     bounceReceive: 0.16,
     crimsonBleed: 0.08,
     wettable: true,
+    roofRunoff: true,
+  });
+  attachWorldPatinaShader(roofTileDark, {
+    key: 'roof_tile_dark_runoff',
+    macroFreq: 0.12,
+    macroStrength: 0.12,
+    mossStrength: 0.1,
+    bounceReceive: 0.12,
+    crimsonBleed: 0.06,
+    wettable: true,
+    roofRunoff: true,
   });
   attachWorldPatinaShader(limeWall, {
     key: 'lime_wall_v3',
@@ -2422,6 +2569,7 @@ export function createMaterialLibrary(renderer: THREE.WebGLRenderer): MaterialLi
     rammedEarth,
     roofTile,
     roofTileDark,
+    roofSheathing,
     graniteSlab,
     granitePlinth,
     courtyardEarth,
@@ -2447,6 +2595,7 @@ export function createMaterialLibrary(renderer: THREE.WebGLRenderer): MaterialLi
     grassDecal,
     mossDecal,
     forestGround,
+    gardenSoil,
     lanternPaper,
     contactShadow,
     plaqueLongxi,
@@ -2464,6 +2613,7 @@ export function createMaterialLibrary(renderer: THREE.WebGLRenderer): MaterialLi
     rammedEarth,
     roofTile,
     roofTileDark,
+    roofSheathing,
     graniteSlab,
     granitePlinth,
     courtyardEarth,
@@ -2489,6 +2639,7 @@ export function createMaterialLibrary(renderer: THREE.WebGLRenderer): MaterialLi
     grassDecal,
     mossDecal,
     forestGround,
+    gardenSoil,
     lanternPaper,
     contactShadow,
     plaqueLongxi,

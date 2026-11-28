@@ -1,11 +1,19 @@
 import * as THREE from 'three';
-import {
-  attachSubsurfaceShader,
-  getWoodcarveMicroMaps,
-  HANDCRAFTED_PAL,
-  type MaterialLibrary,
-} from './proceduralTextures';
+import { HANDCRAFTED_PAL, type MaterialLibrary } from './proceduralTextures';
 import { createSoftPillowGeometry, createTurnedLatheGeometry } from './sculptHelpers';
+import {
+  buildArticulatedArm,
+  buildArticulatedLeg,
+  buildHakkaLapelAndSash,
+  createCraftFabricMat,
+  createCraftSkinMat,
+  createCraftStrawMat,
+  createPleatedRobeGeometry,
+  damp,
+  populateCraftFace,
+  Spring1D,
+  VIRTUAL_MASS,
+} from './characterCraft';
 
 export interface PlayerAvatarRefs {
   root: THREE.Group;
@@ -24,13 +32,11 @@ export interface PlayerAvatarRefs {
 }
 
 /**
- * Builds the handcrafted playable 3D Hakka traveler avatar for GTA third-person exploration.
- * Matches the carved-wood / gouache picture-book aesthetic of livingWorldBuilder.ts with:
- * - Turned azure/indigo traveler tunic with vermilion trim & waist sash
- * - Articulated arms, legs, head with warm SSS skin & traditional topknot/band
- * - Slung bamboo traveler straw hat (斗笠) on the back (iconic silhouette from behind!)
- * - Soft radial contact shadow disc grounded at bottom-center (y = 0)
- * - Right-hand oil-paper umbrella mount synchronized with holdingUmbrella state
+ * High-craft playable 3D Hakka traveler avatar guided by `cinematic-slide-craft`:
+ * - Pleated woven indigo Hakka coat with diagonal lapel, frog buttons (盘扣), & layered cinnabar sash
+ * - Sculpted facial contours (jawline, cheekbones, nose bridge, eyebrows, glossy catchlight eyes, ears, smile)
+ * - 2-segment articulated arms (shoulder + elbow + flared cuffs) & legs (hip + knee + cloth shoes)
+ * - Virtual-mass spring secondary motion on dangling sash tails & slung bamboo traveler hat (斗笠)
  */
 export function buildPlayerAvatar(
   mats: MaterialLibrary,
@@ -52,66 +58,48 @@ export function buildPlayerAvatar(
     return m;
   };
 
-  const woodMicro = getWoodcarveMicroMaps();
-
-  const clothMat = (hex: number, sheenHex: number, rough = 0.82) =>
-    trackMat(
-      new THREE.MeshPhysicalMaterial({
-        color: hex,
-        normalMap: woodMicro.normal,
-        normalScale: new THREE.Vector2(0.12, 0.12),
-        roughnessMap: woodMicro.roughness,
-        roughness: rough,
-        metalness: 0.0,
-        sheen: 0.5,
-        sheenRoughness: 0.68,
-        sheenColor: new THREE.Color(sheenHex),
-      })
-    );
-
-  const woodPaintMat = (hex: number, rough = 0.74, metal = 0.04) =>
-    trackMat(
-      new THREE.MeshStandardMaterial({
-        color: hex,
-        normalMap: woodMicro.normal,
-        normalScale: new THREE.Vector2(0.14, 0.14),
-        roughnessMap: woodMicro.roughness,
-        roughness: rough,
-        metalness: metal,
-      })
-    );
-
-  const skinMat = attachSubsurfaceShader(
-    trackMat(
-      new THREE.MeshStandardMaterial({
-        color: HANDCRAFTED_PAL.skin,
-        normalMap: woodMicro.normal,
-        normalScale: new THREE.Vector2(0.08, 0.08),
-        roughness: 0.64,
-        metalness: 0.0,
-      })
-    ),
-    {
-      key: 'player_avatar_skin',
-      tintHex: 0xf8ad8a,
-      backStrength: 0.34,
-      wrapStrength: 0.25,
-      power: 2.8,
-    }
+  // Calibrated PBR tactile materials (woven fabric sheen, SSS skin, glossy iris, woven straw)
+  const skinMat = createCraftSkinMat('player_avatar_skin_v2', trackMat, HANDCRAFTED_PAL.skin);
+  const coatMat = createCraftFabricMat(0x275482, 0x88bce8, trackMat, 0.82, 0.62);
+  const trimMat = createCraftFabricMat(0xc8432d, 0xf2a182, trackMat, 0.74, 0.56);
+  const trouserMat = createCraftFabricMat(0x232b3b, 0x586882, trackMat, 0.86, 0.42);
+  const shoeMat = createCraftFabricMat(0x1f1d1b, 0x45403b, trackMat, 0.72, 0.35);
+  const soleMat = trackMat(new THREE.MeshStandardMaterial({ color: 0xe7dec8, roughness: 0.9 }));
+  const hairMat = trackMat(
+    new THREE.MeshPhysicalMaterial({
+      color: 0x1c1e28,
+      roughness: 0.42,
+      clearcoat: 0.25,
+      clearcoatRoughness: 0.45,
+    })
   );
+  const goldMat = trackMat(
+    new THREE.MeshStandardMaterial({ color: 0xe6b952, roughness: 0.26, metalness: 0.78 })
+  );
+  const jadeMat = trackMat(
+    new THREE.MeshPhysicalMaterial({
+      color: 0x4ea07c,
+      roughness: 0.22,
+      clearcoat: 0.7,
+      clearcoatRoughness: 0.16,
+    })
+  );
+  const strawMat = createCraftStrawMat(0xe7c980, trackMat, 0.78);
+  const strawRimMat = createCraftStrawMat(0xbe9046, trackMat, 0.72);
+  const eyeIrisMat = trackMat(
+    new THREE.MeshPhysicalMaterial({
+      color: 0x161820,
+      roughness: 0.1,
+      clearcoat: 1.0,
+      clearcoatRoughness: 0.08,
+    })
+  );
+  const scleraMat = trackMat(new THREE.MeshStandardMaterial({ color: 0xf7f2e8, roughness: 0.32 }));
+  const catchlightMat = trackMat(new THREE.MeshBasicMaterial({ color: 0xffffff }));
+  const cheekMat = trackMat(new THREE.MeshStandardMaterial({ color: 0xeb9484, roughness: 0.74 }));
+  const lipMat = trackMat(new THREE.MeshStandardMaterial({ color: 0xc96c5d, roughness: 0.58 }));
 
-  // Distinct, easy-to-read traveler palette against warm cream walls & slate stone
-  const coatMat = clothMat(0x285686, 0x7cb4e4, 0.8); // Indigo-cerulean Hakka traveler coat
-  const trimMat = clothMat(0xc9422c, 0xf29f7e, 0.72); // Cinnabar sash & lapel accent
-  const trouserMat = clothMat(0x232a38, 0x526178, 0.86); // Deep ink trousers
-  const shoeMat = woodPaintMat(0x1f1b18, 0.56);
-  const hairMat = woodPaintMat(0x20222c, 0.52);
-  const goldMat = woodPaintMat(0xe2b14c, 0.28, 0.72);
-  const strawMat = woodPaintMat(0xe8cb82, 0.8);
-  const strawRimMat = woodPaintMat(0xc0954b, 0.74);
-  const eyeMat = woodPaintMat(0x1c1d24, 0.35);
-
-  // Ground contact shadow disc (prevents floating look)
+  // Soft radial ground contact shadow
   const shadowCanvas = document.createElement('canvas');
   shadowCanvas.width = 64;
   shadowCanvas.height = 64;
@@ -132,7 +120,7 @@ export function buildPlayerAvatar(
       map: shadowTex,
       transparent: true,
       depthWrite: false,
-      opacity: 0.88,
+      opacity: 0.86,
     })
   );
   const contactShadow = new THREE.Mesh(shadowGeo, shadowMat);
@@ -143,56 +131,53 @@ export function buildPlayerAvatar(
   const bodyPivot = new THREE.Group();
   root.add(bodyPivot);
 
-  // Legs (pivoted at hip y = 0.68)
-  const legGeo = trackGeo(
-    createTurnedLatheGeometry(
-      [
-        [0.055, -0.62],
-        [0.072, -0.34],
-        [0.088, -0.06],
-        [0.078, 0.02],
-      ],
-      12
-    )
-  );
-  const shoeGeo = trackGeo(createSoftPillowGeometry(0.085, 0.055, 0.14, 10, 8));
+  // 2-Segment Articulated Legs (hip -> knee -> ankle + Hakka cloth shoes)
+  const leftLeg = buildArticulatedLeg({
+    side: -1,
+    hipPos: [-0.105, 0.70, 0],
+    thighLen: 0.34,
+    calfLen: 0.35,
+    faceSign: -1,
+    trouserMat,
+    shoeMat,
+    soleMat,
+    trackGeo,
+    castShadow,
+  });
+  const rightLeg = buildArticulatedLeg({
+    side: 1,
+    hipPos: [0.105, 0.70, 0],
+    thighLen: 0.34,
+    calfLen: 0.35,
+    faceSign: -1,
+    trouserMat,
+    shoeMat,
+    soleMat,
+    trackGeo,
+    castShadow,
+  });
+  bodyPivot.add(leftLeg.hip, rightLeg.hip);
 
-  const buildLeg = (side: -1 | 1) => {
-    const hip = new THREE.Group();
-    hip.position.set(side * 0.11, 0.68, 0);
-    const legMesh = new THREE.Mesh(legGeo, trouserMat);
-    legMesh.castShadow = castShadow;
-    hip.add(legMesh);
-
-    const shoe = new THREE.Mesh(shoeGeo, shoeMat);
-    shoe.position.set(0, -0.63, -0.035); // -Z is forward
-    shoe.castShadow = castShadow;
-    hip.add(shoe);
-
-    bodyPivot.add(hip);
-    return hip;
-  };
-  const leftLeg = buildLeg(-1);
-  const rightLeg = buildLeg(1);
-
-  // Torso & Hakka coat (pivoted at waist y = 0.68)
+  // Torso & Pleated Hakka Traveler Coat (pivoted at waist y = 0.70)
   const torsoPivot = new THREE.Group();
-  torsoPivot.position.y = 0.68;
+  torsoPivot.position.y = 0.70;
   bodyPivot.add(torsoPivot);
 
   const coatGeo = trackGeo(
-    createTurnedLatheGeometry(
+    createPleatedRobeGeometry(
       [
-        [0.01, -0.06],
-        [0.275, -0.06],
-        [0.26, 0.06],
-        [0.22, 0.24],
-        [0.235, 0.44],
-        [0.205, 0.57],
-        [0.12, 0.62],
-        [0.0, 0.62],
+        [0.01, -0.14],
+        [0.275, -0.14],
+        [0.255, 0.02],
+        [0.205, 0.21],
+        [0.232, 0.43],
+        [0.205, 0.56],
+        [0.118, 0.61],
+        [0.0, 0.61],
       ],
-      18
+      22,
+      10,
+      0.011
     )
   );
   const coatMesh = new THREE.Mesh(coatGeo, coatMat);
@@ -200,27 +185,27 @@ export function buildPlayerAvatar(
   coatMesh.receiveShadow = true;
   torsoPivot.add(coatMesh);
 
-  // Cinnabar waist sash + jade pendant
-  const sashGeo = trackGeo(new THREE.TorusGeometry(0.228, 0.036, 10, 22));
-  sashGeo.rotateX(Math.PI * 0.5);
-  const sashMesh = new THREE.Mesh(sashGeo, trimMat);
-  sashMesh.position.y = 0.21;
-  sashMesh.castShadow = castShadow;
-  torsoPivot.add(sashMesh);
+  // Layered Hakka diagonal lapel, frog buttons, waist sash & physics-swayed sash tails
+  const { sashTailL, sashTailR } = buildHakkaLapelAndSash({
+    parent: torsoPivot,
+    faceSign: -1,
+    waistY: 0.21,
+    chestY: 0.44,
+    radius: 0.218,
+    trimMat,
+    buttonMat: goldMat,
+    trackGeo,
+    castShadow,
+  });
 
-  const sashTailGeo = trackGeo(createSoftPillowGeometry(0.055, 0.16, 0.022, 8, 6));
-  const sashTail = new THREE.Mesh(sashTailGeo, trimMat);
-  sashTail.position.set(0.14, 0.08, 0.18);
-  sashTail.rotation.z = -0.18;
-  torsoPivot.add(sashTail);
+  // Carved jade waist pendant hanging beside the sash knot
+  const jadeDisc = new THREE.Mesh(trackGeo(new THREE.TorusGeometry(0.026, 0.009, 8, 16)), jadeMat);
+  jadeDisc.position.set(-0.11, 0.14, -0.20);
+  torsoPivot.add(jadeDisc);
 
-  const collarGeo = trackGeo(new THREE.TorusGeometry(0.125, 0.026, 8, 18));
-  collarGeo.rotateX(Math.PI * 0.5);
-  const collarMesh = new THREE.Mesh(collarGeo, trimMat);
-  collarMesh.position.y = 0.59;
-  torsoPivot.add(collarMesh);
-
-  // Iconic Bamboo Traveler Hat (斗笠) slung across the back (distinctive silhouette & detail!)
+  // Iconic Bamboo Traveler Hat (斗笠) slung across the back with spring-swayed pivot
+  const hatPivot = new THREE.Group();
+  hatPivot.position.set(0.01, 0.37, 0.215);
   const douliGeo = trackGeo(
     createTurnedLatheGeometry(
       [
@@ -231,139 +216,135 @@ export function buildPlayerAvatar(
         [0.02, 0.185],
         [0.0, 0.195],
       ],
-      20
+      22
     )
   );
   const hatGroup = new THREE.Group();
-  hatGroup.position.set(0.01, 0.37, 0.215);
-  hatGroup.rotation.set(Math.PI * 0.45, 0, 0.14);
+  hatGroup.rotation.set(Math.PI * 0.45, 0, 0.12);
   hatGroup.scale.setScalar(0.62);
   const hatCrown = new THREE.Mesh(douliGeo, strawMat);
   hatCrown.castShadow = castShadow;
   hatGroup.add(hatCrown);
   const hatRimGeo = trackGeo(new THREE.TorusGeometry(0.365, 0.016, 8, 22));
   hatRimGeo.rotateX(Math.PI * 0.5);
-  const hatRim = new THREE.Mesh(hatRimGeo, strawRimMat);
-  hatGroup.add(hatRim);
-  const hatCordGeo = trackGeo(new THREE.TorusGeometry(0.12, 0.012, 6, 14));
+  hatGroup.add(new THREE.Mesh(hatRimGeo, strawRimMat));
+  const hatCordGeo = trackGeo(new THREE.TorusGeometry(0.12, 0.013, 6, 14));
   hatCordGeo.rotateX(Math.PI * 0.5);
   const hatCord = new THREE.Mesh(hatCordGeo, trimMat);
   hatCord.position.y = 0.13;
   hatGroup.add(hatCord);
-  torsoPivot.add(hatGroup);
+  hatPivot.add(hatGroup);
+  torsoPivot.add(hatPivot);
 
-  // Arms (pivoted at shoulders y = 0.52 relative to torsoPivot)
-  const sleeveGeo = trackGeo(
-    createTurnedLatheGeometry(
-      [
-        [0.068, 0.0],
-        [0.082, -0.1],
-        [0.072, -0.32],
-        [0.084, -0.46],
-        [0.042, -0.49],
-      ],
-      12
-    )
-  );
-  const handGeo = trackGeo(new THREE.SphereGeometry(0.056, 10, 8));
+  // 2-Segment Articulated Arms (shoulder + elbow + flared sleeve cuffs + hands)
+  const leftArm = buildArticulatedArm({
+    side: -1,
+    shoulderPos: [-0.242, 0.51, 0],
+    upperLen: 0.24,
+    lowerLen: 0.24,
+    sleeveMat: coatMat,
+    cuffMat: trimMat,
+    skinMat,
+    trackGeo,
+    castShadow,
+  });
+  const rightArm = buildArticulatedArm({
+    side: 1,
+    shoulderPos: [0.242, 0.51, 0],
+    upperLen: 0.24,
+    lowerLen: 0.24,
+    sleeveMat: coatMat,
+    cuffMat: trimMat,
+    skinMat,
+    trackGeo,
+    castShadow,
+  });
+  torsoPivot.add(leftArm.shoulder, rightArm.shoulder);
 
-  const buildArm = (side: -1 | 1) => {
-    const shoulder = new THREE.Group();
-    shoulder.position.set(side * 0.245, 0.51, 0);
-    const sleeve = new THREE.Mesh(sleeveGeo, coatMat);
-    sleeve.castShadow = castShadow;
-    shoulder.add(sleeve);
-
-    const hand = new THREE.Mesh(handGeo, skinMat);
-    hand.position.y = -0.5;
-    shoulder.add(hand);
-
-    torsoPivot.add(shoulder);
-    return shoulder;
-  };
-  const leftArm = buildArm(-1);
-  const rightArm = buildArm(1);
-
-  // Oil-Paper Umbrella attached to right hand (visible when holdingUmbrella === true)
+  // Oil-Paper Umbrella attached cleanly to right forearm/hand
   const umbrellaInHand = new THREE.Group();
-  umbrellaInHand.position.set(0.02, -0.48, -0.05);
-  umbrellaInHand.rotation.set(-0.22, 0, -0.1);
-  const umbPoleGeo = trackGeo(new THREE.CylinderGeometry(0.014, 0.016, 1.15, 8));
+  umbrellaInHand.position.set(0.01, -0.02, -0.04);
+  umbrellaInHand.rotation.set(-0.24, 0, -0.08);
+  const umbPoleGeo = trackGeo(new THREE.CylinderGeometry(0.014, 0.016, 1.18, 8));
   const umbPole = new THREE.Mesh(umbPoleGeo, mats.darkTimber);
-  umbPole.position.y = 0.48;
+  umbPole.position.y = 0.50;
   umbPole.castShadow = castShadow;
   umbrellaInHand.add(umbPole);
 
-  const umbCanopyGeo = trackGeo(new THREE.ConeGeometry(0.68, 0.24, 14, 1, true));
+  const umbCanopyGeo = trackGeo(new THREE.ConeGeometry(0.70, 0.25, 16, 1, true));
   const umbCanopyMat = trackMat(
-    new THREE.MeshStandardMaterial({
+    new THREE.MeshPhysicalMaterial({
       color: 0xc9422c,
-      roughness: 0.44,
+      roughness: 0.42,
+      clearcoat: 0.32,
+      clearcoatRoughness: 0.32,
       side: THREE.DoubleSide,
     })
   );
   const umbCanopy = new THREE.Mesh(umbCanopyGeo, umbCanopyMat);
-  umbCanopy.position.y = 1.02;
+  umbCanopy.position.y = 1.05;
   umbCanopy.castShadow = castShadow;
   umbrellaInHand.add(umbCanopy);
   umbrellaInHand.visible = false;
-  rightArm.add(umbrellaInHand);
+  rightArm.hand.add(umbrellaInHand);
 
-  // Head & Hair (pivoted at neck y = 0.65 relative to torsoPivot -> world y ~ 1.48)
+  // Sculpted Head & Hair (pivoted at neck y = 0.77 relative to torsoPivot)
   const headPivot = new THREE.Group();
   headPivot.position.set(0, 0.77, 0);
   torsoPivot.add(headPivot);
 
-  const headGeo = trackGeo(
-    createTurnedLatheGeometry(
-      [
-        [0.0, -0.175],
-        [0.085, -0.165],
-        [0.145, -0.11],
-        [0.172, -0.02],
-        [0.17, 0.08],
-        [0.138, 0.15],
-        [0.072, 0.184],
-        [0.0, 0.194],
-      ],
-      16
-    )
-  );
-  const headMesh = new THREE.Mesh(headGeo, skinMat);
-  headMesh.castShadow = castShadow;
-  headPivot.add(headMesh);
+  populateCraftFace(headPivot, {
+    faceSign: -1,
+    skinMat,
+    hairMat,
+    cheekMat,
+    lipMat,
+    eyeIrisMat,
+    scleraMat,
+    catchlightMat,
+    trackGeo,
+    castShadow,
+  });
 
-  // Hair cap + topknot bun + antique gold hairpin
+  // Layered hair cap, sideburn locks, topknot bun & gold hairpin
   const hairCapGeo = trackGeo(
-    new THREE.SphereGeometry(0.178, 14, 10, 0, Math.PI * 2, 0, Math.PI * 0.56)
+    new THREE.SphereGeometry(0.168, 16, 12, 0, Math.PI * 2, 0, Math.PI * 0.58)
   );
   const hairCap = new THREE.Mesh(hairCapGeo, hairMat);
-  hairCap.position.set(0, 0.025, 0.015);
-  hairCap.rotation.x = 0.14;
+  hairCap.position.set(0, 0.028, 0.016);
+  hairCap.rotation.x = 0.16;
   headPivot.add(hairCap);
 
-  const bunGeo = trackGeo(new THREE.SphereGeometry(0.068, 12, 10));
-  const bun = new THREE.Mesh(bunGeo, hairMat);
-  bun.position.set(0, 0.21, 0.025);
+  const backHair = new THREE.Mesh(
+    trackGeo(createSoftPillowGeometry(0.135, 0.11, 0.075, 10, 8)),
+    hairMat
+  );
+  backHair.position.set(0, -0.02, 0.105);
+  headPivot.add(backHair);
+
+  const bun = new THREE.Mesh(trackGeo(new THREE.SphereGeometry(0.064, 12, 10)), hairMat);
+  bun.position.set(0, 0.205, 0.025);
   bun.castShadow = castShadow;
   headPivot.add(bun);
 
-  const pinGeo = trackGeo(new THREE.CylinderGeometry(0.008, 0.008, 0.19, 8));
+  const hairBand = new THREE.Mesh(trackGeo(new THREE.TorusGeometry(0.064, 0.011, 6, 14)), trimMat);
+  hairBand.rotation.x = Math.PI * 0.5;
+  hairBand.position.set(0, 0.175, 0.025);
+  headPivot.add(hairBand);
+
+  const pinGeo = trackGeo(new THREE.CylinderGeometry(0.0075, 0.0075, 0.19, 8));
   pinGeo.rotateZ(Math.PI * 0.5);
   const pin = new THREE.Mesh(pinGeo, goldMat);
-  pin.position.set(0, 0.21, 0.025);
+  pin.position.set(0, 0.205, 0.025);
   headPivot.add(pin);
 
-  // Expressive eyes on -Z face (visible when walking toward camera or pressing Look-Back!)
-  const eyeGeo = trackGeo(new THREE.SphereGeometry(0.018, 8, 8));
-  for (const sx of [-0.058, 0.058]) {
-    const eye = new THREE.Mesh(eyeGeo, eyeMat);
-    eye.position.set(sx, 0.015, -0.156);
-    headPivot.add(eye);
-  }
-
+  // Secondary spring-physics states (cinematic-slide-craft Virtual Mass Layering)
   let currentLeanZ = 0;
   let currentPitchX = 0;
+  let currentHeadYaw = 0;
+  const sashSpringX = new Spring1D(0, VIRTUAL_MASS.clothStiffness, VIRTUAL_MASS.clothDamping);
+  const sashSpringZ = new Spring1D(0, VIRTUAL_MASS.clothStiffness, VIRTUAL_MASS.clothDamping);
+  const hatSpring = new Spring1D(0, 95, 11);
 
   return {
     root,
@@ -371,45 +352,84 @@ export function buildPlayerAvatar(
     update: (dt, horizSpeed, isSprinting, walkPhase, turnRate, holdingUmbrella, timeSec) => {
       umbrellaInHand.visible = holdingUmbrella;
 
-      const strideNorm = Math.min(1.25, horizSpeed / 5.4);
+      const strideNorm = Math.min(1.25, horizSpeed / 5.2);
       const isMoving = horizSpeed > 0.15;
 
-      // Leg & arm gait swing synchronized to walkPhase (distance-driven, zero skating!)
-      const legAmp = isMoving ? (isSprinting ? 0.68 : 0.48) * Math.min(1, strideNorm) : 0;
-      const armAmp = isMoving ? (isSprinting ? 0.62 : 0.42) * Math.min(1, strideNorm) : 0;
+      // 2-Segment Leg & Knee Gait Articulation (natural knee flex on rear swing & lift!)
+      const legAmp = isMoving ? (isSprinting ? 0.66 : 0.46) * Math.min(1, strideNorm) : 0;
+      const armAmp = isMoving ? (isSprinting ? 0.58 : 0.40) * Math.min(1, strideNorm) : 0;
 
-      const targetLeftLeg = Math.sin(walkPhase) * legAmp;
-      const targetRightLeg = -Math.sin(walkPhase) * legAmp;
-      const targetLeftArm = -Math.sin(walkPhase) * armAmp;
-      const targetRightArm = holdingUmbrella ? -0.58 : Math.sin(walkPhase) * armAmp;
+      const sinP = Math.sin(walkPhase);
+      const targetLeftHip = sinP * legAmp;
+      const targetRightHip = -sinP * legAmp;
+      // Knees bend backward (+X rotation since avatar faces -Z!) during leg swing recovery
+      const targetLeftKnee = isMoving ? Math.max(0, -Math.cos(walkPhase)) * (isSprinting ? 0.72 : 0.44) * Math.min(1, strideNorm) : 0.04;
+      const targetRightKnee = isMoving ? Math.max(0, Math.cos(walkPhase)) * (isSprinting ? 0.72 : 0.44) * Math.min(1, strideNorm) : 0.04;
 
-      const limbSmooth = 1 - Math.exp(-16 * dt);
-      leftLeg.rotation.x += (targetLeftLeg - leftLeg.rotation.x) * limbSmooth;
-      rightLeg.rotation.x += (targetRightLeg - rightLeg.rotation.x) * limbSmooth;
-      leftArm.rotation.x += (targetLeftArm - leftArm.rotation.x) * limbSmooth;
-      rightArm.rotation.x += (targetRightArm - rightArm.rotation.x) * limbSmooth;
+      const targetLeftShoulder = -sinP * armAmp;
+      const targetRightShoulder = holdingUmbrella ? -0.54 : sinP * armAmp;
+      // Elbows bend naturally forward (-X since -Z is forward)
+      const targetLeftElbow = isMoving ? -(0.22 + Math.max(0, -sinP) * (isSprinting ? 0.58 : 0.34)) : -0.14;
+      const targetRightElbow = holdingUmbrella
+        ? -0.68
+        : isMoving
+          ? -(0.22 + Math.max(0, sinP) * (isSprinting ? 0.58 : 0.34))
+          : -0.14;
 
-      // Subtle lateral arm clearance while moving
-      leftArm.rotation.z = 0.08 + strideNorm * 0.06;
-      rightArm.rotation.z = holdingUmbrella ? -0.08 : -0.08 - strideNorm * 0.06;
+      leftLeg.hip.rotation.x = damp(leftLeg.hip.rotation.x, targetLeftHip, VIRTUAL_MASS.limbLambda, dt);
+      rightLeg.hip.rotation.x = damp(rightLeg.hip.rotation.x, targetRightHip, VIRTUAL_MASS.limbLambda, dt);
+      leftLeg.knee.rotation.x = damp(leftLeg.knee.rotation.x, targetLeftKnee, VIRTUAL_MASS.limbLambda, dt);
+      rightLeg.knee.rotation.x = damp(rightLeg.knee.rotation.x, targetRightKnee, VIRTUAL_MASS.limbLambda, dt);
 
-      // Vertical stride bounce + idle breathing
+      leftArm.shoulder.rotation.x = damp(leftArm.shoulder.rotation.x, targetLeftShoulder, VIRTUAL_MASS.limbLambda, dt);
+      rightArm.shoulder.rotation.x = damp(rightArm.shoulder.rotation.x, targetRightShoulder, VIRTUAL_MASS.limbLambda, dt);
+      leftArm.elbow.rotation.x = damp(leftArm.elbow.rotation.x, targetLeftElbow, VIRTUAL_MASS.limbLambda, dt);
+      rightArm.elbow.rotation.x = damp(rightArm.elbow.rotation.x, targetRightElbow, VIRTUAL_MASS.limbLambda, dt);
+
+      leftArm.shoulder.rotation.z = 0.07 + strideNorm * 0.06;
+      rightArm.shoulder.rotation.z = holdingUmbrella ? -0.08 : -0.07 - strideNorm * 0.06;
+
+      // Vertical stride bounce + subtle torso breathing scale
+      const breath = Math.sin(timeSec * 2.15);
       const strideBob = isMoving
-        ? Math.abs(Math.sin(walkPhase)) * (isSprinting ? 0.065 : 0.04) * Math.min(1, strideNorm)
-        : Math.sin(timeSec * 2.1) * 0.01;
+        ? Math.abs(sinP) * (isSprinting ? 0.062 : 0.038) * Math.min(1, strideNorm)
+        : breath * 0.008;
       bodyPivot.position.y = strideBob;
+      coatMesh.scale.set(1 + breath * 0.008, 1, 1 + breath * 0.012);
 
-      // Forward sprint lean & GTA-style turn banking
-      const targetPitchX = isMoving ? (isSprinting ? -0.14 : -0.06) * Math.min(1, strideNorm) : 0;
-      const targetLeanZ = THREE.MathUtils.clamp(-turnRate * 0.08, -0.16, 0.16);
-      currentPitchX = THREE.MathUtils.damp(currentPitchX, targetPitchX, 10, dt);
-      currentLeanZ = THREE.MathUtils.damp(currentLeanZ, targetLeanZ, 10, dt);
+      // Forward sprint lean, counter-twist torso yaw, & GTA turn banking
+      const targetPitchX = isMoving ? (isSprinting ? -0.13 : -0.055) * Math.min(1, strideNorm) : 0;
+      const targetLeanZ = THREE.MathUtils.clamp(-turnRate * 0.08, -0.15, 0.15);
+      currentPitchX = damp(currentPitchX, targetPitchX, VIRTUAL_MASS.torsoLambda, dt);
+      currentLeanZ = damp(currentLeanZ, targetLeanZ, VIRTUAL_MASS.torsoLambda, dt);
       torsoPivot.rotation.x = currentPitchX;
+      torsoPivot.rotation.y = isMoving ? sinP * 0.08 * Math.min(1, strideNorm) : 0;
       bodyPivot.rotation.z = currentLeanZ;
 
-      // Subtle head sway / breathing counterbalance
-      headPivot.rotation.x = -currentPitchX * 0.55;
-      headPivot.rotation.y = THREE.MathUtils.clamp(turnRate * 0.12, -0.3, 0.3);
+      // Smooth head counterbalance & lead-turn
+      currentHeadYaw = damp(
+        currentHeadYaw,
+        THREE.MathUtils.clamp(turnRate * 0.14, -0.32, 0.32),
+        VIRTUAL_MASS.headLambda,
+        dt
+      );
+      headPivot.rotation.x = -currentPitchX * 0.55 + breath * 0.015;
+      headPivot.rotation.y = currentHeadYaw;
+
+      // Secondary spring-physics sway on sash tails & back-slung bamboo Douli hat
+      const sashTargetX = isMoving ? 0.18 * Math.min(1.2, strideNorm) + Math.abs(sinP) * 0.12 : Math.sin(timeSec * 1.4) * 0.04;
+      const sashTargetZ = THREE.MathUtils.clamp(turnRate * 0.16, -0.32, 0.32) + Math.cos(timeSec * 1.8) * 0.03;
+      const sx = sashSpringX.step(sashTargetX, dt);
+      const sz = sashSpringZ.step(sashTargetZ, dt);
+      sashTailL.rotation.set(sx, 0, sz - 0.08);
+      sashTailR.rotation.set(sx * 0.85, 0, sz + 0.12);
+
+      const hatBounce = hatSpring.step(
+        isMoving ? -0.06 * Math.abs(sinP) * Math.min(1, strideNorm) : Math.sin(timeSec * 1.6) * 0.015,
+        dt
+      );
+      hatPivot.rotation.x = hatBounce;
+      hatPivot.rotation.z = sz * 0.38;
     },
     setVisible: (visible: boolean) => {
       root.visible = visible;

@@ -43,6 +43,7 @@ import {
   normalizeHour,
 } from './dayNightCycle';
 import { evaluateLivingBehavior } from './livingBehavior';
+import { computeLightningEnvelope, isUnderRoof } from './weatherPhysics';
 import {
   GTA_CAMERA_PRESETS,
   computeCameraRelativeMove,
@@ -166,11 +167,29 @@ export class WeilongSceneController {
     uTwilight: { value: number };
     uRain: { value: number };
     uTime: { value: number };
+    uLightning: { value: number };
+    uLightningDir: { value: THREE.Vector3 };
   };
   private cloudGroup: THREE.Group;
-  private cloudTopMat: THREE.MeshBasicMaterial;
-  private cloudBotMat: THREE.MeshBasicMaterial;
-  private rainPoints: THREE.Points;
+  private cloudUniforms: {
+    uTopCol: { value: THREE.Color };
+    uBotCol: { value: THREE.Color };
+    uSunDir: { value: THREE.Vector3 };
+    uRain: { value: number };
+    uOpacity: { value: number };
+    uTime: { value: number };
+    uLightning: { value: number };
+    uLightningDir: { value: THREE.Vector3 };
+  };
+  private cloudVolumetricMat: THREE.ShaderMaterial;
+  private rainStreaks: THREE.LineSegments;
+  private rainStreakData: Float32Array = new Float32Array(0);
+  private lightningElapsed = 10;
+  private lightningActive = false;
+  private lightningIntensity = 0;
+  private nextLightningInSec = 5.5;
+  private lightningSeed = 17;
+  private readonly lightningTintColor = new THREE.Color(0xcde0ff);
   private fireflyPoints: THREE.Points;
   private umbrellaHeldGroup: THREE.Group;
 
@@ -321,6 +340,8 @@ export class WeilongSceneController {
       uTwilight: { value: 0.0 },
       uRain: { value: 0.0 },
       uTime: { value: 0.0 },
+      uLightning: { value: 0.0 },
+      uLightningDir: { value: new THREE.Vector3(-0.35, 0.42, -0.82).normalize() },
     };
     const poeticSkyMat = new THREE.ShaderMaterial({
       uniforms: this.skyUniforms,
@@ -349,6 +370,8 @@ export class WeilongSceneController {
         uniform float uTwilight;
         uniform float uRain;
         uniform float uTime;
+        uniform float uLightning;
+        uniform vec3 uLightningDir;
         varying vec3 vDir;
 
         float sHash(vec2 p) {
@@ -370,10 +393,10 @@ export class WeilongSceneController {
           float v = 0.0;
           float a = 0.52;
           mat2 rot = mat2(0.80, -0.60, 0.60, 0.80);
-          for (int i = 0; i < 4; i++) {
+          for (int i = 0; i < 5; i++) {
             v += a * vNoise(p);
-            p = rot * p * 2.06 + vec2(1.7, -0.9);
-            a *= 0.48;
+            p = rot * p * 2.04 + vec2(1.7, -0.9);
+            a *= 0.49;
           }
           return v;
         }
@@ -394,33 +417,91 @@ export class WeilongSceneController {
           // Mie forward scatter & golden/crimson dawn-dusk twilight ribbon (晨昏霞光)
           float mieScatter = pow(sDot, 4.0) * 0.34 + pow(sDot, 16.0) * 0.28;
           col = mix(col, uHs, horizonBand * (0.24 + 0.46 * pow(sDot, 2.0)) * (uSunStr + uTwilight * 0.65));
-          col += uTwilightCol * horizonBand * (0.36 + 0.52 * pow(sDot, 1.8)) * uTwilight * (1.0 - uRain * 0.7);
+          col += uTwilightCol * horizonBand * (0.36 + 0.52 * pow(sDot, 1.8)) * uTwilight * (1.0 - uRain * 0.75);
           col += uHs * mieScatter * uSunStr * 0.45;
 
-          // Crisp golden painted sun disc & luminous atmospheric corona
+          // Crisp golden painted sun disc & luminous atmospheric corona (softly veiled in storm)
           if (uSunStr > 0.01) {
             float halo = pow(sDot, 28.0) * 0.42 + pow(sDot, 180.0) * 0.92;
             float disc = smoothstep(0.9987, 0.99935, sDot);
             col += mix(vec3(1.0, 0.95, 0.82), vec3(1.0, 0.72, 0.44), uTwilight * 0.75) * (halo + disc * 1.55) * uSunStr;
           }
 
-          // Layered drifting high-altitude wispy cirrus & altocumulus clouds
-          if (y > 0.02) {
-            vec2 skyUv = d.xz / (y + 0.26);
-            vec2 driftA = skyUv * 0.62 + vec2(uTime * 0.0045, uTime * 0.0018);
-            vec2 driftB = skyUv * 1.28 + vec2(-uTime * 0.0032, uTime * 0.0028);
-            float wisp = cloudFbm(driftA) * 0.65 + cloudFbm(driftB) * 0.35;
-            float coverage = mix(0.51, 0.34, uRain);
-            float cloudMask = smoothstep(coverage, coverage + 0.28, wisp) * smoothstep(0.02, 0.16, y) * (1.0 - smoothstep(0.75, 0.98, y) * 0.35);
+          // Multi-layer volumetric sky clouds: airy sunlit cirrus in sunny mode;
+          // rich billowing, domain-warped multi-tier storm clouds with sheet lightning in rain mode!
+          if (y > 0.015) {
+            vec2 skyUv = d.xz / (y + 0.24);
+            float horizonFade = smoothstep(0.015, 0.16, y);
 
-            // Sunlit rim & warm twilight underside tint on clouds
-            vec3 cloudLit = mix(vec3(0.99, 0.97, 0.92), uTwilightCol * 1.15, uTwilight * 0.82);
-            cloudLit = mix(cloudLit, vec3(0.28, 0.36, 0.52), uStarStr * 0.88);
-            cloudLit = mix(cloudLit, vec3(0.74, 0.80, 0.83) * mix(0.32, 1.0, 1.0 - uStarStr), uRain * 0.85);
-            vec3 cloudShade = mix(uMid * 0.95, vec3(0.14, 0.20, 0.34), uStarStr * 0.85);
+            // Sunny high-altitude wispy cumulus layer
+            vec2 driftA = skyUv * 0.58 + vec2(uTime * 0.0045, uTime * 0.0018);
+            vec2 driftB = skyUv * 1.24 + vec2(-uTime * 0.0032, uTime * 0.0028);
+            float wisp = cloudFbm(driftA) * 0.65 + cloudFbm(driftB) * 0.35;
+            float sunnyMask = smoothstep(0.50, 0.78, wisp) * horizonFade * (1.0 - smoothstep(0.75, 0.98, y) * 0.35);
+
+            vec3 sunnyLit = mix(vec3(0.99, 0.97, 0.92), uTwilightCol * 1.15, uTwilight * 0.82);
+            sunnyLit = mix(sunnyLit, vec3(0.28, 0.36, 0.52), uStarStr * 0.88);
+            vec3 sunnyShade = mix(uMid * 0.94, vec3(0.14, 0.20, 0.34), uStarStr * 0.85);
             float sunRim = smoothstep(0.35, 0.95, sDot) * (uSunStr + uTwilight * 0.8);
-            vec3 cloudCol = mix(cloudShade, cloudLit, 0.58 + 0.42 * sunRim);
-            col = mix(col, cloudCol, cloudMask * mix(0.42, 0.62, uRain));
+            vec3 sunnyCol = mix(sunnyShade, sunnyLit, 0.58 + 0.42 * sunRim);
+            col = mix(col, sunnyCol, sunnyMask * 0.42 * (1.0 - uRain * 0.75));
+
+            // Volumetric multi-layer brooding storm clouds (high-contrast billowing cumulonimbus deck)
+            if (uRain > 0.02) {
+              vec2 windVec = vec2(uTime * 0.016, uTime * 0.007);
+              // Domain warp for organic rolling Lingnan thunderstorm eddies
+              vec2 warp = vec2(
+                cloudFbm(skyUv * 0.46 + windVec * 0.65 + vec2(2.3, -1.1)),
+                cloudFbm(skyUv * 0.46 - windVec * 0.45 + vec2(-3.7, 4.2))
+              );
+              vec2 stormUvHi = skyUv * 0.56 + windVec * 0.48 + (warp - 0.5) * 0.68;
+              vec2 stormUvMid = skyUv * 0.98 + windVec * 0.95 + (warp - 0.5) * 0.88;
+              vec2 stormUvLo = skyUv * 1.55 + windVec * 1.42 + (warp - 0.5) * 0.72;
+
+              float rawHi = cloudFbm(stormUvHi);
+              float rawMid = cloudFbm(stormUvMid);
+              float rawLo = cloudFbm(stormUvLo);
+              // Stretch narrow FBM distribution around 0.5 for rich, sculptural billowing cloud relief
+              float upperCover = smoothstep(0.37, 0.67, rawHi);
+              float midBillow = smoothstep(0.40, 0.68, rawMid);
+              float lowBelly = smoothstep(0.44, 0.71, rawLo);
+
+              // Directional offset sample for authentic top-crest silver light vs heavy dark rain-belly relief
+              float rawMidLit = cloudFbm(stormUvMid + vec2(0.065, 0.055));
+              float crestRelief = clamp((rawMid - rawMidLit) * 5.2 + 0.52, 0.0, 1.0);
+              float stormDensity = clamp(upperCover * 0.78 + midBillow * 0.55 + lowBelly * 0.45, 0.0, 1.0);
+
+              float dayBright = mix(0.24, 1.0, 1.0 - uStarStr);
+              // Luminous silver-blue cloud breaks, cool slate-indigo mid-layers, brooding charcoal thunderhead bellies
+              vec3 stormGap = vec3(0.70, 0.77, 0.83) * dayBright;
+              vec3 stormSilver = vec3(0.54, 0.61, 0.68) * dayBright;
+              vec3 stormSlate = vec3(0.28, 0.34, 0.42) * dayBright;
+              vec3 stormBelly = vec3(0.13, 0.17, 0.24) * dayBright;
+
+              vec3 stormCol = mix(stormGap, stormSilver, upperCover);
+              stormCol = mix(stormCol, stormSlate, midBillow * (0.55 + 0.45 * (1.0 - crestRelief)));
+              stormCol = mix(stormCol, stormBelly, lowBelly * (0.68 + 0.32 * (1.0 - crestRelief)));
+              // Silver-rimmed cloud crests catching diffused high-altitude skylight
+              float silverRim = midBillow * (1.0 - lowBelly * 0.75) * smoothstep(0.52, 0.92, crestRelief);
+              stormCol += vec3(0.24, 0.28, 0.32) * silverRim * dayBright;
+
+              // Natural localized intra-cloud sheet lightning glow illuminating cloud crevices from within!
+              if (uLightning > 0.005) {
+                float lAlign = max(dot(d, normalize(uLightningDir)), 0.0);
+                float sheetCone = pow(lAlign, 4.5) * 0.85 + pow(lAlign, 18.0) * 0.95;
+                float creviceScatter = (0.35 + 0.65 * (1.0 - lowBelly * 0.7)) * (0.55 + 0.45 * crestRelief);
+                vec3 flashTint = vec3(0.76, 0.84, 1.0);
+                stormCol += flashTint * uLightning * (0.14 + sheetCone * 1.15) * creviceScatter;
+              }
+
+              // Keep storm cloud banks clearly sculpted down to low elevation angles right above roofline
+              float mistMask = smoothstep(0.01, 0.11, y);
+              col = mix(col, stormCol, stormDensity * mistMask * uRain * 0.96);
+              // Subtle distant horizon glow during lightning
+              if (uLightning > 0.005) {
+                col += vec3(0.20, 0.24, 0.32) * uLightning * (1.0 - mistMask) * 0.45 * uRain;
+              }
+            }
           }
 
           // Detailed full moon with lunar maria & cool silver corona at night
@@ -481,20 +562,93 @@ export class WeilongSceneController {
     this.poeticSky = new THREE.Mesh(new THREE.SphereGeometry(250, 36, 22), poeticSkyMat);
     this.scene.add(this.poeticSky);
 
-    // Sculpted Painterly Cotton Clouds (softly transparent so night stars shine cleanly)
-    this.cloudTopMat = new THREE.MeshBasicMaterial({
-      color: 0xfff8e8,
-      fog: true,
+    // Volumetric Multi-Shaded 3D Clouds (sunlit billowing cotton in clear weather; brooding layered storm clouds in rain)
+    this.cloudUniforms = {
+      uTopCol: { value: new THREE.Color(0xfff8e8) },
+      uBotCol: { value: new THREE.Color(0xefd3bc) },
+      uSunDir: { value: new THREE.Vector3(46, 36, 32).normalize() },
+      uRain: { value: 0.0 },
+      uOpacity: { value: 0.9 },
+      uTime: { value: 0.0 },
+      uLightning: { value: 0.0 },
+      uLightningDir: { value: new THREE.Vector3(-0.35, 0.42, -0.82).normalize() },
+    };
+    this.cloudVolumetricMat = new THREE.ShaderMaterial({
+      uniforms: this.cloudUniforms,
       transparent: true,
-      opacity: 0.9,
       depthWrite: false,
-    });
-    this.cloudBotMat = new THREE.MeshBasicMaterial({
-      color: 0xefd3bc,
-      fog: true,
-      transparent: true,
-      opacity: 0.86,
-      depthWrite: false,
+      vertexShader: /* glsl */ `
+        varying vec3 vWorldPos;
+        varying vec3 vWorldNormal;
+        varying float vLocalY;
+        uniform float uTime;
+        uniform float uRain;
+        void main() {
+          vec3 pos = position;
+          // Gentle organic slow billowing heave in wind
+          float puff = sin(pos.x * 1.4 + uTime * 0.25) * cos(pos.z * 1.2 - uTime * 0.18) * (0.06 + uRain * 0.08);
+          pos += normal * puff;
+          vLocalY = position.y;
+          vec4 wp = modelMatrix * vec4(pos, 1.0);
+          vWorldPos = wp.xyz;
+          vWorldNormal = normalize(mat3(modelMatrix) * normal);
+          gl_Position = projectionMatrix * viewMatrix * wp;
+        }
+      `,
+      fragmentShader: /* glsl */ `
+        uniform vec3 uTopCol;
+        uniform vec3 uBotCol;
+        uniform vec3 uSunDir;
+        uniform float uRain;
+        uniform float uOpacity;
+        uniform float uTime;
+        uniform float uLightning;
+        uniform vec3 uLightningDir;
+        varying vec3 vWorldPos;
+        varying vec3 vWorldNormal;
+        varying float vLocalY;
+
+        float cNoise(vec3 p) {
+          return fract(sin(dot(p, vec3(12.9898, 78.233, 37.719))) * 43758.5453);
+        }
+
+        void main() {
+          vec3 N = normalize(vWorldNormal);
+          vec3 V = normalize(cameraPosition - vWorldPos);
+          vec3 L = normalize(uSunDir);
+
+          // Volumetric top-crest vs heavy shaded underbelly gradient
+          float upGrad = smoothstep(-0.65, 0.78, N.y * 0.72 + vLocalY * 0.35);
+          float sunWrap = clamp(dot(N, L) * 0.48 + 0.52, 0.0, 1.0);
+          // Subtle billowing internal density variation (eliminates flat grey polygon look)
+          float billow = 0.5 + 0.5 * sin(vWorldPos.x * 0.11 + uTime * 0.08) * cos(vWorldPos.z * 0.09 - uTime * 0.06 + vWorldPos.y * 0.16);
+          float shadeMix = clamp(upGrad * 0.68 + sunWrap * 0.32 * (1.0 - uRain * 0.45) + (billow - 0.5) * 0.18, 0.0, 1.0);
+
+          vec3 col = mix(uBotCol, uTopCol, shadeMix);
+          // Delicate silver-blue sunlit rim scattering along cloud edges in storm
+          float rim = pow(1.0 - abs(dot(N, V)), 2.2);
+          col += mix(uTopCol * 0.14, vec3(0.22, 0.28, 0.34), uRain) * rim * (0.4 + 0.6 * upGrad);
+
+          // Intra-cloud lightning illumination pulsing through nearby storm clouds
+          if (uLightning > 0.005 && uRain > 0.05) {
+            vec3 dirToCloud = normalize(vWorldPos);
+            float lProx = pow(max(dot(dirToCloud, normalize(uLightningDir)), 0.0), 3.0);
+            col += vec3(0.72, 0.82, 1.0) * uLightning * (0.16 + lProx * 0.85) * (0.5 + 0.5 * rim);
+          }
+
+          // Soft painterly Fresnel-feathered silhouette + organic billow edge + distance mist fade
+          float edgeSoft = pow(clamp(abs(dot(N, V)), 0.0, 1.0), mix(0.76, 1.38, uRain));
+          float dist = length(vWorldPos - cameraPosition);
+          float distFade = 1.0 - smoothstep(155.0, 230.0, dist);
+          float rainAlphaMod = mix(0.88, 0.64 + 0.24 * billow, uRain);
+          float alpha = clamp(edgeSoft * uOpacity * distFade * rainAlphaMod, 0.0, 0.90);
+          if (alpha < 0.02) discard;
+
+          gl_FragColor = vec4(col, alpha);
+          #include <tonemapping_fragment>
+          #include <colorspace_fragment>
+        }
+      `,
     });
     this.cloudGroup = this.buildSculptedClouds();
     this.scene.add(this.cloudGroup);
@@ -554,10 +708,10 @@ export class WeilongSceneController {
     this.camera.add(this.umbrellaHeldGroup);
     this.scene.add(this.camera);
 
-    // Pooled Zero-GC Rain & Firefly Particle Systems
-    this.rainPoints = this.buildRainParticles();
-    this.rainPoints.visible = false;
-    this.scene.add(this.rainPoints);
+    // Pooled Zero-GC Wind-Slanted Rain Streaks & Firefly Particle Systems
+    this.rainStreaks = this.buildRainStreaks();
+    this.rainStreaks.visible = false;
+    this.scene.add(this.rainStreaks);
 
     this.fireflyPoints = this.buildFireflyParticles();
     this.fireflyPoints.visible = false;
@@ -725,12 +879,12 @@ export class WeilongSceneController {
         [4.4 * mirror, -0.75, -0.35, 3.8, 1.15, 2.6],
         [7.4 * mirror, -0.55, 0.2, 2.4, 0.9, 1.9],
       ]) {
-        const bot = new THREE.Mesh(puffGeoB, this.cloudBotMat);
+        const bot = new THREE.Mesh(puffGeoB, this.cloudVolumetricMat);
         bot.position.set(ox, oy, oz);
         bot.scale.set(sx, sy, sz);
         cg.add(bot);
       }
-      // Asymmetric billowing sunlit cream-washi upper crests
+      // Asymmetric billowing upper crests
       for (const [ox, oy, oz, sx, sy, sz] of [
         [-4.2 * mirror, 0.4, 0.25, 3.6, 2.0, 2.7],
         [-1.1 * mirror, 1.65, -0.1, 4.7, 3.1, 3.1],
@@ -739,7 +893,7 @@ export class WeilongSceneController {
         [-2.2 * mirror, 0.85, 1.15, 2.9, 1.9, 2.3],
         [0.9 * mirror, 2.35, -0.45, 2.6, 2.0, 2.2],
       ]) {
-        const top = new THREE.Mesh(puffGeoA, this.cloudTopMat);
+        const top = new THREE.Mesh(puffGeoA, this.cloudVolumetricMat);
         top.position.set(ox, oy, oz);
         top.scale.set(sx, sy, sz);
         cg.add(top);
@@ -775,26 +929,79 @@ export class WeilongSceneController {
     return g;
   }
 
-  private buildRainParticles(): THREE.Points {
-    const count = 480;
-    const positions = new Float32Array(count * 3);
+  /**
+   * Builds a depth-layered, wind-slanted rain streak system (LineSegments) with
+   * analytical roof-occlusion culling so rain never falls through covered ceilings!
+   */
+  private buildRainStreaks(): THREE.LineSegments {
+    const count = this.isSoftwareGl ? 720 : 1400;
+    const positions = new Float32Array(count * 6); // 2 vertices (head + tail) per streak
+    const colors = new Float32Array(count * 6);
+    // Per-streak metadata: [x, y, z, speed, length, windTiltX]
+    this.rainStreakData = new Float32Array(count * 6);
+
+    const spawnStreak = (i: number, randomY: boolean) => {
+      // Sample around the compound and skywells, avoiding covered roof footprints for streaks below roof height
+      let sx = 0;
+      let sz = 0;
+      const isNearBand = i < count * 0.42;
+      const rangeX = isNearBand ? 32 : 76;
+      const rangeZ = isNearBand ? 46 : 98;
+      // Bias near-band slightly toward courtyard & skywells
+      for (let attempt = 0; attempt < 6; attempt++) {
+        sx = (Math.random() - 0.5) * rangeX;
+        sz = (Math.random() - 0.5) * rangeZ + (isNearBand ? 10 : 2);
+        if (!isUnderRoof(sx, sz)) break;
+      }
+      const sy = randomY ? Math.random() * 26 : 21 + Math.random() * 7;
+      const speed = isNearBand ? 21.5 + Math.random() * 7.0 : 25.0 + Math.random() * 8.0;
+      const len = isNearBand ? 0.52 + Math.random() * 0.36 : 0.78 + Math.random() * 0.52;
+      const windX = -0.14 - Math.random() * 0.05; // cohesive gentle Lingnan monsoon wind lean
+      const base = i * 6;
+      this.rainStreakData[base] = sx;
+      this.rainStreakData[base + 1] = sy;
+      this.rainStreakData[base + 2] = sz;
+      this.rainStreakData[base + 3] = speed;
+      this.rainStreakData[base + 4] = len;
+      this.rainStreakData[base + 5] = windX;
+
+      const tailX = sx - windX * len;
+      const tailY = sy + len;
+      const tailZ = sz - 0.07 * len;
+      positions[base] = sx;
+      positions[base + 1] = sy;
+      positions[base + 2] = sz;
+      positions[base + 3] = tailX;
+      positions[base + 4] = tailY;
+      positions[base + 5] = tailZ;
+
+      // Crisp bright falling head -> faint translucent tail for true motion-blur depth feel
+      const depthBright = isNearBand ? 0.96 : 0.72;
+      colors[base] = 0.84 * depthBright;
+      colors[base + 1] = 0.91 * depthBright;
+      colors[base + 2] = 0.98 * depthBright;
+      colors[base + 3] = 0.38 * depthBright;
+      colors[base + 4] = 0.46 * depthBright;
+      colors[base + 5] = 0.54 * depthBright;
+    };
+
     for (let i = 0; i < count; i++) {
-      positions[i * 3] = (Math.random() - 0.5) * 68;
-      positions[i * 3 + 1] = Math.random() * 22;
-      positions[i * 3 + 2] = (Math.random() - 0.5) * 95 - 5;
+      spawnStreak(i, true);
     }
+
     const geo = new THREE.BufferGeometry();
     geo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
-    const mat = new THREE.PointsMaterial({
-      color: 0xd9ebf5,
-      size: 0.16,
+    geo.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+    const mat = new THREE.LineBasicMaterial({
+      vertexColors: true,
       transparent: true,
-      opacity: 0.65,
+      opacity: 0.58,
+      depthTest: true,
       depthWrite: false,
     });
-    const pts = new THREE.Points(geo, mat);
-    pts.frustumCulled = false;
-    return pts;
+    const lines = new THREE.LineSegments(geo, mat);
+    lines.frustumCulled = false;
+    return lines;
   }
 
   private buildFireflyParticles(): THREE.Points {
@@ -938,6 +1145,11 @@ export class WeilongSceneController {
     }
     if (this.bloomPass) {
       this.bloomPass.resolution.set(Math.max(1, Math.floor(w / 2)), Math.max(1, Math.floor(h / 2)));
+    }
+    if (this.composer && !this.isSoftwareGl) {
+      this.composer.render();
+    } else {
+      this.renderer.render(this.scene, this.camera);
     }
   }
 
@@ -1337,11 +1549,12 @@ export class WeilongSceneController {
     this.skyUniforms.uTwilight.value = dn.twilightFactor;
     this.skyUniforms.uRain.value = dn.rainFactor;
 
-    this.cloudTopMat.color.setHex(dn.cloudTopColor);
-    this.cloudBotMat.color.setHex(dn.cloudBotColor);
-    const cloudFade = Math.max(0, 1 - dn.nightFactor * 1.15);
-    this.cloudTopMat.opacity = 0.9 * cloudFade;
-    this.cloudBotMat.opacity = 0.86 * cloudFade;
+    this.cloudUniforms.uTopCol.value.setHex(dn.cloudTopColor);
+    this.cloudUniforms.uBotCol.value.setHex(dn.cloudBotColor);
+    this.cloudUniforms.uSunDir.value.set(dn.sunDir[0], dn.sunDir[1], dn.sunDir[2]).normalize();
+    this.cloudUniforms.uRain.value = dn.rainFactor;
+    const cloudFade = Math.max(dn.rainFactor * 0.65, 1 - dn.nightFactor * 1.15);
+    this.cloudUniforms.uOpacity.value = Math.min(0.92, 0.88 * cloudFade);
     this.cloudGroup.visible = cloudFade > 0.04;
 
     (this.scene.background as THREE.Color).setHex(dn.skyMid);
@@ -1349,23 +1562,33 @@ export class WeilongSceneController {
     fog.color.setHex(dn.fogColor);
     fog.density = dn.fogDensity;
 
+    // Brief subtle cool-white thunderstorm lightning ambient boost during intra-cloud flashes
+    const flash = this.weather === 'rain' && this.lightningActive
+      ? computeLightningEnvelope(this.lightningElapsed) * this.lightningIntensity
+      : 0;
+    this.skyUniforms.uLightning.value = flash;
+    this.cloudUniforms.uLightning.value = flash;
+
     // Primary celestial directional light tracks Sun by day and Moon by night (keeping y >= 12 for crisp shadows)
     const useMoon = dn.nightFactor > 0.5;
     const ld = useMoon ? dn.moonDir : dn.sunDir;
     const lightY = Math.max(0.24, Math.abs(ld[1]));
     this.sunLight.position.set(ld[0] * 64, lightY * 58, ld[2] * 64);
     this.sunLight.color.setHex(dn.sunLightColor);
-    this.sunLight.intensity = dn.sunLightIntensity;
+    if (flash > 0.02) {
+      this.sunLight.color.lerp(this.lightningTintColor, flash * 0.45);
+    }
+    this.sunLight.intensity = dn.sunLightIntensity + flash * 0.62;
 
     this.hemiLight.color.setHex(dn.hemiSkyColor);
     this.hemiLight.groundColor.setHex(dn.hemiGroundColor);
-    this.hemiLight.intensity = dn.hemiIntensity;
+    this.hemiLight.intensity = dn.hemiIntensity + flash * 0.36;
 
     this.groundBounceLight.color.setHex(dn.bounceLightColor);
     this.groundBounceLight.intensity = dn.bounceLightIntensity;
 
     this.skyRimLight.color.setHex(dn.rimLightColor);
-    this.skyRimLight.intensity = dn.rimLightIntensity;
+    this.skyRimLight.intensity = dn.rimLightIntensity + flash * 0.28;
 
     // Shared physical environment shader uniforms
     physicalEnvUniforms.uSunDir.value.set(ld[0], lightY, ld[2]).normalize();
@@ -1380,14 +1603,14 @@ export class WeilongSceneController {
     this.mats.wettableMaterials.forEach((m) => {
       const isTile = m === this.mats.roofTile || m === this.mats.roofTileDark;
       if (isRain) {
-        m.clearcoat = isTile ? 0.66 : 0.78;
-        m.clearcoatRoughness = isTile ? 0.22 : 0.14;
+        m.clearcoat = isTile ? 0.54 : 0.78;
+        m.clearcoatRoughness = isTile ? 0.26 : 0.12;
       } else {
         m.clearcoat = isTile ? 0.08 + dn.nightFactor * 0.06 : dn.nightFactor * 0.04;
         m.clearcoatRoughness = isTile ? 0.42 : 0.30;
       }
     });
-    this.mats.huataiCobble.roughness = isRain ? 0.32 : THREE.MathUtils.lerp(0.82, 0.68, dn.nightFactor);
+    this.mats.huataiCobble.roughness = isRain ? 0.30 : THREE.MathUtils.lerp(0.82, 0.68, dn.nightFactor);
 
     // Warm lanterns & interior lattice windows glow automatically at dusk, night, or rain
     const dingBoost = this.dingLanternLit ? 1.15 : 0;
@@ -1408,20 +1631,12 @@ export class WeilongSceneController {
       this.lensPass.uniforms.uVignette.value = 0.20 + dn.nightFactor * 0.08 + dn.rainFactor * 0.04;
     }
 
-    // Rain curtains, particles, fireflies, and grain drying mats/covers synced with FSM
-    this.rainPoints.visible = isRain;
+    // Rain curtains, wind-slanted rain streaks & fireflies
+    this.rainStreaks.visible = isRain;
     for (let i = 0; i < this.arch.rainCurtainMeshes.length; i++) {
       this.arch.rainCurtainMeshes[i].visible = isRain;
     }
     this.fireflyPoints.visible = behavior.firefliesActive;
-
-    for (let i = 0; i < this.props.grainMatGroups.length; i++) {
-      this.props.grainMatGroups[i].visible = behavior.grainMatsVisible;
-    }
-    for (let i = 0; i < this.props.grainTarpCovers.length; i++) {
-      this.props.grainTarpCovers[i].visible = behavior.grainMatsVisible && behavior.grainMatsCovered;
-    }
-    this.props.grainStaticRake.visible = behavior.grainMatsVisible && !behavior.grainMatsCovered;
   }
 
   public markArtifactInspected(artifactId: string): void {
@@ -1666,15 +1881,50 @@ export class WeilongSceneController {
       }
     }
 
-    // 2. Smooth 24-Hour Day-Night Cycle, Water Optics, Clouds, Living FSM & Audio Ambience
+    // 2. Smooth 24-Hour Day-Night Cycle, Thunderstorm Scheduler, Water Optics, Clouds & Audio Ambience
     if (this.mode === 'playing' && this.timePlaying) {
       // Base 1x speed = 1 game hour every 30s (full 24h in 12min); 60x = full 24h in 12s!
       this.timeOfDay = normalizeHour(this.timeOfDay + (dt / 30) * this.timeSpeed);
     }
+
+    // Occasional natural thunderstorm intra-cloud lightning + speed-of-sound delayed thunder
+    if (this.weather === 'rain') {
+      if (this.lightningActive) {
+        this.lightningElapsed += dt;
+        if (this.lightningElapsed > 0.50) {
+          this.lightningActive = false;
+        }
+      } else {
+        this.nextLightningInSec -= dt;
+        if (this.nextLightningInSec <= 0) {
+          this.lightningSeed = (this.lightningSeed * 1664525 + 1013904223) >>> 0;
+          const rA = (this.lightningSeed % 1000) / 1000;
+          this.lightningSeed = (this.lightningSeed * 1664525 + 1013904223) >>> 0;
+          const rB = (this.lightningSeed % 1000) / 1000;
+          const az = -Math.PI * 0.85 + rA * Math.PI * 1.7;
+          const el = 0.26 + rB * 0.28;
+          this.skyUniforms.uLightningDir.value
+            .set(Math.sin(az) * Math.cos(el), Math.sin(el), -Math.cos(az) * Math.cos(el))
+            .normalize();
+          this.cloudUniforms.uLightningDir.value.copy(this.skyUniforms.uLightningDir.value);
+          this.lightningIntensity = 0.58 + rB * 0.36;
+          this.lightningElapsed = 0;
+          this.lightningActive = true;
+          this.nextLightningInSec = 13.5 + rA * 11.5; // tasteful ~13.5–25s interval
+          const distanceMeters = 460 + rA * 820; // ~1.3s to 3.7s sound delay
+          this.audio.playThunder(distanceMeters, this.lightningIntensity);
+        }
+      }
+    } else {
+      this.lightningActive = false;
+      this.nextLightningInSec = 5.5;
+    }
+
     this.applyAtmosphereForTime(false);
 
     const dnNow = computeDayNightState(this.timeOfDay, this.weather);
     this.skyUniforms.uTime.value = t;
+    this.cloudUniforms.uTime.value = t;
     this.arch.updateWater(
       t,
       dnNow.nightFactor,
@@ -1684,16 +1934,26 @@ export class WeilongSceneController {
       dnNow.sunLightColor,
       dnNow.lanternGlow
     );
-    this.living.update(dt, t, this.weather, this.timeOfDay);
+    this.living.update(dt, t, this.weather, this.timeOfDay, this.doumenOpen);
+    const grainState = this.living.getGrainLiveState();
+    this.props.updateGrainDrying(
+      grainState.spread,
+      grainState.basketFill,
+      grainState.matDeployed,
+      t,
+      grainState.isGathering
+    );
 
     const distToPond = Math.hypot(this.playerPos.x, this.playerPos.z - 42.5);
     this.audio.updateAmbience(this.timeOfDay, this.weather, distToPond);
 
-    // Gentle cloud drift across the valley sky
+    // Gentle cloud drift across the valley sky (slightly swifter & lower-slung in rain storm)
+    const cloudSpeedMul = this.weather === 'rain' ? 2.15 : 1.0;
+    const cloudDropY = this.weather === 'rain' ? -4.5 : 0.0;
     for (const c of this.cloudGroup.children) {
       const d = c.userData;
-      c.position.x = ((d.baseX + t * d.speed + 150) % 300) - 150;
-      c.position.y = d.baseY + Math.sin(t * 0.22 + d.phase) * 0.7;
+      c.position.x = ((d.baseX + t * d.speed * cloudSpeedMul + 150) % 300) - 150;
+      c.position.y = d.baseY + cloudDropY + Math.sin(t * 0.22 + d.phase) * 0.7;
     }
 
     // Swimming Koi in Half-Moon Pond
@@ -1737,13 +1997,14 @@ export class WeilongSceneController {
       this.props.cradleBody.rotation.z = THREE.MathUtils.damp(this.props.cradleBody.rotation.z, 0, 5, dt);
     }
 
-    // Birdcage swinging
+    // Birdcage swinging + lively Chinese Hwamei songbird animation (head turns, singing trill, tail dip)
     if (this.birdcageSwingTimer > 0) {
       this.birdcageSwingTimer = Math.max(0, this.birdcageSwingTimer - dt);
-      this.props.birdcageGroup.rotation.z = Math.sin(t * 5.2) * 0.24 * Math.min(1, this.birdcageSwingTimer * 0.4);
+      this.props.birdcageGroup.rotation.z = Math.sin(t * 5.2) * 0.16 * Math.min(1, this.birdcageSwingTimer * 0.4);
     } else {
-      this.props.birdcageGroup.rotation.z = Math.sin(t * 1.4) * 0.03;
+      this.props.birdcageGroup.rotation.z = Math.sin(t * 1.4) * 0.022;
     }
+    this.props.updateHwameiBird(t, dt, Math.min(1, this.birdcageSwingTimer * 0.5));
 
     // Kitchen bellows & Leicha mortar pestle
     if (this.bellowsTimer > 0) {
@@ -1790,14 +2051,15 @@ export class WeilongSceneController {
       dt
     );
 
-    // Ding Lantern gentle descent when inspected/lit
+    // Ding Lantern gentle descent when inspected/lit (ceiling golden cord stays anchored to ridge purlin!)
     const targetDingY = this.dingLanternLit ? 2.85 : 3.55;
-    this.props.dingLanternGroup.position.y = THREE.MathUtils.damp(
+    const nextDingY = THREE.MathUtils.damp(
       this.props.dingLanternGroup.position.y,
       targetDingY,
       3.5,
       dt
     );
+    this.props.updateDingLanternHeight(nextDingY);
     this.props.dingLanternGroup.rotation.y += dt * 0.35;
 
     // Jiaobei divination bounce arc
@@ -1841,13 +2103,39 @@ export class WeilongSceneController {
       }
     }
 
-    // Weather particles: Rain falling & Night Fireflies drifting
-    if (this.rainPoints.visible) {
-      const attr = this.rainPoints.geometry.attributes.position as THREE.BufferAttribute;
-      for (let i = 0; i < attr.count; i++) {
-        let ry = attr.getY(i) - dt * 17.5;
-        if (ry < 0) ry = 22;
-        attr.setY(i, ry);
+    // Weather particles: Wind-slanted roof-occluded rain streaks & Night Fireflies drifting
+    if (this.rainStreaks.visible) {
+      const attr = this.rainStreaks.geometry.attributes.position as THREE.BufferAttribute;
+      const arr = attr.array as Float32Array;
+      const data = this.rainStreakData;
+      const count = data.length / 6;
+      const gust = Math.sin(t * 0.7) * 0.03;
+      for (let i = 0; i < count; i++) {
+        const b = i * 6;
+        const speed = data[b + 3];
+        const len = data[b + 4];
+        const windX = data[b + 5] + gust;
+        let rx = data[b] + windX * speed * dt;
+        let ry = data[b + 1] - speed * dt;
+        let rz = data[b + 2] + 0.07 * speed * dt;
+
+        // Respawn at cloud-base when hitting ground OR entering a covered roof volume below eave height
+        const minY = isUnderRoof(rx, rz) ? 6.6 : 0.05;
+        if (ry < minY) {
+          ry = 22.0 + ((i * 37) % 100) * 0.06;
+          if (rx < -42) rx += 84;
+          if (rz > 56) rz -= 104;
+        }
+        data[b] = rx;
+        data[b + 1] = ry;
+        data[b + 2] = rz;
+
+        arr[b] = rx;
+        arr[b + 1] = ry;
+        arr[b + 2] = rz;
+        arr[b + 3] = rx - windX * len;
+        arr[b + 4] = ry + len;
+        arr[b + 5] = rz - 0.07 * len;
       }
       attr.needsUpdate = true;
     }
@@ -1860,8 +2148,8 @@ export class WeilongSceneController {
       attr.needsUpdate = true;
     }
 
-    // Throttled HUD sync (max ~8Hz during movement)
-    if (nowMs - this.lastHudEmitMs > 130) {
+    // Throttled HUD & GTA Minimap live sync (~10Hz for fluid radar & entity blips)
+    if (nowMs - this.lastHudEmitMs > 100) {
       this.emitHudSnapshot(false);
       this.lastHudEmitMs = nowMs;
     }
@@ -2167,6 +2455,7 @@ export class WeilongSceneController {
       timePeriodLabel: this.timePeriodLabel,
       formattedTime: this.formattedTime,
       volume: this.audio.getVolume(),
+      minimapBlips: this.living.getMinimapBlips(),
     });
   }
 
@@ -2195,10 +2484,9 @@ export class WeilongSceneController {
 
     this.poeticSky.geometry.dispose();
     (this.poeticSky.material as THREE.Material).dispose();
-    this.cloudTopMat.dispose();
-    this.cloudBotMat.dispose();
-    this.rainPoints.geometry.dispose();
-    (this.rainPoints.material as THREE.Material).dispose();
+    this.cloudVolumetricMat.dispose();
+    this.rainStreaks.geometry.dispose();
+    (this.rainStreaks.material as THREE.Material).dispose();
     this.fireflyPoints.geometry.dispose();
     (this.fireflyPoints.material as THREE.Material).dispose();
     this.envMaps.sunny.dispose();

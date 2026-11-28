@@ -262,8 +262,8 @@ export function computeDayNightState(rawHour: number, weather: WeatherMode): Day
     cloudBotColor = lerpHex(cloudBotColor, 0xc8746a, twilightFactor * 0.85);
   }
   if (rainFactor > 0.001) {
-    cloudTopColor = lerpHex(cloudTopColor, lerpHex(0x2c3a48, 0xc8d6da, dayFactor), rainFactor * 0.88);
-    cloudBotColor = lerpHex(cloudBotColor, lerpHex(0x1a2430, 0x8298a6, dayFactor), rainFactor * 0.88);
+    cloudTopColor = lerpHex(cloudTopColor, lerpHex(0x273444, 0x9eb2be, dayFactor), rainFactor * 0.92);
+    cloudBotColor = lerpHex(cloudBotColor, lerpHex(0x131b26, 0x455666, dayFactor), rainFactor * 0.94);
   }
 
   const exposure = lerpNum(lerpNum(1.14, 1.06, dayFactor), lerpNum(1.04, 1.02, dayFactor), rainFactor);

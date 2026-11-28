@@ -35,6 +35,15 @@ export interface PropAnimationRefs {
   grainMatGroups: THREE.Group[];
   grainTarpCovers: THREE.Mesh[];
   grainStaticRake: THREE.Group;
+  updateGrainDrying: (
+    spreadProgress: number,
+    basketFill: number,
+    matDeployed: number,
+    timeSec: number,
+    isGathering: boolean
+  ) => void;
+  updateHwameiBird: (timeSec: number, dt: number, excited: number) => void;
+  updateDingLanternHeight: (worldY: number) => void;
   dispose: () => void;
 }
 
@@ -49,6 +58,7 @@ export function buildWeilongProps(
   const root = new THREE.Group();
   const geometries: THREE.BufferGeometry[] = [];
   const localMaterials: THREE.Material[] = [];
+  const localTextures: THREE.Texture[] = [];
   const interactableMeshes: THREE.Object3D[] = [];
 
   const trackGeo = <T extends THREE.BufferGeometry>(g: T): T => {
@@ -130,8 +140,9 @@ export function buildWeilongProps(
   malletGroup.add(mallet);
   root.add(malletGroup);
 
-  // Unified Sculpted Golden Rice Drying Mats on He-Ping Courtyard ([-6.0, 28.8] & [5.2, 29.2])
-  // Soft undulating combed grain mounds inside raised woven bamboo borders!
+  // Unified Sculpted Golden Rice Drying Mats on He-Ping Courtyard ([5.2, 29.2] & [-6.0, 28.8])
+  // Supports continuous 0%..100% progressive spreading, central gathering mound, dynamic harvest baskets,
+  // and neatly rolled bamboo mat stowage at night/rain (zero binary visible popping!).
   const grainMoundGeo = trackGeo(new THREE.PlaneGeometry(4.9, 3.1, 18, 12));
   grainMoundGeo.rotateX(-Math.PI * 0.5);
   {
@@ -143,10 +154,36 @@ export function buildWeilongProps(
       const nz = z / 1.55;
       const edgeFade = Math.max(0, 1 - nx * nx * 0.85) * Math.max(0, 1 - nz * nz * 0.85);
       const rakeWaves = 0.03 * Math.sin(x * 4.8 + Math.sin(z * 1.4) * 0.6);
-      pos.setY(i, 0.03 + (0.14 + rakeWaves) * Math.pow(edgeFade, 0.48));
+      pos.setY(i, 0.025 + (0.14 + rakeWaves) * Math.pow(edgeFade, 0.48));
     }
     grainMoundGeo.computeVertexNormals();
   }
+  const centerHeapGeo = trackGeo(
+    new THREE.SphereGeometry(1.15, 16, 10, 0, Math.PI * 2, 0, Math.PI * 0.5)
+  );
+  const rolledMatGeo = trackGeo(new THREE.CylinderGeometry(0.16, 0.16, 5.42, 12));
+  rolledMatGeo.rotateZ(Math.PI * 0.5);
+  const basketShellGeo = trackGeo(
+    createTurnedLatheGeometry(
+      [
+        [0.0, 0.0],
+        [0.24, 0.0],
+        [0.32, 0.14],
+        [0.36, 0.34],
+        [0.39, 0.42],
+        [0.35, 0.42],
+        [0.32, 0.34],
+        [0.28, 0.12],
+        [0.22, 0.04],
+        [0.0, 0.04],
+      ],
+      14
+    )
+  );
+  const basketGrainGeo = trackGeo(
+    new THREE.SphereGeometry(0.32, 12, 8, 0, Math.PI * 2, 0, Math.PI * 0.5)
+  );
+
   const matBorderLongGeo = trackGeo(new THREE.CylinderGeometry(0.032, 0.032, 5.45, 8));
   matBorderLongGeo.rotateZ(Math.PI * 0.5);
   const matBorderShortGeo = trackGeo(new THREE.CylinderGeometry(0.032, 0.032, 3.65, 8));
@@ -171,35 +208,94 @@ export function buildWeilongProps(
     rainTarpGeo.computeVertexNormals();
   }
 
+  interface GrainStationVisual {
+    unrolledGroup: THREE.Group;
+    rolledBundle: THREE.Mesh;
+    spreadLayer: THREE.Mesh;
+    centerHeap: THREE.Mesh;
+    baskets: Array<{ group: THREE.Group; fill: THREE.Mesh; baseX: number; baseZ: number }>;
+    tarpCover: THREE.Mesh;
+  }
+  const grainStations: GrainStationVisual[] = [];
+
   for (const [mx, mz] of [
     [5.2, 29.2],
     [-6.0, 28.8],
   ]) {
     const matGroup = new THREE.Group();
     matGroup.position.set(mx, 0.02, mz);
+
+    // Unrolled flat woven bamboo mat pivoted along north edge so it unrolls/rolls smoothly
+    const unrolledGroup = new THREE.Group();
+    unrolledGroup.position.set(0, 0, -1.8);
+    const matInner = new THREE.Group();
+    matInner.position.set(0, 0, 1.8);
     const bambooBase = new THREE.Mesh(trackGeo(new THREE.BoxGeometry(5.4, 0.036, 3.6)), bambooMat);
     bambooBase.position.y = 0.018;
     bambooBase.receiveShadow = true;
-    matGroup.add(bambooBase);
+    matInner.add(bambooBase);
 
-    // Raised bamboo trim rails framing each mat
     for (const sz of [-1.8, 1.8]) {
       const rail = new THREE.Mesh(matBorderLongGeo, mats.weatheredWoodDoor);
       rail.position.set(0, 0.038, sz);
-      matGroup.add(rail);
+      matInner.add(rail);
     }
     for (const sx of [-2.7, 2.7]) {
       const rail = new THREE.Mesh(matBorderShortGeo, mats.weatheredWoodDoor);
       rail.position.set(sx, 0.038, 0);
-      matGroup.add(rail);
+      matInner.add(rail);
+    }
+    unrolledGroup.add(matInner);
+    matGroup.add(unrolledGroup);
+
+    // Neatly rolled bamboo mat cylinder resting on the north edge when retracted at night/rain
+    const rolledBundle = new THREE.Mesh(rolledMatGeo, bambooMat);
+    rolledBundle.position.set(0, 0.16, -1.8);
+    rolledBundle.castShadow = castShadow;
+    rolledBundle.receiveShadow = true;
+    matGroup.add(rolledBundle);
+
+    // Layer A: Progressive spreading combed golden paddy grain bed
+    const spreadLayer = new THREE.Mesh(grainMoundGeo, mats.goldenGrain);
+    spreadLayer.position.y = 0.025;
+    spreadLayer.receiveShadow = true;
+    matGroup.add(spreadLayer);
+
+    // Layer B: Central raked/poured golden grain cone (grows as farmers rake inward, flattens as they spread outward!)
+    const centerHeap = new THREE.Mesh(centerHeapGeo, mats.goldenGrain);
+    centerHeap.position.y = 0.03;
+    centerHeap.castShadow = castShadow;
+    centerHeap.receiveShadow = true;
+    matGroup.add(centerHeap);
+
+    // Paired woven bamboo harvest baskets (谷筐) beside the mat with dynamic grain fill level
+    const stationBaskets: GrainStationVisual['baskets'] = [];
+    for (const [bx, bz] of [
+      [-3.15, -1.15],
+      [3.15, -1.15],
+    ]) {
+      const bg = new THREE.Group();
+      bg.position.set(bx, 0, bz);
+      const shell = new THREE.Mesh(basketShellGeo, bambooMat);
+      shell.castShadow = castShadow;
+      shell.receiveShadow = true;
+      bg.add(shell);
+      const rim = new THREE.Mesh(
+        trackGeo(new THREE.TorusGeometry(0.37, 0.024, 6, 16)),
+        mats.weatheredWoodDoor
+      );
+      rim.rotation.x = Math.PI * 0.5;
+      rim.position.y = 0.42;
+      bg.add(rim);
+      const fill = new THREE.Mesh(basketGrainGeo, mats.goldenGrain);
+      fill.position.y = 0.12;
+      fill.scale.set(0.95, 0.48, 0.95);
+      bg.add(fill);
+      matGroup.add(bg);
+      stationBaskets.push({ group: bg, fill, baseX: bx, baseZ: bz });
     }
 
-    const grainMound = new THREE.Mesh(grainMoundGeo, mats.goldenGrain);
-    grainMound.position.y = 0.025;
-    grainMound.receiveShadow = true;
-    matGroup.add(grainMound);
-
-    // Rain-shelter woven oilcloth tarp draped over grain mound during rain rush-harvest
+    // Rain-shelter woven oilcloth tarp (only smoothly scales over remaining pile if needed)
     const tarpCover = new THREE.Mesh(rainTarpGeo, rainTarpMat);
     tarpCover.position.y = 0.04;
     tarpCover.visible = false;
@@ -210,9 +306,17 @@ export function buildWeilongProps(
 
     root.add(matGroup);
     grainMatGroups.push(matGroup);
+    grainStations.push({
+      unrolledGroup,
+      rolledBundle,
+      spreadLayer,
+      centerHeap,
+      baskets: stationBaskets,
+      tarpCover,
+    });
   }
 
-  // Handcrafted leaning 7-tooth wooden grain push-rake resting beside East mat (stowed at night)
+  // Handcrafted leaning 7-tooth wooden grain push-rake resting beside East mat (smoothly tucked when stowed)
   const grainStaticRake = new THREE.Group();
   grainStaticRake.position.set(7.6, 0.14, 28.2);
   const rakePole = new THREE.Mesh(trackGeo(new THREE.CylinderGeometry(0.028, 0.032, 2.15, 10)), bambooMat);
@@ -228,6 +332,73 @@ export function buildWeilongProps(
     grainStaticRake.add(tooth);
   }
   root.add(grainStaticRake);
+
+  const updateGrainDrying = (
+    spreadProgress: number,
+    basketFill: number,
+    matDeployed: number,
+    timeSec: number,
+    isGathering: boolean
+  ) => {
+    const sp = Math.max(0, Math.min(1, spreadProgress));
+    const bf = Math.max(0, Math.min(1, basketFill));
+    const md = Math.max(0, Math.min(1, matDeployed));
+
+    for (let i = 0; i < grainStations.length; i++) {
+      const st = grainStations[i];
+      // 1. Bamboo mat continuously unrolls (md 0 -> 1) and rolls into a neat cylinder (md 1 -> 0)
+      st.unrolledGroup.scale.set(1, 1, Math.max(0.015, md));
+      st.unrolledGroup.visible = md > 0.02;
+      const rollFactor = 1.0 - md;
+      const rollScale = 0.32 + rollFactor * 0.78;
+      st.rolledBundle.scale.set(1, rollScale, rollScale);
+      st.rolledBundle.position.y = 0.16 * rollScale;
+      st.rolledBundle.position.z = -1.8 + md * 0.04;
+      st.rolledBundle.visible = rollFactor > 0.03;
+
+      // 2. Spread golden rice layer expands outward progressively from center (0% -> 100%)
+      const areaFactor = Math.pow(sp, 0.65);
+      const sx = 0.16 + areaFactor * 0.84;
+      const sz = 0.18 + areaFactor * 0.82;
+      const sy = sp > 0.01 ? 0.25 + Math.sin(Math.min(1, sp) * Math.PI * 0.5) * 0.78 : 0.001;
+      const rakeRipple = isGathering && sp > 0.05 ? 1 + Math.sin(timeSec * 6.5 + i) * 0.02 : 1;
+      st.spreadLayer.scale.set(sx * rakeRipple, sy, sz);
+      st.spreadLayer.visible = sp > 0.012 && md > 0.25;
+
+      // 3. Central gathering heap peaks during transitional spreading/raking (sp around 0.1..0.65)
+      // and subsides cleanly as rice either flattens evenly (sp -> 1) or enters baskets (sp -> 0)
+      const heapBell = Math.sin(Math.min(1, sp * 1.15) * Math.PI) * (isGathering ? 1.25 : 0.92);
+      const heapScaleXZ = 0.28 + heapBell * 0.76;
+      const heapScaleY = Math.max(0.01, heapBell * 0.44);
+      st.centerHeap.scale.set(heapScaleXZ, heapScaleY, heapScaleXZ * 0.82);
+      st.centerHeap.visible = heapBell > 0.035 && md > 0.2;
+
+      // 4. Woven harvest baskets smoothly fill up as rice is gathered, and slide closer to the mat edge when active
+      for (let b = 0; b < st.baskets.length; b++) {
+        const bk = st.baskets[b];
+        // Tuck baskets gently toward north veranda edge as mat rolls up
+        const stowLerp = 1.0 - md;
+        bk.group.position.set(
+          bk.baseX * (1 - stowLerp * 0.15),
+          0,
+          bk.baseZ - stowLerp * 0.65
+        );
+        const fillH = Math.max(0.02, bf * 0.56);
+        bk.fill.scale.set(0.84 + bf * 0.16, fillH, 0.84 + bf * 0.16);
+        bk.fill.position.y = 0.07 + bf * 0.25;
+        bk.fill.visible = bf > 0.03;
+      }
+
+      // Tarp stays tucked away now that grain progressively gathers into baskets (zero abrupt tarp pop!)
+      st.tarpCover.visible = false;
+    }
+
+    // Push-rake rests neatly flat beside the east end of the rolled bamboo mat when stowed
+    const rakeFlat = 1.0 - md;
+    grainStaticRake.position.set(7.9 + rakeFlat * 0.65, 0.14 - rakeFlat * 0.08, 28.4 - rakeFlat * 1.15);
+    grainStaticRake.rotation.set(0, rakeFlat * 0.42, -rakeFlat * 1.02);
+    grainStaticRake.visible = true;
+  };
 
   // =========================================================================
   // 03. LOWER HALL: OIL-PAPER UMBRELLA RACK (4 COLORFUL UMBRELLAS) & DOULI HAT
@@ -375,76 +546,496 @@ export function buildWeilongProps(
   vatGroup.add(vatKoi);
   root.add(vatGroup);
 
-  // Domed 12-ribbed bamboo birdcage with wooden perch & sculpted songbird (no wireframe!)
+  // Domed 12-ribbed bamboo birdcage anchored cleanly beneath East Front Skywell veranda eave purlin (x=4.92, bottom y=3.08)
   const birdcageGroup = new THREE.Group();
-  birdcageGroup.position.set(3.6, 3.1, 13.6);
-  const cageCord = new THREE.Mesh(trackGeo(new THREE.CylinderGeometry(0.012, 0.012, 0.76, 6)), mats.darkTimber);
-  cageCord.position.y = -0.38;
-  birdcageGroup.add(cageCord);
-  const cageHook = new THREE.Mesh(trackGeo(new THREE.TorusGeometry(0.055, 0.012, 6, 12, Math.PI * 1.4)), mats.gildedGold);
-  cageHook.position.y = -0.78;
-  birdcageGroup.add(cageHook);
+  birdcageGroup.position.set(4.92, 3.08, 14.65);
 
-  // Horizontal bamboo hoop rings
+  // Forged-brass beam bracket & curved S-hook clasping directly onto the x=4.92 cedar veranda eave purlin
+  const eaveMountBracket = new THREE.Mesh(
+    trackGeo(new THREE.BoxGeometry(0.16, 0.04, 0.06)),
+    mats.bronzeMetal
+  );
+  eaveMountBracket.position.set(0, 0.015, 0);
+  birdcageGroup.add(eaveMountBracket);
+  const eaveEyeRing = new THREE.Mesh(
+    trackGeo(new THREE.TorusGeometry(0.032, 0.009, 6, 12)),
+    mats.bronzeMetal
+  );
+  eaveEyeRing.position.set(0, -0.025, 0);
+  birdcageGroup.add(eaveEyeRing);
+  const cageCord = new THREE.Mesh(
+    trackGeo(new THREE.CylinderGeometry(0.011, 0.011, 0.64, 6)),
+    mats.bronzeMetal
+  );
+  cageCord.position.y = -0.35;
+  birdcageGroup.add(cageCord);
+  // Traditional ornate curved brass cage hook (笼钩) + carved gourd finial (葫芦顶)
+  const cageHook = new THREE.Mesh(
+    trackGeo(new THREE.TorusGeometry(0.052, 0.011, 6, 14, Math.PI * 1.45)),
+    mats.gildedGold
+  );
+  cageHook.position.y = -0.70;
+  cageHook.rotation.z = -0.3;
+  birdcageGroup.add(cageHook);
+  const cageFinial = new THREE.Mesh(
+    trackGeo(
+      createTurnedLatheGeometry(
+        [
+          [0.015, -0.05],
+          [0.038, -0.02],
+          [0.024, 0.015],
+          [0.030, 0.04],
+          [0.008, 0.068],
+        ],
+        10
+      )
+    ),
+    bambooMat
+  );
+  cageFinial.position.y = -0.79;
+  birdcageGroup.add(cageFinial);
+
+  // Horizontal bamboo hoop rings (spaced cleanly above and below perched Hwamei so its silhouette is unobstructed)
   for (const [ry, rr] of [
     [-1.36, 0.3],
-    [-1.12, 0.3],
-    [-0.9, 0.27],
+    [-0.96, 0.285],
+    [-0.85, 0.245],
   ]) {
-    const ring = new THREE.Mesh(trackGeo(new THREE.TorusGeometry(rr, 0.014, 6, 18)), bambooMat);
+    const ring = new THREE.Mesh(trackGeo(new THREE.TorusGeometry(rr, 0.012, 6, 20)), bambooMat);
     ring.rotation.x = Math.PI * 0.5;
     ring.position.y = ry;
     birdcageGroup.add(ring);
   }
-  // 12 curved vertical bamboo cage ribs arching into a dome
+  // 16 fine vertical bamboo cage ribs arching cleanly into the dome
   const cageRibGeo = trackGeo(
     createTaperedCurveGeometry(
       [
         new THREE.Vector3(0.3, -1.36, 0),
         new THREE.Vector3(0.3, -1.06, 0),
         new THREE.Vector3(0.24, -0.88, 0),
-        new THREE.Vector3(0.0, -0.8, 0),
+        new THREE.Vector3(0.0, -0.80, 0),
       ],
-      0.008,
       0.007,
+      0.006,
       10,
       5
     )
   );
-  for (let r = 0; r < 12; r++) {
+  for (let r = 0; r < 16; r++) {
     const rib = new THREE.Mesh(cageRibGeo, bambooMat);
-    rib.rotation.y = (r / 12) * Math.PI * 2;
+    rib.rotation.y = (r / 16) * Math.PI * 2;
     birdcageGroup.add(rib);
   }
-  const cageBase = new THREE.Mesh(trackGeo(new THREE.CylinderGeometry(0.31, 0.28, 0.09, 16)), mats.darkTimber);
+  const cageBase = new THREE.Mesh(trackGeo(new THREE.CylinderGeometry(0.31, 0.28, 0.09, 18)), mats.darkTimber);
   cageBase.position.y = -1.4;
   birdcageGroup.add(cageBase);
-  const perch = new THREE.Mesh(trackGeo(new THREE.CylinderGeometry(0.014, 0.014, 0.54, 8)), bambooMat);
+  // Pair of porcelain seed & water cups clipped inside the lower hoop
+  const cupMat = trackMat(new THREE.MeshStandardMaterial({ color: 0xecf0f4, roughness: 0.24, metalness: 0.04 }));
+  const cupGeo = trackGeo(new THREE.CylinderGeometry(0.036, 0.028, 0.048, 10));
+  for (const side of [-1, 1]) {
+    const cup = new THREE.Mesh(cupGeo, cupMat);
+    cup.position.set(side * 0.22, -1.24, 0.08);
+    birdcageGroup.add(cup);
+  }
+  // Natural turned bamboo perch bar (栖木) spanning cage diameter at y = -1.20
+  const perch = new THREE.Mesh(trackGeo(new THREE.CylinderGeometry(0.014, 0.014, 0.57, 10)), bambooMat);
   perch.rotation.z = Math.PI * 0.5;
   perch.position.y = -1.2;
   birdcageGroup.add(perch);
-  // Sculpted songbird (画眉鸟) perched inside
-  const birdBody = new THREE.Mesh(
-    trackGeo(new THREE.SphereGeometry(0.075, 10, 8)),
-    createPaintedWoodMat(0x9b6e42, trackMat, 0.72)
+
+  // =========================================================================
+  // HIGH-FIDELITY REALISTIC CHINESE HWAMEI SONGBIRD (中华画眉鸟 Garrulax canorus)
+  // =========================================================================
+  // Procedural streaked olive-brown / warm ochre plumage texture (head/back streaks + warm tawny breast)
+  const makeHwameiPlumageTex = (): THREE.CanvasTexture => {
+    const c = document.createElement('canvas');
+    c.width = 256;
+    c.height = 256;
+    const ctx = c.getContext('2d')!;
+    // Base warm olive-ochre-brown gradient from crown/back to softer buff-tawny underside
+    const grad = ctx.createLinearGradient(0, 0, 0, 256);
+    grad.addColorStop(0.0, '#7c5a2c'); // olive-brown crown/upper back
+    grad.addColorStop(0.35, '#8e6632'); // warm cinnamon-olive mantle
+    grad.addColorStop(0.68, '#ab7e42'); // ochre-tawny breast
+    grad.addColorStop(1.0, '#cfb280'); // warm pale-buff belly
+    ctx.fillStyle = grad;
+    ctx.fillRect(0, 0, 256, 256);
+    // Fine dark sepia-umber longitudinal shaft streaks (标志性头顶至背部与胸部的细密暗色纵纹)
+    for (let i = 0; i < 260; i++) {
+      const sx = ((i * 73) % 256);
+      const sy = ((i * 41) % 210);
+      const len = 10 + (i % 16);
+      const w = 1.1 + (i % 3) * 0.55;
+      ctx.fillStyle = sy < 120 ? 'rgba(42, 26, 12, 0.56)' : 'rgba(68, 42, 18, 0.34)';
+      ctx.fillRect(sx, sy, w, len);
+      // Soft lighter feather barb highlight beside each dark shaft
+      ctx.fillStyle = 'rgba(218, 182, 122, 0.22)';
+      ctx.fillRect(sx + w, sy + 1, 1.0, len * 0.8);
+    }
+    const tex = new THREE.CanvasTexture(c);
+    tex.colorSpace = THREE.SRGBColorSpace;
+    tex.wrapS = THREE.RepeatWrapping;
+    tex.wrapT = THREE.ClampToEdgeWrapping;
+    localTextures.push(tex);
+    return tex;
+  };
+  const hwameiPlumageTex = makeHwameiPlumageTex();
+  const hwameiBodyMat = trackMat(
+    new THREE.MeshStandardMaterial({
+      color: 0xffffff,
+      map: hwameiPlumageTex,
+      roughness: 0.78,
+      metalness: 0.0,
+    })
   );
-  birdBody.scale.set(0.85, 0.85, 1.35);
-  birdBody.position.set(0, -1.13, 0);
-  birdcageGroup.add(birdBody);
-  const birdHead = new THREE.Mesh(
-    trackGeo(new THREE.SphereGeometry(0.048, 8, 6)),
-    createPaintedWoodMat(0x8a5d34, trackMat, 0.72)
+  const hwameiWingMat = trackMat(
+    new THREE.MeshStandardMaterial({
+      color: 0x7b5629,
+      map: hwameiPlumageTex,
+      roughness: 0.80,
+      metalness: 0.0,
+    })
   );
-  birdHead.position.set(0, -1.07, 0.085);
-  birdcageGroup.add(birdHead);
-  const birdTail = new THREE.Mesh(
-    trackGeo(new THREE.ConeGeometry(0.032, 0.14, 6)),
-    createPaintedWoodMat(0x6e4724, trackMat, 0.75)
+  const hwameiPrimaryMat = trackMat(
+    new THREE.MeshStandardMaterial({
+      color: 0x4f3518,
+      roughness: 0.84,
+      metalness: 0.0,
+    })
   );
-  birdTail.rotation.x = -0.9;
-  birdTail.position.set(0, -1.16, -0.11);
-  birdcageGroup.add(birdTail);
+  const hwameiBellyMat = trackMat(
+    new THREE.MeshStandardMaterial({
+      color: 0xc9a36a,
+      roughness: 0.82,
+      metalness: 0.0,
+    })
+  );
+  const hwameiWhiteBrowMat = trackMat(
+    new THREE.MeshStandardMaterial({
+      color: 0xfbfaf4,
+      roughness: 0.55,
+      metalness: 0.0,
+    })
+  );
+  const hwameiBeakMat = trackMat(
+    new THREE.MeshStandardMaterial({
+      color: 0xd9a13d,
+      roughness: 0.36,
+      metalness: 0.04,
+    })
+  );
+  const hwameiBeakTipMat = trackMat(
+    new THREE.MeshStandardMaterial({
+      color: 0x7e5a24,
+      roughness: 0.42,
+      metalness: 0.04,
+    })
+  );
+  const hwameiEyeMat = trackMat(
+    new THREE.MeshStandardMaterial({
+      color: 0x111012,
+      roughness: 0.12,
+      metalness: 0.18,
+    })
+  );
+  const hwameiLegMat = trackMat(
+    new THREE.MeshStandardMaterial({
+      color: 0xb99156,
+      roughness: 0.64,
+      metalness: 0.02,
+    })
+  );
+
+  // Root bird assembly seated precisely on the bamboo perch at y = -1.20,
+  // posed in a classic three-quarter profile toward Front Skywell so its white eyebrow, curved beak & tail read clearly
+  const hwameiRoot = new THREE.Group();
+  hwameiRoot.position.set(0, -1.20, 0);
+  hwameiRoot.rotation.y = -Math.PI * 0.14;
+  birdcageGroup.add(hwameiRoot);
+
+  // 1. Articulated legs & 4-toed claws physically gripping around the r = 0.014 bamboo perch
+  const toeCurveFrontGeo = trackGeo(
+    createTaperedCurveGeometry(
+      [
+        new THREE.Vector3(0, 0.014, 0.003),
+        new THREE.Vector3(0, 0.013, 0.014),
+        new THREE.Vector3(0, 0.002, 0.019),
+        new THREE.Vector3(0, -0.009, 0.014),
+      ],
+      0.0026,
+      0.0014,
+      6,
+      5
+    )
+  );
+  const toeCurveRearGeo = trackGeo(
+    createTaperedCurveGeometry(
+      [
+        new THREE.Vector3(0, 0.014, -0.003),
+        new THREE.Vector3(0, 0.011, -0.015),
+        new THREE.Vector3(0, -0.002, -0.017),
+        new THREE.Vector3(0, -0.010, -0.011),
+      ],
+      0.0026,
+      0.0014,
+      6,
+      5
+    )
+  );
+  const tarsusGeo = trackGeo(new THREE.CylinderGeometry(0.0034, 0.0028, 0.044, 6));
+  const thighGeo = trackGeo(new THREE.SphereGeometry(0.015, 8, 6));
+
+  for (const side of [-1, 1]) {
+    const legGroup = new THREE.Group();
+    legGroup.position.set(side * 0.022, 0, 0);
+    // 3 forward toes gripping front of perch + 1 hallux gripping rear of perch
+    for (const yaw of [-0.34, 0, 0.34]) {
+      const fToe = new THREE.Mesh(toeCurveFrontGeo, hwameiLegMat);
+      fToe.rotation.y = yaw;
+      legGroup.add(fToe);
+    }
+    const rToe = new THREE.Mesh(toeCurveRearGeo, hwameiLegMat);
+    legGroup.add(rToe);
+    // Slender tarsus rising slightly backward to feathered thigh
+    const tarsus = new THREE.Mesh(tarsusGeo, hwameiLegMat);
+    tarsus.position.set(0, 0.032, -0.006);
+    tarsus.rotation.x = -0.26;
+    legGroup.add(tarsus);
+    const thigh = new THREE.Mesh(thighGeo, hwameiBellyMat);
+    thigh.scale.set(0.85, 1.15, 0.95);
+    thigh.position.set(0, 0.056, -0.014);
+    legGroup.add(thigh);
+    hwameiRoot.add(legGroup);
+  }
+
+  // 2. Plump natural passerine torso (tilted gracefully upward at ~28° alert Hwamei stance)
+  const hwameiBodyGroup = new THREE.Group();
+  hwameiBodyGroup.position.set(0, 0.072, -0.008);
+  hwameiRoot.add(hwameiBodyGroup);
+
+  const torsoGeo = trackGeo(
+    createTurnedLatheGeometry(
+      [
+        [0.005, -0.088],
+        [0.026, -0.068],
+        [0.048, -0.032],
+        [0.058, 0.008],
+        [0.056, 0.046],
+        [0.042, 0.076],
+        [0.024, 0.094],
+        [0.004, 0.100],
+      ],
+      16
+    )
+  );
+  const torsoMesh = new THREE.Mesh(torsoGeo, hwameiBodyMat);
+  torsoMesh.rotation.x = Math.PI * 0.5 - 0.50; // natural uplifted breast & sloped back
+  torsoMesh.scale.set(0.88, 1.0, 0.96);
+  hwameiBodyGroup.add(torsoMesh);
+
+  // Soft warm buff-ochre chest & belly contour pad
+  const chestPad = new THREE.Mesh(trackGeo(new THREE.SphereGeometry(0.046, 12, 10)), hwameiBellyMat);
+  chestPad.scale.set(0.88, 0.96, 1.14);
+  chestPad.position.set(0, -0.004, 0.026);
+  hwameiBodyGroup.add(chestPad);
+
+  // 3. Sculpted folded layered wings (left & right with covert & dark primary feather tiers)
+  const wingShellGeo = trackGeo(new THREE.SphereGeometry(0.054, 12, 10));
+  const wingTipGeo = trackGeo(new THREE.ConeGeometry(0.018, 0.082, 7));
+  const hwameiWingLeft = new THREE.Group();
+  const hwameiWingRight = new THREE.Group();
+  for (const [side, wg] of [
+    [-1, hwameiWingLeft],
+    [1, hwameiWingRight],
+  ] as const) {
+    wg.position.set(side * 0.038, 0.008, -0.006);
+    const covert = new THREE.Mesh(wingShellGeo, hwameiWingMat);
+    covert.scale.set(0.36, 0.66, 1.38);
+    covert.rotation.set(-0.44, side * 0.14, side * -0.14);
+    wg.add(covert);
+    // Layered darker primary flight feather tips tapering neatly toward rump
+    for (let f = 0; f < 3; f++) {
+      const feather = new THREE.Mesh(wingTipGeo, f === 2 ? hwameiPrimaryMat : hwameiWingMat);
+      feather.scale.set(0.45, 1.0, 0.95);
+      feather.rotation.set(-Math.PI * 0.5 - 0.38 - f * 0.05, side * 0.08, 0);
+      feather.position.set(side * (0.005 - f * 0.003), -0.020 - f * 0.006, -0.056 - f * 0.012);
+      wg.add(feather);
+    }
+    hwameiBodyGroup.add(wg);
+  }
+
+  // 4. Graduated tiered tail feathers (5 overlapping rounded olive-brown tail blades)
+  const hwameiTailPivot = new THREE.Group();
+  hwameiTailPivot.position.set(0, -0.026, -0.072);
+  hwameiTailPivot.rotation.x = -0.34;
+  hwameiBodyGroup.add(hwameiTailPivot);
+  const tailBladeGeo = trackGeo(new THREE.BoxGeometry(0.017, 0.004, 0.135));
+  for (let tIdx = -2; tIdx <= 2; tIdx++) {
+    const absIdx = Math.abs(tIdx);
+    const blade = new THREE.Mesh(tailBladeGeo, absIdx === 0 ? hwameiWingMat : hwameiPrimaryMat);
+    const lenScale = 1.0 - absIdx * 0.10;
+    blade.scale.set(1.0, 1.0, lenScale);
+    blade.position.set(tIdx * 0.0085, -absIdx * 0.0022, -0.064 * lenScale);
+    blade.rotation.y = -tIdx * 0.065;
+    hwameiTailPivot.add(blade);
+  }
+
+  // 5. Articulated Hwamei Head Group with ICONIC flush white eye-ring + long sweeping white eyebrow, glossy eyes & decurved amber beak
+  // Smooth feathered neck bridge connecting breast to head cleanly
+  const neckBridge = new THREE.Mesh(trackGeo(new THREE.SphereGeometry(0.036, 12, 10)), hwameiBodyMat);
+  neckBridge.scale.set(0.86, 1.08, 0.96);
+  neckBridge.position.set(0, 0.044, 0.042);
+  hwameiBodyGroup.add(neckBridge);
+
+  const hwameiHeadPivot = new THREE.Group();
+  hwameiHeadPivot.position.set(0, 0.060, 0.056);
+  hwameiBodyGroup.add(hwameiHeadPivot);
+
+  // Rounded olive-brown crown & warm tawny cheek volume with subtle erectile crown feathers
+  const headSkull = new THREE.Mesh(trackGeo(new THREE.SphereGeometry(0.038, 16, 14)), hwameiBodyMat);
+  headSkull.scale.set(0.88, 0.94, 1.18);
+  headSkull.position.set(0, 0.018, 0.008);
+  hwameiHeadPivot.add(headSkull);
+
+  const crownCrest = new THREE.Mesh(trackGeo(new THREE.SphereGeometry(0.025, 12, 8)), hwameiBodyMat);
+  crownCrest.scale.set(0.76, 0.48, 1.32);
+  crownCrest.position.set(0, 0.044, -0.004);
+  crownCrest.rotation.x = -0.20;
+  hwameiHeadPivot.add(crownCrest);
+
+  // Signature snow-white eye-ring (白眼圈) flush on cheek + long sweeping pure-white eyebrow (白色画眉线) extending gracefully to nape!
+  const eyeRingGeo = trackGeo(new THREE.TorusGeometry(0.0088, 0.0022, 8, 18));
+  const eyeBallGeo = trackGeo(new THREE.SphereGeometry(0.0066, 10, 8));
+  const eyeGlintGeo = trackGeo(new THREE.SphereGeometry(0.0018, 6, 6));
+  const browStripeLeftGeo = trackGeo(
+    createTaperedCurveGeometry(
+      [
+        new THREE.Vector3(-0.0265, 0.024, 0.027),
+        new THREE.Vector3(-0.0312, 0.0265, 0.014),
+        new THREE.Vector3(-0.0315, 0.0270, -0.004),
+        new THREE.Vector3(-0.0262, 0.0245, -0.024),
+        new THREE.Vector3(-0.0165, 0.0205, -0.038),
+      ],
+      0.0042,
+      0.0012,
+      10,
+      6
+    )
+  );
+  const browStripeRightGeo = trackGeo(
+    createTaperedCurveGeometry(
+      [
+        new THREE.Vector3(0.0265, 0.024, 0.027),
+        new THREE.Vector3(0.0312, 0.0265, 0.014),
+        new THREE.Vector3(0.0315, 0.0270, -0.004),
+        new THREE.Vector3(0.0262, 0.0245, -0.024),
+        new THREE.Vector3(0.0165, 0.0205, -0.038),
+      ],
+      0.0042,
+      0.0012,
+      10,
+      6
+    )
+  );
+
+  for (const side of [-1, 1]) {
+    // Flush crisp white spectacle ring encircling the eye (flattened laterally so it hugs head plumage naturally)
+    const eyeRing = new THREE.Mesh(eyeRingGeo, hwameiWhiteBrowMat);
+    eyeRing.position.set(side * 0.0272, 0.023, 0.0225);
+    eyeRing.rotation.y = side * (Math.PI * 0.5 - 0.28);
+    eyeRing.scale.set(1.06, 0.96, 0.52);
+    hwameiHeadPivot.add(eyeRing);
+
+    // Glossy obsidian eye recessed cleanly inside the white eye-ring + tiny lively specular catchlight
+    const eyeBall = new THREE.Mesh(eyeBallGeo, hwameiEyeMat);
+    eyeBall.position.set(side * 0.0262, 0.023, 0.0225);
+    eyeBall.scale.set(0.75, 1.0, 1.0);
+    hwameiHeadPivot.add(eyeBall);
+    const glint = new THREE.Mesh(eyeGlintGeo, hwameiWhiteBrowMat);
+    glint.position.set(side * 0.0308, 0.0252, 0.0252);
+    hwameiHeadPivot.add(glint);
+
+    // Iconic elongated pure-white "painted eyebrow" supercilium sweeping cleanly back behind the eye
+    const brow = new THREE.Mesh(
+      side < 0 ? browStripeLeftGeo : browStripeRightGeo,
+      hwameiWhiteBrowMat
+    );
+    hwameiHeadPivot.add(brow);
+  }
+
+  // Gently decurved yellow-brown / horn-amber upper & articulated lower beak (微弯黄褐色喙)
+  const upperBeakGeo = trackGeo(
+    createTaperedCurveGeometry(
+      [
+        new THREE.Vector3(0, 0.0205, 0.042),
+        new THREE.Vector3(0, 0.0195, 0.059),
+        new THREE.Vector3(0, 0.0155, 0.074),
+        new THREE.Vector3(0, 0.010, 0.085),
+      ],
+      0.0080,
+      0.0015,
+      8,
+      7
+    )
+  );
+  const upperBeak = new THREE.Mesh(upperBeakGeo, hwameiBeakMat);
+  upperBeak.scale.set(0.78, 0.84, 1.0);
+  hwameiHeadPivot.add(upperBeak);
+  const beakTip = new THREE.Mesh(trackGeo(new THREE.ConeGeometry(0.0026, 0.013, 6)), hwameiBeakTipMat);
+  beakTip.position.set(0, 0.009, 0.086);
+  beakTip.rotation.x = Math.PI * 0.5 + 0.42;
+  hwameiHeadPivot.add(beakTip);
+
+  const hwameiLowerBeakPivot = new THREE.Group();
+  hwameiLowerBeakPivot.position.set(0, 0.014, 0.042);
+  const lowerBeakGeo = trackGeo(
+    createTaperedCurveGeometry(
+      [
+        new THREE.Vector3(0, 0, 0),
+        new THREE.Vector3(0, -0.001, 0.017),
+        new THREE.Vector3(0, -0.0028, 0.034),
+      ],
+      0.0062,
+      0.0014,
+      6,
+      6
+    )
+  );
+  const lowerBeak = new THREE.Mesh(lowerBeakGeo, hwameiBeakMat);
+  lowerBeak.scale.set(0.74, 0.66, 1.0);
+  hwameiLowerBeakPivot.add(lowerBeak);
+  hwameiHeadPivot.add(hwameiLowerBeakPivot);
+
   root.add(birdcageGroup);
+
+  // Natural Hwamei micro-animation driver (alert head turns, singing trill, breathing & tail bob)
+  const updateHwameiBird = (timeSec: number, _dt: number, excited: number) => {
+    const breath = Math.sin(timeSec * 3.8);
+    // Periodic cheerful song bursts + immediate excited song when user taps the cage
+    const songCycle = Math.sin(timeSec * 0.65);
+    const isSinging = excited > 0.08 || songCycle > 0.68;
+    const songAmp = Math.max(excited, isSinging ? (songCycle - 0.68) * 2.8 : 0);
+
+    // Subtle body breathing & lively singing hop/lean
+    hwameiBodyGroup.position.y = 0.072 + breath * 0.0025 + Math.abs(Math.sin(timeSec * 10.0)) * songAmp * 0.004;
+    hwameiBodyGroup.rotation.x = -0.05 * songAmp + breath * 0.025;
+
+    // Curious passerine head turning & cocking (smooth quantized-feeling glance rhythm)
+    const glanceWave = Math.sin(timeSec * 1.15) * 0.42 + Math.sin(timeSec * 2.75) * 0.16;
+    hwameiHeadPivot.rotation.y = glanceWave * (1.0 - songAmp * 0.45);
+    hwameiHeadPivot.rotation.z = Math.sin(timeSec * 0.85 + 1.2) * 0.14;
+    hwameiHeadPivot.rotation.x = -0.22 * songAmp + Math.sin(timeSec * 1.9) * 0.06;
+
+    // Articulated lower mandible trilling open while singing
+    const trill = isSinging ? (0.5 + 0.5 * Math.sin(timeSec * 26.0)) * (0.14 + songAmp * 0.24) : 0.0;
+    hwameiLowerBeakPivot.rotation.x = trill;
+
+    // Expressive tail dip & occasional subtle wing flick
+    hwameiTailPivot.rotation.x = -0.34 + Math.sin(timeSec * 2.4) * 0.06 + Math.sin(timeSec * 14.0) * songAmp * 0.10;
+    const wingFlick = Math.pow(Math.max(0, Math.sin(timeSec * 1.7 + 0.5)), 16) * 0.09 + songAmp * 0.05 * Math.sin(timeSec * 16.0);
+    hwameiWingLeft.rotation.z = wingFlick;
+    hwameiWingRight.rotation.z = -wingFlick;
+  };
 
   // =========================================================================
   // 05. MIDDLE HALL: EIGHT-IMMORTALS TABLE, TAISHI ARMCHAIRS, ABACUS, GENEALOGY
@@ -744,9 +1335,10 @@ export function buildWeilongProps(
   jiaobeiRight.rotation.set(Math.PI * 0.5, -0.4, Math.PI);
   root.add(jiaobeiRight);
 
-  // Octagonal gilded palace Ding Lantern (八角添丁花灯)
+  // Octagonal gilded palace Ding Lantern (八角添丁花灯) anchored by taut golden silk cord to Upper Hall ridge purlin (y=7.62)
+  const dingAnchorY = 7.62;
   const dingLanternGroup = new THREE.Group();
-  dingLanternGroup.position.set(-2.2, 3.55, -2.8);
+  dingLanternGroup.position.set(-2.2, 3.55, -2.7);
   const dingBodyGeo = trackGeo(
     createTurnedLatheGeometry(
       [
@@ -763,6 +1355,9 @@ export function buildWeilongProps(
   const dingCap = new THREE.Mesh(trackGeo(new THREE.ConeGeometry(0.62, 0.28, 8)), mats.gildedGold);
   dingCap.position.y = 0.52;
   dingLanternGroup.add(dingCap);
+  const dingFinialRing = new THREE.Mesh(trackGeo(new THREE.TorusGeometry(0.048, 0.012, 6, 12)), mats.gildedGold);
+  dingFinialRing.position.y = 0.68;
+  dingLanternGroup.add(dingFinialRing);
   const dingBot = new THREE.Mesh(trackGeo(new THREE.CylinderGeometry(0.38, 0.46, 0.12, 8)), mats.gildedGold);
   dingBot.position.y = -0.42;
   dingLanternGroup.add(dingBot);
@@ -770,6 +1365,28 @@ export function buildWeilongProps(
   dingTassel.position.y = -0.68;
   dingLanternGroup.add(dingTassel);
   root.add(dingLanternGroup);
+
+  // Ceiling brass rosette & dynamically scaled suspension cord anchored strictly to the Upper Hall ridge purlin
+  const dingCeilingRosette = new THREE.Mesh(
+    trackGeo(new THREE.CylinderGeometry(0.075, 0.09, 0.04, 12)),
+    mats.bronzeMetal
+  );
+  dingCeilingRosette.position.set(-2.2, dingAnchorY, -2.7);
+  root.add(dingCeilingRosette);
+  const dingCordMesh = new THREE.Mesh(
+    trackGeo(new THREE.CylinderGeometry(0.016, 0.016, 1.0, 8)),
+    mats.gildedGold
+  );
+  root.add(dingCordMesh);
+
+  const updateDingLanternHeight = (worldY: number) => {
+    dingLanternGroup.position.y = worldY;
+    const cordBottomY = worldY + 0.66;
+    const cordHeight = Math.max(0.2, dingAnchorY - cordBottomY);
+    dingCordMesh.scale.set(1, cordHeight, 1);
+    dingCordMesh.position.set(-2.2, cordBottomY + cordHeight * 0.5, -2.7);
+  };
+  updateDingLanternHeight(3.55);
 
   // =========================================================================
   // 08, 09, 10. WEST WING: CARVED CANOPY BED, ROCKER CRADLE, VANITY, WELL, STUDY
@@ -1612,9 +2229,13 @@ export function buildWeilongProps(
     grainMatGroups,
     grainTarpCovers,
     grainStaticRake,
+    updateGrainDrying,
+    updateHwameiBird,
+    updateDingLanternHeight,
     dispose: () => {
       geometries.forEach((g) => g.dispose());
       localMaterials.forEach((m) => m.dispose());
+      localTextures.forEach((t) => t.dispose());
     },
   };
 }

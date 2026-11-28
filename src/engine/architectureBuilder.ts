@@ -30,6 +30,7 @@ import {
   INNER_RING_RX,
   INNER_RING_RZ,
   isDragonApexBay,
+  isPavedTreeSite,
   isRingRoomPartitionBoundary,
   isValidTreePosition,
   OUTER_BAY_COUNT,
@@ -41,6 +42,11 @@ import {
   sampleInnerWeilongCurve,
   sampleOuterWeilongCurve,
 } from './worldMath';
+import {
+  computeGableSlopeY,
+  computeInnerWeilongLanternAnchor,
+  computeLanternCenterY,
+} from './weatherPhysics';
 
 export interface ArchitectureRefs {
   root: THREE.Group;
@@ -76,6 +82,17 @@ interface ColumnInstanceData {
   x: number;
   yBase: number;
   z: number;
+  height: number;
+}
+
+interface TimberMemberData {
+  ax: number;
+  ay: number;
+  az: number;
+  bx: number;
+  by: number;
+  bz: number;
+  width: number;
   height: number;
 }
 
@@ -155,6 +172,69 @@ function createCurvedRoofStrip(
 }
 
 /**
+ * Builds the solid opaque interior cedar roof boarding (望板) tucked 0.048m underneath
+ * a concave roof slope with inward/downward FrontSide normals — completely seals interiors
+ * from exterior roof tiles and rain runoff.
+ */
+function createCurvedRoofSheathingStrip(
+  eave0: THREE.Vector3,
+  eave1: THREE.Vector3,
+  ridge1: THREE.Vector3,
+  ridge0: THREE.Vector3,
+  tileScaleU = 2.2,
+  tileScaleV = 2.2,
+  slopeSteps = 4,
+  sagAmount = 0.22,
+  offsetY = 0.048
+): THREE.BufferGeometry {
+  const geo = new THREE.BufferGeometry();
+  const positions: number[] = [];
+  const uvs: number[] = [];
+  const indices: number[] = [];
+
+  const wBot = eave0.distanceTo(eave1);
+  const wTop = ridge0.distanceTo(ridge1);
+  const hSide = eave0.distanceTo(ridge0);
+  const uBot = wBot / tileScaleU;
+  const uTop = wTop / tileScaleU;
+  const vTotal = hSide / tileScaleV;
+
+  const pL = new THREE.Vector3();
+  const pR = new THREE.Vector3();
+
+  for (let s = 0; s <= slopeSteps; s++) {
+    const f = s / slopeSteps;
+    const concaveSag = -sagAmount * Math.sin(f * Math.PI) * (1.0 - 0.16 * f);
+    const eaveLift = f === 0 ? 0.035 : 0.0;
+
+    pL.lerpVectors(eave0, ridge0, f);
+    pR.lerpVectors(eave1, ridge1, f);
+
+    pL.y += concaveSag + eaveLift + organicRoofSettling(pL.x, pL.z) - offsetY;
+    pR.y += concaveSag + eaveLift + organicRoofSettling(pR.x, pR.z) - offsetY;
+
+    const uRowWidth = THREE.MathUtils.lerp(uBot, uTop, f);
+    const uOffset = (uBot - uRowWidth) * 0.5;
+    const vCoord = f * vTotal;
+
+    positions.push(pL.x, pL.y, pL.z, pR.x, pR.y, pR.z);
+    uvs.push(uOffset, vCoord, uOffset + uRowWidth, vCoord);
+
+    if (s < slopeSteps) {
+      const row = s * 2;
+      // Reversed winding so FrontSide faces strictly downward into the interior
+      indices.push(row, row + 3, row + 1, row, row + 2, row + 3);
+    }
+  }
+
+  geo.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+  geo.setAttribute('uv', new THREE.Float32BufferAttribute(uvs, 2));
+  geo.setIndex(indices);
+  geo.computeVertexNormals();
+  return geo;
+}
+
+/**
  * Builds a single crisp world-UV triangle (for gable infill walls).
  */
 function createWorldUvTri(
@@ -179,6 +259,63 @@ function createWorldUvTri(
   ]);
   geo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
   geo.setAttribute('uv', new THREE.BufferAttribute(uvs, 2));
+  geo.computeVertexNormals();
+  return geo;
+}
+
+/**
+ * Builds a concave-trimmed gable infill wall whose upper rim hugs the exact underside of
+ * a concave catenary roof (`sagAmount`), preventing straight white gable triangles from ever
+ * poking up through curved clay roof tiles.
+ */
+function createConcaveGableWall(
+  p0: THREE.Vector3,
+  p1: THREE.Vector3,
+  apex: THREE.Vector3,
+  tileScale = 3.6,
+  sagAmount = 0.22,
+  steps = 4,
+  tuckY = 0.075
+): THREE.BufferGeometry {
+  const geo = new THREE.BufferGeometry();
+  const baseY = Math.min(p0.y, p1.y);
+  const mid = new THREE.Vector3().addVectors(p0, p1).multiplyScalar(0.5);
+  mid.y = baseY;
+
+  const rim: THREE.Vector3[] = [];
+  for (let s = 0; s <= steps; s++) {
+    const f = s / steps;
+    const pt = new THREE.Vector3().lerpVectors(p0, apex, f);
+    const sag = -sagAmount * Math.sin(f * Math.PI) * (1.0 - 0.16 * f);
+    pt.y = Math.max(baseY, pt.y + sag - tuckY);
+    rim.push(pt);
+  }
+  for (let s = 1; s <= steps; s++) {
+    const f = 1 - s / steps;
+    const pt = new THREE.Vector3().lerpVectors(p1, apex, f);
+    const sag = -sagAmount * Math.sin(f * Math.PI) * (1.0 - 0.16 * f);
+    pt.y = Math.max(baseY, pt.y + sag - tuckY);
+    rim.push(pt);
+  }
+
+  const rightAxis = new THREE.Vector3().subVectors(p1, p0).normalize();
+  const positions: number[] = [];
+  const uvs: number[] = [];
+
+  const pushVert = (v: THREE.Vector3) => {
+    positions.push(v.x, v.y, v.z);
+    const dx = new THREE.Vector3().subVectors(v, p0).dot(rightAxis);
+    uvs.push(dx / tileScale, (v.y - baseY) / tileScale);
+  };
+
+  for (let k = 0; k < rim.length - 1; k++) {
+    pushVert(mid);
+    pushVert(rim[k + 1]);
+    pushVert(rim[k]);
+  }
+
+  geo.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+  geo.setAttribute('uv', new THREE.Float32BufferAttribute(uvs, 2));
   geo.computeVertexNormals();
   return geo;
 }
@@ -235,6 +372,58 @@ function createCurvedRoofTri(
 }
 
 /**
+ * Interior cedar roof boarding (望板) for triangular hip-roof faces (reversed downward normals).
+ */
+function createCurvedRoofSheathingTri(
+  eave0: THREE.Vector3,
+  eave1: THREE.Vector3,
+  apex: THREE.Vector3,
+  tileScale = 2.2,
+  tiers = 3,
+  sagAmount = 0.19,
+  offsetY = 0.048
+): THREE.BufferGeometry {
+  const geo = new THREE.BufferGeometry();
+  const positions: number[] = [];
+  const uvs: number[] = [];
+  const indices: number[] = [];
+
+  const wBase = eave0.distanceTo(eave1);
+  const midBase = new THREE.Vector3().addVectors(eave0, eave1).multiplyScalar(0.5);
+  const hTotal = midBase.distanceTo(apex);
+
+  const pL = new THREE.Vector3();
+  const pR = new THREE.Vector3();
+
+  for (let t = 0; t <= tiers; t++) {
+    const f = t / tiers;
+    const concaveSag = -sagAmount * Math.sin(f * Math.PI);
+    pL.lerpVectors(eave0, apex, f);
+    pR.lerpVectors(eave1, apex, f);
+    pL.y += concaveSag + organicRoofSettling(pL.x, pL.z) * 0.7 - offsetY;
+    pR.y += concaveSag + organicRoofSettling(pR.x, pR.z) * 0.7 - offsetY;
+
+    const uSpan = (wBase * (1 - f)) / tileScale;
+    const uStart = ((wBase / tileScale) - uSpan) * 0.5;
+    const vCoord = (f * hTotal) / tileScale;
+
+    positions.push(pL.x, pL.y, pL.z, pR.x, pR.y, pR.z);
+    uvs.push(uStart, vCoord, uStart + uSpan, vCoord);
+
+    if (t < tiers) {
+      const row = t * 2;
+      indices.push(row, row + 3, row + 1, row, row + 2, row + 3);
+    }
+  }
+
+  geo.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+  geo.setAttribute('uv', new THREE.Float32BufferAttribute(uvs, 2));
+  geo.setIndex(indices);
+  geo.computeVertexNormals();
+  return geo;
+}
+
+/**
  * Builds the 1:1 photorealistic Meizhou Oval Double-Weilongwu matching
  * /public/assets/aistudio/image_2a7cd311.png with painstaking detail on every tile,
  * eave rafter, ridge spine, granite plinth, weathered lime wall, carved column, and landscape element.
@@ -252,6 +441,26 @@ export function buildWeilongArchitecture(
   const eaveTiles: EaveInstanceData[] = [];
   const rafterTails: EaveInstanceData[] = [];
   const columns: ColumnInstanceData[] = [];
+  const timberMembers: TimberMemberData[] = [];
+
+  /**
+   * Registers a structural cedar timber member (主梁 / 抬梁 / 瓜柱 / 檩条 / 椽子) spanning (a -> b)
+   * into a single batched InstancedMesh for authentic traditional carpentry at minimal draw-call cost.
+   */
+  const pushTimberMember = (
+    ax: number,
+    ay: number,
+    az: number,
+    bx: number,
+    by: number,
+    bz: number,
+    width: number,
+    height: number
+  ) => {
+    const len = Math.hypot(bx - ax, by - ay, bz - az);
+    if (len < 0.05) return;
+    timberMembers.push({ ax, ay, az, bx, by, bz, width, height });
+  };
 
   const trackGeo = <T extends THREE.BufferGeometry>(g: T): T => {
     geometries.push(g);
@@ -451,6 +660,12 @@ export function buildWeilongArchitecture(
         southMesh.castShadow = castShadow;
         southMesh.receiveShadow = true;
         root.add(southMesh);
+        const southSheath = new THREE.Mesh(
+          trackGeo(createCurvedRoofSheathingStrip(s0, s1, r1, r0, 2.2, 2.2, 4, 0.22)),
+          mats.roofSheathing
+        );
+        southSheath.receiveShadow = true;
+        root.add(southSheath);
 
         const northMesh = new THREE.Mesh(
           trackGeo(createCurvedRoofStrip(n1, n0, r0, r1, 2.0, 2.0, 4, 0.22)),
@@ -459,6 +674,12 @@ export function buildWeilongArchitecture(
         northMesh.castShadow = castShadow;
         northMesh.receiveShadow = true;
         root.add(northMesh);
+        const northSheath = new THREE.Mesh(
+          trackGeo(createCurvedRoofSheathingStrip(n1, n0, r0, r1, 2.2, 2.2, 4, 0.22)),
+          mats.roofSheathing
+        );
+        northSheath.receiveShadow = true;
+        root.add(northSheath);
 
         // Segmented organic lime-mortar main ridge spine (正脊) + shadow-sealing purlin beam
         const ra = r0.clone();
@@ -491,7 +712,10 @@ export function buildWeilongArchitecture(
         const gW1 = new THREE.Vector3(cx - halfL + 0.25, gableBaseY, cz + halfS - overhang * 0.6);
         const gW2 = new THREE.Vector3(cx - halfL + 0.25, gableBaseY, cz - halfS + overhang * 0.6);
         const gWT = new THREE.Vector3(cx - halfL + 0.25, ridgeY, cz);
-        const gWMesh = new THREE.Mesh(trackGeo(createWorldUvTri(gW1, gW2, gWT, 3.6)), mats.limeWall);
+        const gWMesh = new THREE.Mesh(
+          trackGeo(createConcaveGableWall(gW1, gW2, gWT, 3.6, 0.22)),
+          mats.limeWall
+        );
         gWMesh.castShadow = castShadow;
         gWMesh.receiveShadow = true;
         root.add(gWMesh);
@@ -499,25 +723,108 @@ export function buildWeilongArchitecture(
         const gE1 = new THREE.Vector3(cx + halfL - 0.25, gableBaseY, cz - halfS + overhang * 0.6);
         const gE2 = new THREE.Vector3(cx + halfL - 0.25, gableBaseY, cz + halfS - overhang * 0.6);
         const gET = new THREE.Vector3(cx + halfL - 0.25, ridgeY, cz);
-        const gEMesh = new THREE.Mesh(trackGeo(createWorldUvTri(gE1, gE2, gET, 3.6)), mats.limeWall);
+        const gEMesh = new THREE.Mesh(
+          trackGeo(createConcaveGableWall(gE1, gE2, gET, 3.6, 0.22)),
+          mats.limeWall
+        );
         gEMesh.castShadow = castShadow;
         gEMesh.receiveShadow = true;
         root.add(gEMesh);
 
-        const slopeLen = Math.hypot(halfS, ridgeY - eaveY);
+        // Concave 2-chord verge bargeboards (悬山博风) hugging the curved roof tiles cleanly
         for (const endX of [cx - halfL + 0.06, cx + halfL - 0.06]) {
           for (const dirZ of [-1, 1]) {
-            const verge = new THREE.Mesh(trackGeo(new THREE.BoxGeometry(0.22, 0.18, slopeLen)), mats.limeRidge);
-            verge.position.set(endX, (ridgeY + eaveY) * 0.5 + 0.02, cz + dirZ * halfS * 0.5);
-            verge.rotation.x = dirZ * pitch;
-            verge.castShadow = castShadow;
-            root.add(verge);
+            const pEave = new THREE.Vector3(endX, eaveY + 0.06, cz + dirZ * halfS);
+            const pMid = new THREE.Vector3(
+              endX,
+              (eaveY + ridgeY) * 0.5 - 0.22 * 0.92 + 0.05,
+              cz + dirZ * halfS * 0.5
+            );
+            const pRidge = new THREE.Vector3(endX, ridgeY + 0.05, cz);
+            for (const [va, vb] of [
+              [pEave, pMid],
+              [pMid, pRidge],
+            ]) {
+              const verge = new THREE.Mesh(
+                trackGeo(new THREE.BoxGeometry(0.22, 0.16, va.distanceTo(vb) + 0.08)),
+                mats.limeRidge
+              );
+              verge.position.lerpVectors(va, vb, 0.5);
+              verge.lookAt(vb);
+              verge.castShadow = castShadow;
+              root.add(verge);
+            }
           }
         }
       }
 
       registerEaveMicroGeometry(cx - halfL, eaveY, cz + halfS, cx + halfL, eaveY, cz + halfS, 0, 1, pitch, 0.72);
       registerEaveMicroGeometry(cx - halfL, eaveY, cz - halfS, cx + halfL, eaveY, cz - halfS, 0, -1, pitch, 0.72);
+
+      // Authentic Hakka interior roof timber framing (抬梁主梁、瓜柱、多道檩条、通长斜椽)
+      const sag = 0.22;
+      const slopeY = (f: number, xVal: number, zVal: number) =>
+        eaveY +
+        (ridgeY - eaveY) * f -
+        sag * Math.sin(f * Math.PI) * (1.0 - 0.16 * f) +
+        organicRoofSettling(xVal, zVal);
+
+      // 1. Longitudinal slope purlins (檐檩、下金檩、上金檩) on both north & south slopes
+      const purlinFracs = [0.10, 0.42, 0.72];
+      for (const dirZ of [-1, 1]) {
+        for (const f of purlinFracs) {
+          const pz = cz + dirZ * halfS * (1.0 - f);
+          const py0 = slopeY(f, cx - halfL + 0.2, pz) - 0.16;
+          const py1 = slopeY(f, cx + halfL - 0.2, pz) - 0.16;
+          pushTimberMember(cx - halfL + 0.18, py0, pz, cx + halfL - 0.18, py1, pz, 0.14, 0.16);
+        }
+      }
+
+      // 2. Interior structural trusses (大梁 + 二梁 + 中瓜柱 + 边瓜柱) spaced ~3.2m inside the roof bay
+      const trussSpanL = Math.max(2.0, length - 0.8);
+      const trussCount = Math.max(2, Math.round(trussSpanL / 3.2));
+      const beamHalfZ = Math.max(1.2, span * 0.5 - 0.08);
+      const mainBeamY = eaveY + 0.02;
+      for (let ti = 0; ti <= trussCount; ti++) {
+        const tx = cx - trussSpanL * 0.5 + (ti / trussCount) * trussSpanL;
+        // Skip overlapping flush with solid gable end walls
+        if (gableEnds && (ti === 0 || ti === trussCount) && trussCount >= 3) continue;
+        // Main heavy tie beam (大梁 / 抬梁) spanning wall-to-wall
+        pushTimberMember(tx, mainBeamY, cz - beamHalfZ, tx, mainBeamY, cz + beamHalfZ, 0.20, 0.26);
+        // Upper collar beam (二梁)
+        const collarZ = beamHalfZ * 0.54;
+        const collarY = slopeY(0.50, tx, cz + collarZ) - 0.24;
+        if (collarY > mainBeamY + 0.35) {
+          pushTimberMember(tx, collarY, cz - collarZ, tx, collarY, cz + collarZ, 0.16, 0.20);
+        }
+        // Central king post (脊瓜柱) supporting ridge purlin
+        const ridgeUnderY = slopeY(1.0, tx, cz) - 0.22;
+        pushTimberMember(tx, mainBeamY + 0.08, cz, tx, ridgeUnderY, cz, 0.16, 0.16);
+        // Side queen posts (金瓜柱) supporting lower slope purlins
+        for (const dirZ of [-1, 1]) {
+          const qz = cz + dirZ * halfS * (1.0 - 0.42);
+          const qTopY = slopeY(0.42, tx, qz) - 0.18;
+          if (qTopY > mainBeamY + 0.22) {
+            pushTimberMember(tx, mainBeamY + 0.08, qz, tx, qTopY, qz, 0.13, 0.13);
+          }
+        }
+      }
+
+      // 3. Full-length curved sloped rafters (通长椽子) tucked cleanly beneath cedar roof sheathing
+      const rafterCount = Math.max(6, Math.round((halfL * 2) / 0.68));
+      for (let ri = 0; ri <= rafterCount; ri++) {
+        const rx = cx - halfL + 0.24 + (ri / rafterCount) * Math.max(0.2, halfL * 2 - 0.48);
+        for (const dirZ of [-1, 1]) {
+          const zEave = cz + dirZ * (halfS - 0.06);
+          const zMid = cz + dirZ * (halfS * 0.50);
+          const zRidge = cz + dirZ * 0.12;
+          const yEave = slopeY(0.02, rx, zEave) - 0.12;
+          const yMid = slopeY(0.50, rx, zMid) - 0.125;
+          const yRidge = slopeY(0.98, rx, zRidge) - 0.13;
+          pushTimberMember(rx, yEave, zEave, rx, yMid, zMid, 0.065, 0.085);
+          pushTimberMember(rx, yMid, zMid, rx, yRidge, zRidge, 0.065, 0.085);
+        }
+      }
     } else {
       for (let i = 0; i < longSteps; i++) {
         const z0 = cz - halfL + (i / longSteps) * (halfL * 2);
@@ -536,6 +843,12 @@ export function buildWeilongArchitecture(
         eastMesh.castShadow = castShadow;
         eastMesh.receiveShadow = true;
         root.add(eastMesh);
+        const eastSheath = new THREE.Mesh(
+          trackGeo(createCurvedRoofSheathingStrip(e1, e0, r0, r1, 2.2, 2.2, 4, 0.21)),
+          mats.roofSheathing
+        );
+        eastSheath.receiveShadow = true;
+        root.add(eastSheath);
 
         const westMesh = new THREE.Mesh(
           trackGeo(createCurvedRoofStrip(w0, w1, r1, r0, 2.0, 2.0, 4, 0.21)),
@@ -544,6 +857,12 @@ export function buildWeilongArchitecture(
         westMesh.castShadow = castShadow;
         westMesh.receiveShadow = true;
         root.add(westMesh);
+        const westSheath = new THREE.Mesh(
+          trackGeo(createCurvedRoofSheathingStrip(w0, w1, r1, r0, 2.2, 2.2, 4, 0.21)),
+          mats.roofSheathing
+        );
+        westSheath.receiveShadow = true;
+        root.add(westSheath);
 
         const ra = r0.clone();
         ra.y += organicRoofSettling(ra.x, ra.z) + 0.09;
@@ -571,20 +890,38 @@ export function buildWeilongArchitecture(
       }
 
       if (gableEnds) {
-        const slopeLen = Math.hypot(halfS, ridgeY - eaveY);
+        // Concave 2-chord verge bargeboards (悬山博风) hugging the curved N-S wing roof tiles cleanly
         for (const endZ of [cz - halfL + 0.06, cz + halfL - 0.06]) {
           for (const dirX of [-1, 1]) {
-            const verge = new THREE.Mesh(trackGeo(new THREE.BoxGeometry(slopeLen, 0.18, 0.22)), mats.limeRidge);
-            verge.position.set(cx + dirX * halfS * 0.5, (ridgeY + eaveY) * 0.5 + 0.02, endZ);
-            verge.rotation.z = -dirX * pitch;
-            verge.castShadow = castShadow;
-            root.add(verge);
+            const pEave = new THREE.Vector3(cx + dirX * halfS, eaveY + 0.06, endZ);
+            const pMid = new THREE.Vector3(
+              cx + dirX * halfS * 0.5,
+              (eaveY + ridgeY) * 0.5 - 0.21 * 0.92 + 0.05,
+              endZ
+            );
+            const pRidge = new THREE.Vector3(cx, ridgeY + 0.05, endZ);
+            for (const [va, vb] of [
+              [pEave, pMid],
+              [pMid, pRidge],
+            ]) {
+              const verge = new THREE.Mesh(
+                trackGeo(new THREE.BoxGeometry(0.16, 0.16, va.distanceTo(vb) + 0.08)),
+                mats.limeRidge
+              );
+              verge.position.lerpVectors(va, vb, 0.5);
+              verge.lookAt(vb);
+              verge.castShadow = castShadow;
+              root.add(verge);
+            }
           }
         }
         const gS1 = new THREE.Vector3(cx - halfS + overhang * 0.5, gableBaseY, cz + halfL - 0.22);
         const gS2 = new THREE.Vector3(cx + halfS - overhang * 0.5, gableBaseY, cz + halfL - 0.22);
         const gST = new THREE.Vector3(cx, ridgeY, cz + halfL - 0.22);
-        const gSMesh = new THREE.Mesh(trackGeo(createWorldUvTri(gS1, gS2, gST, 3.6)), mats.limeWall);
+        const gSMesh = new THREE.Mesh(
+          trackGeo(createConcaveGableWall(gS1, gS2, gST, 3.6, 0.21)),
+          mats.limeWall
+        );
         gSMesh.castShadow = castShadow;
         gSMesh.receiveShadow = true;
         root.add(gSMesh);
@@ -592,7 +929,10 @@ export function buildWeilongArchitecture(
         const gN1 = new THREE.Vector3(cx + halfS - overhang * 0.5, gableBaseY, cz - halfL + 0.22);
         const gN2 = new THREE.Vector3(cx - halfS + overhang * 0.5, gableBaseY, cz - halfL + 0.22);
         const gNT = new THREE.Vector3(cx, ridgeY, cz - halfL + 0.22);
-        const gNMesh = new THREE.Mesh(trackGeo(createWorldUvTri(gN1, gN2, gNT, 3.6)), mats.limeWall);
+        const gNMesh = new THREE.Mesh(
+          trackGeo(createConcaveGableWall(gN1, gN2, gNT, 3.6, 0.21)),
+          mats.limeWall
+        );
         gNMesh.castShadow = castShadow;
         gNMesh.receiveShadow = true;
         root.add(gNMesh);
@@ -600,6 +940,63 @@ export function buildWeilongArchitecture(
 
       registerEaveMicroGeometry(cx + halfS, eaveY, cz - halfL, cx + halfS, eaveY, cz + halfL, 1, 0, pitch, 0.78);
       registerEaveMicroGeometry(cx - halfS, eaveY, cz - halfL, cx - halfS, eaveY, cz + halfL, -1, 0, pitch, 0.78);
+
+      // Authentic Hakka interior roof timber framing for N-S wings (横屋大梁、瓜柱、檩条、通长椽子)
+      const sag = 0.21;
+      const slopeY = (f: number, xVal: number, zVal: number) =>
+        eaveY +
+        (ridgeY - eaveY) * f -
+        sag * Math.sin(f * Math.PI) * (1.0 - 0.16 * f) +
+        organicRoofSettling(xVal, zVal);
+
+      const purlinFracs = [0.10, 0.42, 0.72];
+      for (const dirX of [-1, 1]) {
+        for (const f of purlinFracs) {
+          const px = cx + dirX * halfS * (1.0 - f);
+          const py0 = slopeY(f, px, cz - halfL + 0.2) - 0.16;
+          const py1 = slopeY(f, px, cz + halfL - 0.2) - 0.16;
+          pushTimberMember(px, py0, cz - halfL + 0.18, px, py1, cz + halfL - 0.18, 0.14, 0.16);
+        }
+      }
+
+      const trussSpanL = Math.max(2.0, length - 0.8);
+      const trussCount = Math.max(2, Math.round(trussSpanL / 3.2));
+      const beamHalfX = Math.max(1.2, span * 0.5 - 0.08);
+      const mainBeamY = eaveY + 0.02;
+      for (let ti = 0; ti <= trussCount; ti++) {
+        const tz = cz - trussSpanL * 0.5 + (ti / trussCount) * trussSpanL;
+        if (gableEnds && (ti === 0 || ti === trussCount) && trussCount >= 3) continue;
+        pushTimberMember(cx - beamHalfX, mainBeamY, tz, cx + beamHalfX, mainBeamY, tz, 0.20, 0.26);
+        const collarX = beamHalfX * 0.54;
+        const collarY = slopeY(0.50, cx + collarX, tz) - 0.24;
+        if (collarY > mainBeamY + 0.35) {
+          pushTimberMember(cx - collarX, collarY, tz, cx + collarX, collarY, tz, 0.16, 0.20);
+        }
+        const ridgeUnderY = slopeY(1.0, cx, tz) - 0.22;
+        pushTimberMember(cx, mainBeamY + 0.08, tz, cx, ridgeUnderY, tz, 0.16, 0.16);
+        for (const dirX of [-1, 1]) {
+          const qx = cx + dirX * halfS * (1.0 - 0.42);
+          const qTopY = slopeY(0.42, qx, tz) - 0.18;
+          if (qTopY > mainBeamY + 0.22) {
+            pushTimberMember(qx, mainBeamY + 0.08, tz, qx, qTopY, tz, 0.13, 0.13);
+          }
+        }
+      }
+
+      const rafterCount = Math.max(6, Math.round((halfL * 2) / 0.72));
+      for (let ri = 0; ri <= rafterCount; ri++) {
+        const rz = cz - halfL + 0.24 + (ri / rafterCount) * Math.max(0.2, halfL * 2 - 0.48);
+        for (const dirX of [-1, 1]) {
+          const xEave = cx + dirX * (halfS - 0.06);
+          const xMid = cx + dirX * (halfS * 0.50);
+          const xRidge = cx + dirX * 0.12;
+          const yEave = slopeY(0.02, xEave, rz) - 0.12;
+          const yMid = slopeY(0.50, xMid, rz) - 0.125;
+          const yRidge = slopeY(0.98, xRidge, rz) - 0.13;
+          pushTimberMember(xEave, yEave, rz, xMid, yMid, rz, 0.065, 0.085);
+          pushTimberMember(xMid, yMid, rz, xRidge, yRidge, rz, 0.065, 0.085);
+        }
+      }
     }
   };
 
@@ -634,6 +1031,12 @@ export function buildWeilongArchitecture(
       m.castShadow = castShadow;
       m.receiveShadow = true;
       root.add(m);
+      const sheathTri = new THREE.Mesh(
+        trackGeo(createCurvedRoofSheathingTri(a, b, apex, 2.2, 3, 0.18)),
+        mats.roofSheathing
+      );
+      sheathTri.receiveShadow = true;
+      root.add(sheathTri);
     }
     // Segmented curved pale-grey lime hip ribs along all 4 diagonal ridges!
     for (const corner of [sw, se, ne, nw]) {
@@ -654,6 +1057,45 @@ export function buildWeilongArchitecture(
       }
     }
     addBox(0.32, 0.22, 0.32, cx, peakY + 0.08, cz, mats.limeRidge, 0, root, false);
+
+    // Complete underside pyramidal hip roof timber structure (檐枋、十字大梁、雷公柱、四隅角梁、腰檩与斜椽)
+    const beamY = eaveY + 0.04;
+    const inHw = hw * 0.88;
+    const inHd = hd * 0.88;
+    // Perimeter eave tie beams
+    pushTimberMember(cx - inHw, beamY, cz + inHd, cx + inHw, beamY, cz + inHd, 0.16, 0.20);
+    pushTimberMember(cx + inHw, beamY, cz + inHd, cx + inHw, beamY, cz - inHd, 0.16, 0.20);
+    pushTimberMember(cx + inHw, beamY, cz - inHd, cx - inHw, beamY, cz - inHd, 0.16, 0.20);
+    pushTimberMember(cx - inHw, beamY, cz - inHd, cx - inHw, beamY, cz + inHd, 0.16, 0.20);
+    // Cross tie beams & central king post (雷公柱)
+    pushTimberMember(cx - inHw, beamY, cz, cx + inHw, beamY, cz, 0.18, 0.22);
+    pushTimberMember(cx, beamY, cz - inHd, cx, beamY, cz + inHd, 0.18, 0.22);
+    pushTimberMember(cx, beamY + 0.05, cz, cx, peakY - 0.18, cz, 0.16, 0.16);
+    // 4 diagonal hip rafters (角梁) & mid-slope purlin ring (腰檩)
+    const midY = eaveY + (peakY - eaveY) * 0.48 - 0.18 - 0.12;
+    const midCorners = [
+      new THREE.Vector3(cx - hw * 0.52, midY, cz + hd * 0.52),
+      new THREE.Vector3(cx + hw * 0.52, midY, cz + hd * 0.52),
+      new THREE.Vector3(cx + hw * 0.52, midY, cz - hd * 0.52),
+      new THREE.Vector3(cx - hw * 0.52, midY, cz - hd * 0.52),
+    ];
+    for (let c = 0; c < 4; c++) {
+      const corner = [sw, se, ne, nw][c];
+      const midC = midCorners[c];
+      const nextMid = midCorners[(c + 1) % 4];
+      pushTimberMember(corner.x, corner.y - 0.10, corner.z, midC.x, midC.y, midC.z, 0.14, 0.16);
+      pushTimberMember(midC.x, midC.y, midC.z, apex.x, apex.y - 0.16, apex.z, 0.14, 0.16);
+      // Mid-slope purlin ring segment
+      pushTimberMember(midC.x, midC.y, midC.z, nextMid.x, nextMid.y, nextMid.z, 0.11, 0.13);
+      // Center sloped rafter on each triangular face
+      const nextCorner = [sw, se, ne, nw][(c + 1) % 4];
+      const edgeMidX = (corner.x + nextCorner.x) * 0.5;
+      const edgeMidZ = (corner.z + nextCorner.z) * 0.5;
+      const purlinMidX = (midC.x + nextMid.x) * 0.5;
+      const purlinMidZ = (midC.z + nextMid.z) * 0.5;
+      pushTimberMember(edgeMidX, eaveY - 0.08, edgeMidZ, purlinMidX, midY + 0.04, purlinMidZ, 0.07, 0.09);
+      pushTimberMember(purlinMidX, midY + 0.04, purlinMidZ, apex.x, apex.y - 0.12, apex.z, 0.07, 0.09);
+    }
   };
 
   // =========================================================================
@@ -1593,30 +2035,47 @@ export function buildWeilongArchitecture(
   for (const cx of [-2.35, 2.35, -14.45, 14.45]) {
     addBox(0.32, 1.85, 0.04, cx, 1.75, 21.91, mats.redCouplet, 0, root, false);
   }
-  // Golden calligraphy clan plaque "陇西世泽" with carved gilded frame
-  addBox(2.58, 0.72, 0.08, 0, 2.68, 21.88, mats.gildedGold, 0, root, false);
-  addBox(2.45, 0.62, 0.1, 0, 2.68, 21.92, mats.plaqueLongxi, 0, root, false);
-  addBox(2.74, 0.88, 0.1, 0, 3.38, 17.56, mats.gildedGold, 0, root, false);
-  addBox(2.6, 0.78, 0.12, 0, 3.38, 17.6, mats.plaqueLongxi, 0, root, false);
+  // Golden calligraphy clan plaque "陇西世泽" mounted cleanly on the outer granite portal lintel (zero Z-clipping)
+  addBox(2.58, 0.62, 0.06, 0, 2.94, 21.95, mats.gildedGold, 0, root, false);
+  addBox(2.44, 0.52, 0.08, 0, 2.94, 21.98, mats.plaqueLongxi, 0, root, false);
 
   // Horizontal dark-framed windows along the front white facade
   for (const wx of [-12.6, -10.2, -7.2, -4.6, 4.6, 7.2, 10.2, 12.6]) {
     addWindow(1.45, 0.92, wx, 2.05, 21.88, 0);
   }
 
-  // 8 Sculpted Melon-Ribbed Hakka Vermilion-and-Gold Lanterns strung across the front eave!
+  // 8 Sculpted Melon-Ribbed Hakka Vermilion-and-Gold Lanterns anchored cleanly under the Front South Eave Purlin!
+  // Front wing south eave purlin is at f = 0.10 => z = FRONT_CENTER_Z + (5.25*0.5 + 0.68)*0.90 = 22.1245
+  const frontSouthPurlinZ = FRONT_CENTER_Z + (5.25 * 0.5 + 0.68) * 0.90;
+  const frontSouthPurlinBaseY = computeGableSlopeY(3.15, 5.35, 0.10, 0.22) - 0.16 - 0.075;
   for (const lx of [-17.5, -13.8, -8.8, -3.2, 3.2, 8.8, 13.8, 17.5]) {
-    const lg = createCraftedLantern(mats, lanternGeos, 0.96, 0.34);
-    lg.position.set(lx, 2.86, 22.28);
+    const scale = 0.96;
+    const cordLen = 0.30;
+    const anchorY = frontSouthPurlinBaseY + organicRoofSettling(lx, frontSouthPurlinZ);
+    const lg = createCraftedLantern(mats, lanternGeos, scale, cordLen);
+    lg.position.set(lx, computeLanternCenterY(anchorY, scale, cordLen), frontSouthPurlinZ);
     root.add(lg);
   }
 
-  // Front Straight Wing inner corridor wall at z = 16.55 (wide open central & wing passages)
-  addCraftedWall(10.2, 3.2, 0.36, -7.7, 0.25, 16.55);
-  addCraftedWall(10.2, 3.2, 0.36, 7.7, 0.25, 16.55);
-  // Carved timber colonnade inside Lower Hall
+  // Front Straight Wing inner corridor wall at z = 16.55 (tucked cleanly beneath north eave sheathing, zero roof clipping)
+  addCraftedWall(10.2, 3.02, 0.36, -7.7, 0.25, 16.55);
+  addCraftedWall(10.2, 3.02, 0.36, 7.7, 0.25, 16.55);
+  // Carved timber colonnade inside Lower Hall + continuous cedar lintel beam supporting the inner clan plaque cleanly below roof trusses
   for (const cx of [-2.4, 2.4, -13.0, 13.0, -18.2, 18.2]) {
-    columns.push({ x: cx, yBase: 0.25, z: 16.65, height: 3.1 });
+    columns.push({ x: cx, yBase: 0.25, z: 16.65, height: 2.86 });
+  }
+  addBox(5.1, 0.16, 0.20, 0, 3.03, 16.65, mats.darkTimber);
+  // Second doorway clan plaque "陇西世泽" cleanly suspended beneath the Lower Hall colonnade lintel (zero beam clipping!)
+  const secondPlaqueGroup = new THREE.Group();
+  secondPlaqueGroup.position.set(0, 2.64, 16.78);
+  secondPlaqueGroup.rotation.x = 0.10;
+  addBox(2.22, 0.58, 0.06, 0, 0, -0.02, mats.gildedGold, 0, secondPlaqueGroup, false);
+  addBox(2.08, 0.48, 0.07, 0, 0, 0.01, mats.plaqueLongxi, 0, secondPlaqueGroup, false);
+  root.add(secondPlaqueGroup);
+  // Twin wrought-bronze suspension brackets tying the second plaque directly up to the z=16.65 cedar lintel beam
+  for (const hx of [-0.78, 0.78]) {
+    addBox(0.032, 0.22, 0.032, hx, 2.94, 16.72, mats.bronzeMetal, 0, root, false);
+    addBox(0.036, 0.032, 0.14, hx, 3.01, 16.69, mats.bronzeMetal, 0, root, false);
   }
 
   // Animated Heavy Wooden Doumen Gates (东西斗门) integrated directly into the front facade openings!
@@ -1676,8 +2135,17 @@ export function buildWeilongArchitecture(
     // Centered dark-framed square wooden window facing South (into courtyard) & inward (facing Front Skywell)
     addWindow(0.92, 0.92, cx, 1.9, cz + 2.02, 0);
     addWindow(0.92, 0.92, cx - side * 1.52, 1.9, cz, Math.PI * 0.5);
-    // Sharp triangular pitched transverse roof crowning each flanking chamber (exact photo silhouette!)
-    addTriangularTransverseRoof(side * 8.1, 13.6, 5.4, 6.2, 3.2, 5.75);
+    // Sharp triangular pitched transverse roof with authentic 0.60m inner veranda overhang (inner eave edge x = ±4.80)
+    addTriangularTransverseRoof(side * 7.80, 13.6, 6.0, 6.2, 3.2, 5.75);
+    // Solid cedar veranda eave purlin (x = ±4.92, y = 3.16, bottom = 3.08) + carved wall brackets supporting lanterns & birdcage!
+    addBox(0.14, 0.16, 5.9, side * 4.92, 3.16, 13.6, mats.darkTimber);
+    for (const bz of [11.6, 15.6]) {
+      addBox(0.56, 0.12, 0.12, side * 5.16, 3.12, bz, mats.darkTimber);
+      const brace = createCarvedBracket(mats, trackGeo, 0.72);
+      brace.position.set(side * 5.26, 2.94, bz);
+      brace.rotation.y = side > 0 ? Math.PI : 0;
+      root.add(brace);
+    }
   }
 
   // --- MIDDLE HALL (中堂: x = -11.4..11.4, z = 5.4..10.6) ---
@@ -1689,10 +2157,16 @@ export function buildWeilongArchitecture(
   // Exposed horizontal cedar tie beams (抬梁)
   addBox(22.0, 0.24, 0.24, 0, 4.18, 10.2, mats.darkTimber);
   addBox(22.0, 0.24, 0.24, 0, 4.18, 5.7, mats.darkTimber);
-  addBox(2.6, 0.88, 0.14, 0, 3.75, 5.9, mats.plaqueJiaxun, 0, root, false);
-  // Side partition walls of Middle Hall
-  addCraftedWall(3.0, 3.75, 0.34, -11.4, 0.45, 9.1, Math.PI * 0.5);
-  addCraftedWall(3.0, 3.75, 0.34, 11.4, 0.45, 9.1, Math.PI * 0.5);
+  // Middle Hall clan plaque "敦亲睦族" suspended cleanly BELOW the 3.90m N-S truss beams via twin bronze hangers (zero clipping!)
+  addBox(2.48, 0.70, 0.08, 0, 3.48, 5.81, mats.gildedGold, 0, root, false);
+  addBox(2.34, 0.60, 0.10, 0, 3.48, 5.85, mats.plaqueJiaxun, 0, root, false);
+  for (const hx of [-0.88, 0.88]) {
+    addBox(0.036, 0.34, 0.036, hx, 3.94, 5.76, mats.bronzeMetal, 0, root, false);
+    addBox(0.04, 0.036, 0.16, hx, 4.10, 5.74, mats.bronzeMetal, 0, root, false);
+  }
+  // Side partition walls of Middle Hall (tucked strictly inside the x = ±11.51 gable & below roof slope — zero roof penetration!)
+  addCraftedWall(3.0, 3.46, 0.34, -11.15, 0.45, 9.1, Math.PI * 0.5);
+  addCraftedWall(3.0, 3.46, 0.34, 11.15, 0.45, 9.1, Math.PI * 0.5);
   // Grand East-West pitched tiled roof over Middle Hall (tall horizontal ridge!)
   addGableRoof({
     cx: 0,
@@ -1709,17 +2183,17 @@ export function buildWeilongArchitecture(
 
   // --- REAR SKYWELL (后天井) & TWIN TRIANGULAR FLANKING ROOFS (exact photo geometry!) ---
   for (const side of [-1, 1]) {
-    // Open colonnade flanking the Rear Skywell
-    columns.push({ x: side * 4.7, yBase: 0.35, z: 3.8, height: 3.55 });
-    columns.push({ x: side * 4.7, yBase: 0.35, z: 1.4, height: 3.55 });
-    addBox(0.22, 0.22, 5.0, side * 4.7, 3.88, 2.8, mats.darkTimber);
+    // Open colonnade flanking the Rear Skywell (tucked cleanly beneath the eaveY = 3.65 pyramid roof sheathing!)
+    columns.push({ x: side * 4.7, yBase: 0.35, z: 3.8, height: 3.22 });
+    columns.push({ x: side * 4.7, yBase: 0.35, z: 1.4, height: 3.22 });
+    addBox(0.22, 0.22, 5.0, side * 4.7, 3.61, 2.8, mats.darkTimber);
     // Steep triangular pitched transverse roof flanking the Rear Skywell (exact match to photo's middle triangles!)
     addTriangularTransverseRoof(side * 7.6, 2.8, 6.2, 5.6, 3.65, 6.55);
   }
 
   // --- UPPER HALL / ANCESTRAL SANCTUARY (上堂: x = -12.6..12.6, z = -5.6..0.2) ---
-  // Rear Ancestral Shrine Wall (with wide open side passages to Huatai at x = ±5.0..±11.4!)
-  addCraftedWall(8.8, 4.4, 0.44, 0, 0.85, -5.6);
+  // Rear Ancestral Shrine Wall (top y = 0.85 + 4.08 = 4.93, safely below Upper Hall north roof sheathing y = 5.01!)
+  addCraftedWall(8.8, 4.08, 0.44, 0, 0.85, -5.6);
   // Carved timber columns on Upper Hall dais
   for (const cx of [-10.4, -5.4, -2.5, 2.5, 5.4, 10.4]) {
     columns.push({ x: cx, yBase: 0.85, z: -0.1, height: 4.1 });
@@ -1727,9 +2201,9 @@ export function buildWeilongArchitecture(
   }
   addBox(24.6, 0.26, 0.26, 0, 4.92, -0.1, mats.darkTimber);
   addBox(24.6, 0.26, 0.26, 0, 4.92, -5.1, mats.darkTimber);
-  // Side partitions of Upper Hall
-  addCraftedWall(3.3, 4.1, 0.34, -11.4, 0.85, -0.85, Math.PI * 0.5);
-  addCraftedWall(3.3, 4.1, 0.34, 11.4, 0.85, -0.85, Math.PI * 0.5);
+  // Side partitions of Upper Hall (top y = 0.85 + 3.85 = 4.70, tucked inside gable & strictly below Upper Hall south slope y = 4.79!)
+  addCraftedWall(3.3, 3.85, 0.34, -11.15, 0.85, -0.85, Math.PI * 0.5);
+  addCraftedWall(3.3, 3.85, 0.34, 11.15, 0.85, -0.85, Math.PI * 0.5);
   // Tallest, grandest East-West pitched tiled roof of the entire central core!
   addGableRoof({
     cx: 0,
@@ -1749,34 +2223,34 @@ export function buildWeilongArchitecture(
     const wx = side * 14.9;
     // Wing stone floor
     addBox(7.2, 0.32, 20.6, wx, 0.16, 6.4, mats.graniteSlab, 0, root, false);
-    // Wing outer walls facing the sunlit crescent Tianjie (x = ±18.4) with 3 wide open doorways
-    addCraftedWall(2.6, 3.35, 0.38, side * 18.4, 0.32, 15.1, Math.PI * 0.5);
-    addCraftedWall(4.6, 3.35, 0.38, side * 18.4, 0.32, 7.7, Math.PI * 0.5);
-    addCraftedWall(2.4, 3.35, 0.38, side * 18.4, 0.32, 0.2, Math.PI * 0.5);
+    // Wing outer walls facing the sunlit crescent Tianjie (x = ±18.4, top y = 0.32 + 2.96 = 3.28 < roof sheathing y = 3.36!)
+    addCraftedWall(2.6, 2.96, 0.38, side * 18.4, 0.32, 15.1, Math.PI * 0.5);
+    addCraftedWall(4.6, 2.96, 0.38, side * 18.4, 0.32, 7.7, Math.PI * 0.5);
+    addCraftedWall(2.4, 2.96, 0.38, side * 18.4, 0.32, 0.2, Math.PI * 0.5);
 
     // Wing windows facing the crescent Tianjie courtyard
     addWindow(1.15, 0.95, side * 18.6, 2.05, 15.1, Math.PI * 0.5);
     addWindow(1.15, 0.95, side * 18.6, 2.05, 0.2, Math.PI * 0.5);
 
-    // Internal room dividers (Bedroom / Well / Study on West; Kitchen / Poultry / Granary on East)
-    addCraftedWall(4.0, 3.25, 0.28, side * 16.2, 0.32, 8.2, 0, mats.limeWallInterior);
-    addCraftedWall(4.0, 3.25, 0.28, side * 16.2, 0.32, 1.4, 0, mats.limeWallInterior);
+    // Internal room dividers (top y = 3.28, cleanly tucked beneath Hengwu roof everywhere!)
+    addCraftedWall(4.0, 2.96, 0.28, side * 16.2, 0.32, 8.2, 0, mats.limeWallInterior);
+    addCraftedWall(4.0, 2.96, 0.28, side * 16.2, 0.32, 1.4, 0, mats.limeWallInterior);
 
     // Clan Study plaque "耕读传家" inside West Wing
     if (side === -1) {
       addBox(2.2, 0.72, 0.1, -18.12, 2.55, -1.8, mats.plaqueGengdu, Math.PI * 0.5, root, false);
     }
 
-    // Stepped North-South pitched tiled wing roof hugging the oval courtyard (exact photo silhouette!)
+    // Stepped North-South pitched tiled wing roof aligned cleanly between inner gable x = ±11.44 and outer eave x = ±18.96
     addGableRoof({
-      cx: side * 15.0,
+      cx: side * 15.2,
       cz: 6.4,
       length: 19.6,
-      span: 6.8,
+      span: 6.4,
       eaveY: 3.25,
       ridgeY: 5.45,
       ridgeAlong: 'z',
-      overhang: 0.62,
+      overhang: 0.56,
       gableEnds: true,
       gableBaseY: 3.25,
     });
@@ -1856,21 +2330,35 @@ export function buildWeilongArchitecture(
         s1.z + s1.nz * (halfDepth + overhang)
       );
 
+      // Correct CCW upward-facing exterior winding (matching central halls' mats.roofTile Qing clay tiles!)
+      // and downward-facing interior cedar roof sheathing (望板) beneath!
       const innerSlope = new THREE.Mesh(
-        trackGeo(createCurvedRoofStrip(eaveIn0, eaveIn1, ridge1, ridge0, 2.0, 2.0, 4, 0.20)),
+        trackGeo(createCurvedRoofStrip(eaveIn1, eaveIn0, ridge0, ridge1, 2.0, 2.0, 4, 0.20)),
         mats.roofTile
       );
       innerSlope.castShadow = castShadow;
       innerSlope.receiveShadow = true;
       root.add(innerSlope);
+      const innerSheath = new THREE.Mesh(
+        trackGeo(createCurvedRoofSheathingStrip(eaveIn1, eaveIn0, ridge0, ridge1, 2.2, 2.2, 4, 0.20)),
+        mats.roofSheathing
+      );
+      innerSheath.receiveShadow = true;
+      root.add(innerSheath);
 
       const outerSlope = new THREE.Mesh(
-        trackGeo(createCurvedRoofStrip(eaveOut1, eaveOut0, ridge0, ridge1, 2.0, 2.0, 4, 0.20)),
+        trackGeo(createCurvedRoofStrip(eaveOut0, eaveOut1, ridge1, ridge0, 2.0, 2.0, 4, 0.20)),
         mats.roofTile
       );
       outerSlope.castShadow = castShadow;
       outerSlope.receiveShadow = true;
       root.add(outerSlope);
+      const outerSheath = new THREE.Mesh(
+        trackGeo(createCurvedRoofSheathingStrip(eaveOut0, eaveOut1, ridge1, ridge0, 2.2, 2.2, 4, 0.20)),
+        mats.roofSheathing
+      );
+      outerSheath.receiveShadow = true;
+      root.add(outerSheath);
 
       // Organic smoothly-curving pale lime ridge spine + shadow-sealing ridge purlin
       const ra = ridge0.clone();
@@ -1917,6 +2405,72 @@ export function buildWeilongArchitecture(
         slopePitch,
         0.92
       );
+
+      // Authentic curved Weilong roof underside timber framing (穿斗抬梁、瓜柱、环形檩条、通长斜椽)
+      const ringSag = 0.20;
+      const ringSlopePt = (
+        ePt: THREE.Vector3,
+        rPt: THREE.Vector3,
+        f: number,
+        underOffset: number
+      ): [number, number, number] => {
+        const px = ePt.x + (rPt.x - ePt.x) * f;
+        const pz = ePt.z + (rPt.z - ePt.z) * f;
+        const sagVal = -ringSag * Math.sin(f * Math.PI) * (1.0 - 0.16 * f);
+        const py = ePt.y + (rPt.y - ePt.y) * f + sagVal + organicRoofSettling(px, pz) - underOffset;
+        return [px, py, pz];
+      };
+
+      // Curved longitudinal purlins (檐檩 & 金檩) on both inner and outer roof slopes
+      for (const fP of [0.14, 0.54]) {
+        const [inA0, inAy0, inAz0] = ringSlopePt(eaveIn0, ridge0, fP, 0.16);
+        const [inA1, inAy1, inAz1] = ringSlopePt(eaveIn1, ridge1, fP, 0.16);
+        pushTimberMember(inA0, inAy0, inAz0, inA1, inAy1, inAz1, 0.12, 0.14);
+        const [outA0, outAy0, outAz0] = ringSlopePt(eaveOut0, ridge0, fP, 0.16);
+        const [outA1, outAy1, outAz1] = ringSlopePt(eaveOut1, ridge1, fP, 0.16);
+        pushTimberMember(outA0, outAy0, outAz0, outA1, outAy1, outAz1, 0.12, 0.14);
+      }
+
+      // Full-length sloped rafters (通长椽子) tucked cleanly beneath cedar sheathing
+      for (const uFrac of [0.26, 0.74]) {
+        const eInU = new THREE.Vector3().lerpVectors(eaveIn0, eaveIn1, uFrac);
+        const eOutU = new THREE.Vector3().lerpVectors(eaveOut0, eaveOut1, uFrac);
+        const rU = new THREE.Vector3().lerpVectors(ridge0, ridge1, uFrac);
+        const [i0x, i0y, i0z] = ringSlopePt(eInU, rU, 0.03, 0.12);
+        const [iMx, iMy, iMz] = ringSlopePt(eInU, rU, 0.50, 0.125);
+        const [i1x, i1y, i1z] = ringSlopePt(eInU, rU, 0.97, 0.13);
+        pushTimberMember(i0x, i0y, i0z, iMx, iMy, iMz, 0.06, 0.075);
+        pushTimberMember(iMx, iMy, iMz, i1x, i1y, i1z, 0.06, 0.075);
+
+        const [o0x, o0y, o0z] = ringSlopePt(eOutU, rU, 0.03, 0.12);
+        const [oMx, oMy, oMz] = ringSlopePt(eOutU, rU, 0.50, 0.125);
+        const [o1x, o1y, o1z] = ringSlopePt(eOutU, rU, 0.97, 0.13);
+        pushTimberMember(o0x, o0y, o0z, oMx, oMy, oMz, 0.06, 0.075);
+        pushTimberMember(oMx, oMy, oMz, o1x, o1y, o1z, 0.06, 0.075);
+      }
+
+      // Radial tie beams & king/queen posts (穿斗抬梁与瓜柱) at bay trusses
+      if (i % 2 === 0 || isRingRoomPartitionBoundary(i, bayCount, isOuterRing)) {
+        const tieY = s0.yBase + wallHeight - 0.14;
+        const spanHalf = halfDepth - 0.12;
+        const bx0 = s0.x - s0.nx * spanHalf;
+        const bz0 = s0.z - s0.nz * spanHalf;
+        const bx1 = s0.x + s0.nx * spanHalf;
+        const bz1 = s0.z + s0.nz * spanHalf;
+        pushTimberMember(bx0, tieY, bz0, bx1, tieY, bz1, 0.16, 0.22);
+        // Central king post supporting ridge purlin
+        const ridgeTopY = s0.yBase + ridgeHeight - 0.20 + organicRoofSettling(s0.x, s0.z);
+        pushTimberMember(s0.x, tieY + 0.06, s0.z, s0.x, ridgeTopY, s0.z, 0.14, 0.14);
+        // Inner & outer queen posts supporting mid-slope purlins
+        const [qInX, qInY, qInZ] = ringSlopePt(eaveIn0, ridge0, 0.54, 0.18);
+        if (qInY > tieY + 0.2) {
+          pushTimberMember(qInX, tieY + 0.06, qInZ, qInX, qInY, qInZ, 0.11, 0.11);
+        }
+        const [qOutX, qOutY, qOutZ] = ringSlopePt(eaveOut0, ridge0, 0.54, 0.18);
+        if (qOutY > tieY + 0.2) {
+          pushTimberMember(qOutX, tieY + 0.06, qOutZ, qOutX, qOutY, qOutZ, 0.11, 0.11);
+        }
+      }
 
       // 3. Inner Concave Courtyard Wall — alternating open walk-in doorways & windowed white lime bays!
       const inX = sm.x - sm.nx * (halfDepth - 0.16);
@@ -2125,52 +2679,226 @@ export function buildWeilongArchitecture(
     root.add(baseInst, shaftInst, capInst);
   }
 
+  // 6D. Batched Structural Cedar Roof Framing InstancedMesh (主梁、瓜柱、檩条、通长斜椽 — 全屋架 1 Draw Call!)
+  if (timberMembers.length > 0) {
+    const unitBeamGeo = trackGeo(new THREE.BoxGeometry(1, 1, 1));
+    const timberInst = new THREE.InstancedMesh(unitBeamGeo, mats.darkTimber, timberMembers.length);
+    timberInst.castShadow = false;
+    timberInst.receiveShadow = true;
+
+    const vA = new THREE.Vector3();
+    const vB = new THREE.Vector3();
+    const vMid = new THREE.Vector3();
+    const vDir = new THREE.Vector3();
+    const upAxis = new THREE.Vector3(0, 1, 0);
+    const altUp = new THREE.Vector3(1, 0, 0);
+    const mat4 = new THREE.Matrix4();
+    const quat = new THREE.Quaternion();
+    const scaleVec = new THREE.Vector3();
+    const basisX = new THREE.Vector3();
+    const basisY = new THREE.Vector3();
+    const basisZ = new THREE.Vector3();
+
+    for (let i = 0; i < timberMembers.length; i++) {
+      const m = timberMembers[i];
+      vA.set(m.ax, m.ay, m.az);
+      vB.set(m.bx, m.by, m.bz);
+      vMid.addVectors(vA, vB).multiplyScalar(0.5);
+      vDir.subVectors(vB, vA);
+      const len = vDir.length();
+      basisZ.copy(vDir).divideScalar(Math.max(1e-5, len));
+      const refUp = Math.abs(basisZ.y) > 0.96 ? altUp : upAxis;
+      basisX.crossVectors(refUp, basisZ).normalize();
+      basisY.crossVectors(basisZ, basisX).normalize();
+      mat4.makeBasis(basisX, basisY, basisZ);
+      quat.setFromRotationMatrix(mat4);
+      scaleVec.set(m.width, m.height, len);
+      mat4.compose(vMid, quat, scaleVec);
+      timberInst.setMatrixAt(i, mat4);
+    }
+    timberInst.instanceMatrix.needsUpdate = true;
+    root.add(timberInst);
+  }
+
   // =========================================================================
-  // 7. HANGING RED HAKKA LANTERNS & RAIN CURTAINS (上元灯夜与四水归堂雨帘)
+  // 7. HANGING RED HAKKA LANTERNS & CALIBRATED EAVE DRIPS / SKYWELL DRAINAGE GUTTERS (四水归堂)
   // =========================================================================
-  const lanternSpots: [number, number, number][] = [
-    [-2.1, 2.75, 21.85],
-    [2.1, 2.75, 21.85],
-    [-4.8, 3.0, 12.6],
-    [4.8, 3.0, 12.6],
-    [-4.2, 3.5, 5.9],
-    [4.2, 3.5, 5.9],
-    [-4.8, 4.2, -0.3],
-    [4.8, 4.2, -0.3],
-    [-12.0, 4.1, -18.5],
-    [0.0, 4.6, -20.5],
-    [12.0, 4.1, -18.5],
+  // Every single lantern is mathematically anchored by its top brass rosette to a real beam or eave purlin.
+  const weilongWestLantern = computeInnerWeilongLanternAnchor(0.32);
+  const weilongNorthLantern = computeInnerWeilongLanternAnchor(0.50);
+  const weilongEastLantern = computeInnerWeilongLanternAnchor(0.68);
+  const lanternSpecs: Array<{ x: number; anchorY: number; z: number; scale: number; cordLen: number }> = [
+    // Portal flanking lanterns directly under Front Wing South eave purlin (z = 22.125)
+    {
+      x: -2.1,
+      anchorY: frontSouthPurlinBaseY + organicRoofSettling(-2.1, frontSouthPurlinZ),
+      z: frontSouthPurlinZ,
+      scale: 0.98,
+      cordLen: 0.32,
+    },
+    {
+      x: 2.1,
+      anchorY: frontSouthPurlinBaseY + organicRoofSettling(2.1, frontSouthPurlinZ),
+      z: frontSouthPurlinZ,
+      scale: 0.98,
+      cordLen: 0.32,
+    },
+    // Front Skywell flanking veranda eave purlin lanterns (x = ±4.92, purlin bottom y = 3.08)
+    { x: -4.92, anchorY: 3.08, z: 12.45, scale: 0.96, cordLen: 0.30 },
+    { x: 4.92, anchorY: 3.08, z: 12.45, scale: 0.96, cordLen: 0.30 },
+    // Middle Hall North tie beam (z = 5.70, beam bottom y = 4.06)
+    { x: -4.2, anchorY: 4.06, z: 5.70, scale: 1.0, cordLen: 0.36 },
+    { x: 4.2, anchorY: 4.06, z: 5.70, scale: 1.0, cordLen: 0.36 },
+    // Upper Hall South tie beam (z = -0.10, beam bottom y = 4.79)
+    { x: -4.8, anchorY: 4.79, z: -0.10, scale: 1.0, cordLen: 0.36 },
+    { x: 4.8, anchorY: 4.79, z: -0.10, scale: 1.0, cordLen: 0.36 },
+    // Inner Weilong curved inner eave purlin lanterns (exact curve-sampled anchors, zero floating!)
+    {
+      x: weilongWestLantern.x,
+      anchorY: weilongWestLantern.y + organicRoofSettling(weilongWestLantern.x, weilongWestLantern.z),
+      z: weilongWestLantern.z,
+      scale: 1.0,
+      cordLen: 0.34,
+    },
+    {
+      x: weilongNorthLantern.x,
+      anchorY: weilongNorthLantern.y + organicRoofSettling(weilongNorthLantern.x, weilongNorthLantern.z),
+      z: weilongNorthLantern.z,
+      scale: 1.0,
+      cordLen: 0.34,
+    },
+    {
+      x: weilongEastLantern.x,
+      anchorY: weilongEastLantern.y + organicRoofSettling(weilongEastLantern.x, weilongEastLantern.z),
+      z: weilongEastLantern.z,
+      scale: 1.0,
+      cordLen: 0.34,
+    },
   ];
+
   // 11 Courtyard & Hall Sculpted Melon-Ribbed Lanterns
-  lanternSpots.forEach(([lx, ly, lz], idx) => {
-    const lg = createCraftedLantern(mats, lanternGeos, 1.02, 0.36);
-    lg.position.set(lx, ly, lz);
+  lanternSpecs.forEach((spec, idx) => {
+    const ly = computeLanternCenterY(spec.anchorY, spec.scale, spec.cordLen);
+    const lg = createCraftedLantern(mats, lanternGeos, spec.scale, spec.cordLen);
+    lg.position.set(spec.x, ly, spec.z);
     root.add(lg);
     // Keep active point lights budget disciplined (max 4 non-shadow warm pools)
     if (idx === 0 || idx === 3 || idx === 6 || idx === 9) {
       const pt = new THREE.PointLight(0xff8c42, 0.25, 20, 1.7);
-      pt.position.set(lx, ly - 0.15, lz);
+      pt.position.set(spec.x, ly - 0.15, spec.z);
       root.add(pt);
       lanternLights.push(pt);
     }
   });
 
-  // Four-Waters-Return-to-Hall rain curtains in Front & Rear Skywells
+  // Animated GLSL Calibrated Eave Droplet Curtains (重力加速檐口间歇滴水 — 克制写实，绝不压过雨势)
+  const eaveRainUniforms = {
+    uTime: { value: 0 },
+    uRain: { value: 0 },
+    uNight: { value: 0 },
+  };
   const rainCurtainMat = trackMat(
-    new THREE.MeshBasicMaterial({
-      color: 0xd0e3ef,
+    new THREE.ShaderMaterial({
+      uniforms: eaveRainUniforms,
       transparent: true,
-      opacity: 0.26,
-      side: THREE.DoubleSide,
+      depthTest: true,
       depthWrite: false,
+      side: THREE.DoubleSide,
+      vertexShader: /* glsl */ `
+        varying vec2 vUv;
+        varying vec3 vWorldPos;
+        void main() {
+          vUv = uv;
+          vec4 wp = modelMatrix * vec4(position, 1.0);
+          vWorldPos = wp.xyz;
+          gl_Position = projectionMatrix * viewMatrix * wp;
+        }
+      `,
+      fragmentShader: /* glsl */ `
+        uniform float uTime;
+        uniform float uRain;
+        uniform float uNight;
+        varying vec2 vUv;
+        varying vec3 vWorldPos;
+
+        float hash11(float p) {
+          return fract(sin(p * 127.1) * 43758.5453);
+        }
+
+        void main() {
+          if (uRain <= 0.02) discard;
+          // Space discrete tile-valley drip points ~0.28m apart along eaves
+          float eaveCoord = (abs(vWorldPos.x) + abs(vWorldPos.z)) * 3.6 + vUv.x * 20.0;
+          float colId = floor(eaveCoord);
+          float colFrac = fract(eaveCoord) - 0.5;
+          float colRand = hash11(colId);
+          float colRand2 = hash11(colId + 53.7);
+
+          // Intermittent tile troughs: only ~58% of valleys drip at a given beat
+          float activeTrough = smoothstep(0.32, 0.56, colRand2 + 0.18 * sin(uTime * 0.45 + colId * 1.9));
+          if (activeTrough < 0.02) discard;
+
+          // Gravity-accelerated fall coordinate (yFall = 0 at eave tip, 1 at ground)
+          float yFall = clamp(1.0 - vUv.y, 0.0, 1.0);
+          // Elongating droplets as velocity increases downward: t_fall ~ sqrt(yFall)
+          float gravCoord = sqrt(yFall + 0.02) * 2.15;
+          float dropCycle = fract(gravCoord - uTime * (1.35 + colRand * 0.85) + colRand * 7.3);
+          float dropCycle2 = fract(gravCoord * 1.35 - uTime * (1.7 + colRand2 * 0.9) + colRand2 * 11.1);
+
+          // Hair-thin falling droplet streak (narrower & more elongated lower down)
+          float threadWidth = mix(0.038, 0.022, yFall) * mix(0.8, 1.15, colRand);
+          float strand = smoothstep(threadWidth, 0.0, abs(colFrac));
+
+          float drop1 = smoothstep(0.0, 0.045, dropCycle) * smoothstep(0.24 + yFall * 0.12, 0.055, dropCycle);
+          float drop2 = smoothstep(0.0, 0.04, dropCycle2) * smoothstep(0.20 + yFall * 0.10, 0.05, dropCycle2) * 0.65;
+          float droplets = clamp(drop1 + drop2, 0.0, 1.0);
+
+          // Barely-there glistening meniscus near the top eave edge, breaking into discrete falling drops
+          float faintFilm = 0.04 * (1.0 - yFall);
+          float splashMist = exp(-vUv.y * 13.0) * (0.12 + 0.10 * sin(eaveCoord * 5.0 - uTime * 9.0)) * activeTrough;
+          float topFade = smoothstep(1.0, 0.93, vUv.y);
+          float edgeFade = smoothstep(0.0, 0.06, vUv.x) * smoothstep(1.0, 0.94, vUv.x);
+
+          float rainScale = pow(uRain, 1.25);
+          float alpha = (strand * (faintFilm + droplets * 0.42) * activeTrough + splashMist * 0.09) * topFade * edgeFade * rainScale;
+          if (alpha < 0.012) discard;
+
+          vec3 dayCol = vec3(0.76, 0.85, 0.92);
+          vec3 nightCol = vec3(0.72, 0.64, 0.52);
+          vec3 col = mix(dayCol, nightCol, uNight * 0.65);
+          col += vec3(0.14) * droplets * strand;
+          gl_FragColor = vec4(col, clamp(alpha, 0.0, 0.34));
+        }
+      `,
     })
   );
-  for (const [rx, ry, rz, rw, rh, ryRot] of [
-    [0, 1.8, 16.0, 9.6, 3.2, 0],
-    [0, 1.8, 11.0, 9.6, 3.2, 0],
-    [0, 2.0, 5.0, 8.2, 3.4, 0],
-    [0, 2.0, 0.5, 8.2, 3.4, 0],
-  ]) {
+
+  // Align rain curtains strictly beneath physical exterior eave drip lines (never inside covered halls)
+  const iwCenter = sampleInnerWeilongCurve(0.50);
+  const iwWest = sampleInnerWeilongCurve(0.32);
+  const iwEast = sampleInnerWeilongCurve(0.68);
+  const iwDripOffset = INNER_RING_HALF_DEPTH + 0.62;
+  const rainCurtainSpecs: Array<[number, number, number, number, number, number]> = [
+    // Front Skywell 4-sided eave drip lines (Front Wing N eave z=15.85, Middle Hall S eave z=11.42, Flanking eaves x=±4.82)
+    [0, 1.65, 15.85, 9.4, 2.98, 0],
+    [0, 2.02, 11.42, 9.4, 3.74, 0],
+    [-4.82, 1.68, 13.6, 4.4, 3.04, Math.PI * 0.5],
+    [4.82, 1.68, 13.6, 4.4, 3.04, Math.PI * 0.5],
+    // Rear Skywell 4-sided eave drip lines (Middle Hall N eave z=4.58, Upper Hall S eave z=1.08, Flanking eaves x=±4.50)
+    [0, 2.12, 4.58, 8.8, 3.56, 0],
+    [0, 2.48, 1.08, 8.8, 4.24, 0],
+    [-4.50, 1.98, 2.8, 3.5, 3.26, Math.PI * 0.5],
+    [4.50, 1.98, 2.8, 3.5, 3.26, Math.PI * 0.5],
+    // Front Wing South eave drip line (facing He-Ping forecourt, z = 22.45)
+    [-9.4, 1.60, 22.45, 12.2, 3.12, 0],
+    [0.0, 1.60, 22.45, 5.6, 3.12, 0],
+    [9.4, 1.60, 22.45, 12.2, 3.12, 0],
+    // Inner Weilong curved courtyard eave drip curtains aligned to real inner eaves facing Hua-Tai
+    [iwCenter.x - iwCenter.nx * iwDripOffset, iwCenter.yBase + 1.52, iwCenter.z - iwCenter.nz * iwDripOffset, 9.6, 3.02, Math.atan2(iwCenter.nx, iwCenter.nz)],
+    [iwWest.x - iwWest.nx * iwDripOffset, iwWest.yBase + 1.52, iwWest.z - iwWest.nz * iwDripOffset, 8.4, 3.02, Math.atan2(iwWest.nx, iwWest.nz)],
+    [iwEast.x - iwEast.nx * iwDripOffset, iwEast.yBase + 1.52, iwEast.z - iwEast.nz * iwDripOffset, 8.4, 3.02, Math.atan2(iwEast.nx, iwEast.nz)],
+  ];
+  for (const [rx, ry, rz, rw, rh, ryRot] of rainCurtainSpecs) {
     const curtain = new THREE.Mesh(trackGeo(new THREE.PlaneGeometry(rw, rh)), rainCurtainMat);
     curtain.position.set(rx, ry, rz);
     curtain.rotation.y = ryRot;
@@ -2178,6 +2906,212 @@ export function buildWeilongArchitecture(
     root.add(curtain);
     rainCurtainMeshes.push(curtain);
   }
+
+  // Animated Ground & Skywell Drain Drip-Splash Ripples (檐滴砸落天井明沟与地面的清透水花与涟漪)
+  const dripSplashMat = trackMat(
+    new THREE.ShaderMaterial({
+      uniforms: eaveRainUniforms,
+      transparent: true,
+      depthTest: true,
+      depthWrite: false,
+      polygonOffset: true,
+      polygonOffsetFactor: -2,
+      vertexShader: /* glsl */ `
+        varying vec2 vUv;
+        varying vec3 vWorldPos;
+        void main() {
+          vUv = uv;
+          vec4 wp = modelMatrix * vec4(position, 1.0);
+          vWorldPos = wp.xyz;
+          gl_Position = projectionMatrix * viewMatrix * wp;
+        }
+      `,
+      fragmentShader: /* glsl */ `
+        uniform float uTime;
+        uniform float uRain;
+        uniform float uNight;
+        varying vec2 vUv;
+        varying vec3 vWorldPos;
+
+        float hash21(vec2 p) {
+          return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453);
+        }
+
+        void main() {
+          if (uRain <= 0.03) discard;
+          vec2 cellUv = vec2(vWorldPos.x * 2.2 + vWorldPos.z * 2.2, (vUv.y - 0.5) * 2.0);
+          float id = floor(cellUv.x);
+          vec2 local = vec2(fract(cellUv.x) - 0.5, cellUv.y * 0.56);
+          float h1 = hash21(vec2(id, 1.7));
+          float h2 = hash21(vec2(id + 31.0, 5.3));
+
+          float t1 = fract(uTime * (1.35 + h1 * 0.85) + h1 * 5.0);
+          float t2 = fract(uTime * (1.55 + h2 * 0.8) + h2 * 8.0 + 0.5);
+
+          float d1 = length(local - vec2((h1 - 0.5) * 0.35, (h2 - 0.5) * 0.25));
+          float d2 = length(local - vec2((h2 - 0.5) * 0.35, (h1 - 0.5) * 0.25));
+
+          // Crisp expanding splash rings + tiny droplet impact crown
+          float ring1 = smoothstep(0.042, 0.0, abs(d1 - t1 * 0.44)) * (1.0 - t1) * step(0.28, h1);
+          float ring2 = smoothstep(0.042, 0.0, abs(d2 - t2 * 0.44)) * (1.0 - t2) * step(0.38, h2);
+          float pop1 = smoothstep(0.065, 0.0, d1) * smoothstep(0.18, 0.0, t1) * step(0.28, h1);
+          float pop2 = smoothstep(0.065, 0.0, d2) * smoothstep(0.18, 0.0, t2) * step(0.38, h2);
+
+          float edgeFade = smoothstep(0.0, 0.12, vUv.x) * smoothstep(1.0, 0.88, vUv.x)
+                         * smoothstep(0.0, 0.24, vUv.y) * smoothstep(1.0, 0.76, vUv.y);
+          float intensity = (ring1 + ring2) * 0.55 + (pop1 + pop2) * 0.68;
+          float alpha = clamp(intensity * edgeFade * pow(uRain, 1.2) * 0.54, 0.0, 0.46);
+          if (alpha < 0.015) discard;
+
+          vec3 col = mix(vec3(0.80, 0.90, 0.96), vec3(0.80, 0.72, 0.60), uNight * 0.55);
+          gl_FragColor = vec4(col, alpha);
+        }
+      `,
+    })
+  );
+
+  const dripSplashSpecs: Array<[number, number, number, number, number, number]> = [
+    // Front Skywell drainage perimeter
+    [0, 0.162, 15.85, 9.4, 0.66, 0],
+    [0, 0.162, 11.42, 9.4, 0.66, 0],
+    [-4.82, 0.162, 13.6, 4.4, 0.66, Math.PI * 0.5],
+    [4.82, 0.162, 13.6, 4.4, 0.66, Math.PI * 0.5],
+    // Rear Skywell drainage perimeter
+    [0, 0.362, 4.58, 8.8, 0.64, 0],
+    [0, 0.362, 1.08, 8.8, 0.64, 0],
+    [-4.50, 0.362, 2.8, 3.5, 0.64, Math.PI * 0.5],
+    [4.50, 0.362, 2.8, 3.5, 0.64, Math.PI * 0.5],
+    // Front Wing South veranda drip line on He-Ping
+    [-9.4, 0.032, 22.45, 12.2, 0.76, 0],
+    [0.0, 0.032, 22.45, 5.6, 0.76, 0],
+    [9.4, 0.032, 22.45, 12.2, 0.76, 0],
+    // Inner Weilong courtyard eave drip strips on Hua-Tai
+    [iwCenter.x - iwCenter.nx * iwDripOffset, iwCenter.yBase + 0.04, iwCenter.z - iwCenter.nz * iwDripOffset, 9.6, 0.72, Math.atan2(iwCenter.nx, iwCenter.nz)],
+    [iwWest.x - iwWest.nx * iwDripOffset, iwWest.yBase + 0.04, iwWest.z - iwWest.nz * iwDripOffset, 8.4, 0.72, Math.atan2(iwWest.nx, iwWest.nz)],
+    [iwEast.x - iwEast.nx * iwDripOffset, iwEast.yBase + 0.04, iwEast.z - iwEast.nz * iwDripOffset, 8.4, 0.72, Math.atan2(iwEast.nx, iwEast.nz)],
+  ];
+  for (const [sx, sy, sz, sw, sd, sRot] of dripSplashSpecs) {
+    const splash = new THREE.Mesh(trackGeo(new THREE.PlaneGeometry(sw, sd)), dripSplashMat);
+    splash.rotation.x = -Math.PI * 0.5;
+    splash.rotation.z = sRot;
+    splash.position.set(sx, sy, sz);
+    splash.visible = false;
+    root.add(splash);
+    rainCurtainMeshes.push(splash);
+  }
+
+  // =========================================================================
+  // 7B. PHYSICAL STONE SKYWELL DRAINAGE GUTTERS (天井四周石砌排水明沟与雨时微流)
+  // =========================================================================
+  const drainStoneMat = trackMat(
+    new THREE.MeshStandardMaterial({
+      color: 0x5c6166,
+      roughness: 0.76,
+      metalness: 0.04,
+    })
+  );
+  const drainWaterMat = trackMat(
+    new THREE.ShaderMaterial({
+      uniforms: eaveRainUniforms,
+      transparent: true,
+      depthTest: true,
+      depthWrite: false,
+      polygonOffset: true,
+      polygonOffsetFactor: -1,
+      vertexShader: /* glsl */ `
+        varying vec2 vUv;
+        varying vec3 vWorldPos;
+        void main() {
+          vUv = uv;
+          vec4 wp = modelMatrix * vec4(position, 1.0);
+          vWorldPos = wp.xyz;
+          gl_Position = projectionMatrix * viewMatrix * wp;
+        }
+      `,
+      fragmentShader: /* glsl */ `
+        uniform float uTime;
+        uniform float uRain;
+        uniform float uNight;
+        varying vec2 vUv;
+        varying vec3 vWorldPos;
+        void main() {
+          if (uRain <= 0.04) discard;
+          // Gentle flowing micro-ripples coursing along the granite gutter toward the central drain outlet
+          float flowU = vUv.x * 16.0 - uTime * 2.2;
+          float w1 = 0.5 + 0.5 * sin(flowU + sin(vUv.y * 8.0 + uTime * 1.4) * 1.2);
+          float w2 = 0.5 + 0.5 * sin(vUv.x * 28.0 - uTime * 3.8 - vUv.y * 5.0);
+          float shimmer = smoothstep(0.45, 0.95, w1 * 0.6 + w2 * 0.4);
+          float edgeSoft = smoothstep(0.0, 0.18, vUv.y) * smoothstep(1.0, 0.82, vUv.y);
+          vec3 baseCol = mix(vec3(0.24, 0.34, 0.40), vec3(0.14, 0.18, 0.24), uNight);
+          vec3 hiCol = mix(vec3(0.68, 0.78, 0.86), vec3(0.55, 0.48, 0.38), uNight);
+          vec3 col = mix(baseCol, hiCol, shimmer * 0.62);
+          float alpha = clamp((0.36 + shimmer * 0.28) * edgeSoft * pow(uRain, 0.9), 0.0, 0.68);
+          gl_FragColor = vec4(col, alpha);
+        }
+      `,
+    })
+  );
+
+  const buildSkywellGutterLoop = (
+    yFloor: number,
+    halfX: number,
+    zNorth: number,
+    zSouth: number
+  ) => {
+    const zMid = (zNorth + zSouth) * 0.5;
+    const spanX = halfX * 2 + 0.26;
+    const spanZ = Math.abs(zSouth - zNorth) + 0.26;
+    const troughW = 0.24;
+    const curbW = 0.07;
+
+    const addGutterRun = (cx: number, cz: number, len: number, rotY: number) => {
+      // Dark carved granite trough bed
+      addBox(len, 0.024, troughW, cx, yFloor + 0.008, cz, drainStoneMat, rotY, root, false);
+      // Pair of subtle raised granite curbs framing the drainage channel
+      for (const side of [-1, 1]) {
+        const off = side * (troughW * 0.5 + curbW * 0.5);
+        const ox = Math.sin(rotY) * off;
+        const oz = Math.cos(rotY) * off;
+        addBox(len, 0.036, curbW, cx + ox, yFloor + 0.014, cz + oz, mats.granitePlinth, rotY, root, false);
+      }
+      // Rain-activated flowing shallow water strip inside the granite trench
+      const waterStrip = new THREE.Mesh(trackGeo(new THREE.PlaneGeometry(len - 0.06, troughW - 0.03)), drainWaterMat);
+      waterStrip.rotation.x = -Math.PI * 0.5;
+      waterStrip.rotation.z = rotY;
+      waterStrip.position.set(cx, yFloor + 0.023, cz);
+      waterStrip.visible = false;
+      root.add(waterStrip);
+      rainCurtainMeshes.push(waterStrip);
+    };
+
+    // 4-sided stone明沟 directly beneath the 4 eave drip edges
+    addGutterRun(0, zSouth, spanX, 0);
+    addGutterRun(0, zNorth, spanX, 0);
+    addGutterRun(-halfX, zMid, spanZ, Math.PI * 0.5);
+    addGutterRun(halfX, zMid, spanZ, Math.PI * 0.5);
+
+    // Traditional carved stone coin-slot drain outlet (铜钱漏水孔) at the south-center of the gutter
+    addBox(0.36, 0.03, 0.34, 0, yFloor + 0.015, zSouth, drainStoneMat, 0, root, false);
+    for (const gx of [-0.08, 0, 0.08]) {
+      addBox(0.025, 0.034, 0.24, gx, yFloor + 0.018, zSouth, mats.granitePlinth, 0, root, false);
+    }
+  };
+
+  // Front Skywell (下天井: floor y = 0.15) & Rear Skywell (上天井: floor y = 0.35) stone drainage loops
+  buildSkywellGutterLoop(0.15, 4.82, 11.42, 15.85);
+  buildSkywellGutterLoop(0.35, 4.50, 1.08, 4.58);
+  // Front South Veranda stone drainage gutter channeling water along the He-Ping edge toward the Half-Moon Pond
+  const addSouthDrainRun = (cx: number, len: number) => {
+    addBox(len, 0.02, 0.26, cx, 0.012, 22.45, drainStoneMat, 0, root, false);
+    const ws = new THREE.Mesh(trackGeo(new THREE.PlaneGeometry(len - 0.1, 0.22)), drainWaterMat);
+    ws.rotation.x = -Math.PI * 0.5;
+    ws.position.set(cx, 0.025, 22.45);
+    ws.visible = false;
+    root.add(ws);
+    rainCurtainMeshes.push(ws);
+  };
+  addSouthDrainRun(-10.2, 12.8);
+  addSouthDrainRun(10.2, 12.8);
 
   // =========================================================================
   // 7B. SUBTLE GROUNDED DRAINAGE & WET-STEP MOSS COLONIES (天井檐滴/石埠/围龙巷苔痕)
@@ -2234,8 +3168,8 @@ export function buildWeilongArchitecture(
   // =========================================================================
   // 8. AUTHENTIC LINGNAN VILLAGE HOUSES & LUSH GREEN SURROUNDINGS (1:1 PHOTO BACKDROP!)
   // =========================================================================
-  // 8A. NW Side Pitched-Roof Annex behind outer ring (upper-left of reference photo!)
-  addCraftedWall(18.0, 3.6, 5.2, -31.5, 1.8, -28.0, 0.24, mats.limeWall);
+  // 8A. NW Side Pitched-Roof Annex behind outer ring (aligned rotY = 0 & height tucked cleanly beneath eaveY = 5.2)
+  addCraftedWall(18.0, 3.35, 5.2, -31.5, 1.8, -28.0, 0.0, mats.limeWall);
   addGableRoof({
     cx: -31.5,
     cz: -28.0,
@@ -2307,6 +3241,30 @@ export function buildWeilongArchitecture(
       slope.position.set(0, opts.h + ridgeRise * 0.5, side * halfSpan * 0.5);
       slope.rotation.x = side * pitch;
       hg.add(slope);
+      // Visible cedar eave purlin & overhanging rafter beams under rural cottage eaves
+      addBox(
+        opts.w + roofOver * 1.6,
+        0.14,
+        0.16,
+        0,
+        opts.h + 0.08,
+        side * (opts.d * 0.5 + roofOver * 0.45),
+        mats.darkTimber,
+        0,
+        hg,
+        false
+      );
+      const rCount = Math.max(5, Math.round(opts.w / 1.4));
+      for (let ri = 0; ri <= rCount; ri++) {
+        const rx = -opts.w * 0.5 - roofOver * 0.6 + (ri / rCount) * (opts.w + roofOver * 1.2);
+        const rafter = new THREE.Mesh(
+          trackGeo(new THREE.BoxGeometry(0.09, 0.11, slopeLen * 0.96)),
+          mats.darkTimber
+        );
+        rafter.position.set(rx, opts.h + ridgeRise * 0.5 - 0.12, side * halfSpan * 0.5);
+        rafter.rotation.x = side * pitch;
+        hg.add(rafter);
+      }
     }
     // White gable end triangles
     const gL1 = new THREE.Vector3(-opts.w * 0.5, opts.h, opts.d * 0.5);
@@ -2665,9 +3623,200 @@ export function buildWeilongArchitecture(
     [0.12, 4.28, -0.05, 0.88, false],
   ];
 
+  // =========================================================================
+  // 8F-PLANTER. TRADITIONAL HAKKA TREE PLANTERS & TERRACOTTA URNS (门前硬化地面合规种树坛子/树池)
+  // Every tree or shrub standing on He-Ping concrete, granite apron, or Huatai cobble is seated
+  // in a matching stone/brick basin or glazed terracotta urn filled with dark humus soil!
+  // =========================================================================
+  const planterBrickMat = trackMat(
+    new THREE.MeshStandardMaterial({
+      color: 0x8f6b56,
+      map: mats.granitePlinth.map,
+      normalMap: mats.granitePlinth.normalMap,
+      normalScale: new THREE.Vector2(0.75, 0.75),
+      roughness: 0.86,
+      metalness: 0.02,
+    })
+  );
+  const planterPebbleMat = trackMat(
+    new THREE.MeshStandardMaterial({
+      color: 0x7b786e,
+      roughness: 0.82,
+      metalness: 0.02,
+    })
+  );
+  const ceramicUrnGeo = trackGeo(
+    createTurnedLatheGeometry(
+      [
+        [0.0, 0.0],
+        [0.34, 0.0],
+        [0.38, 0.08],
+        [0.48, 0.24],
+        [0.47, 0.42],
+        [0.42, 0.50],
+        [0.47, 0.56],
+        [0.41, 0.58],
+        [0.39, 0.48],
+      ],
+      14
+    )
+  );
+  const pebbleGeo = trackGeo(new THREE.DodecahedronGeometry(0.11, 0));
+
+  const addTreePlanter = (
+    px: number,
+    pz: number,
+    style: 'octagonal_basin' | 'stone_well' | 'terracotta_pot',
+    radius: number,
+    height: number
+  ): number => {
+    const gy = groundHeightAt(px, pz, 0);
+    const pg = new THREE.Group();
+    pg.position.set(px, gy, pz);
+
+    if (style === 'octagonal_basin') {
+      // Stepped octagonal granite plinth base flush with He-Ping pavement
+      const plinth = new THREE.Mesh(
+        trackGeo(new THREE.CylinderGeometry(radius * 1.07, radius * 1.11, 0.14, 8)),
+        mats.granitePlinth
+      );
+      plinth.position.y = 0.07;
+      plinth.receiveShadow = true;
+      plinth.castShadow = castShadow;
+      pg.add(plinth);
+
+      // Traditional masonry brick-stone planter body
+      const bodyH = Math.max(0.24, height - 0.22);
+      const body = new THREE.Mesh(
+        trackGeo(new THREE.CylinderGeometry(radius * 0.98, radius * 1.02, bodyH, 8)),
+        planterBrickMat
+      );
+      body.position.y = 0.14 + bodyH * 0.5;
+      body.receiveShadow = true;
+      body.castShadow = castShadow;
+      pg.add(body);
+
+      // Molded projecting granite coping lip
+      const coping = new THREE.Mesh(
+        trackGeo(new THREE.CylinderGeometry(radius * 1.05, radius * 1.02, 0.11, 8)),
+        mats.graniteSlab
+      );
+      coping.position.y = height - 0.055;
+      coping.receiveShadow = true;
+      coping.castShadow = castShadow;
+      pg.add(coping);
+
+      // Inner recessed soil cylinder + soft domed organic humus mound
+      const soilBase = new THREE.Mesh(
+        trackGeo(new THREE.CylinderGeometry(radius * 0.86, radius * 0.84, 0.12, 12)),
+        mats.gardenSoil
+      );
+      soilBase.position.y = height - 0.10;
+      soilBase.receiveShadow = true;
+      pg.add(soilBase);
+
+      const soilMound = new THREE.Mesh(
+        trackGeo(new THREE.SphereGeometry(radius * 0.82, 12, 8, 0, Math.PI * 2, 0, Math.PI * 0.5)),
+        mats.gardenSoil
+      );
+      soilMound.scale.set(1.0, 0.24, 1.0);
+      soilMound.position.y = height - 0.05;
+      soilMound.receiveShadow = true;
+      pg.add(soilMound);
+
+      // Small decorative river stones nested on the humus soil around the root flare
+      for (let k = 0; k < 6; k++) {
+        const a = (k / 6) * Math.PI * 2 + px * 0.3;
+        const dist = radius * (0.48 + (k % 2) * 0.16);
+        const st = new THREE.Mesh(pebbleGeo, planterPebbleMat);
+        st.position.set(Math.cos(a) * dist, height - 0.01, Math.sin(a) * dist);
+        st.scale.set(1.1, 0.55, 0.85);
+        st.rotation.y = a;
+        pg.add(st);
+      }
+      root.add(pg);
+      return gy + height - 0.04;
+    }
+
+    if (style === 'stone_well') {
+      // Broad circular cut-granite curb tree well for pond-apron weeping willows
+      const curbBase = new THREE.Mesh(
+        trackGeo(new THREE.CylinderGeometry(radius * 1.05, radius * 1.08, height * 0.65, 12)),
+        mats.granitePlinth
+      );
+      curbBase.position.y = height * 0.325;
+      curbBase.receiveShadow = true;
+      curbBase.castShadow = castShadow;
+      pg.add(curbBase);
+
+      const curbRim = new THREE.Mesh(
+        trackGeo(new THREE.CylinderGeometry(radius * 1.08, radius * 1.05, height * 0.38, 12)),
+        mats.graniteSlab
+      );
+      curbRim.position.y = height * 0.81;
+      curbRim.receiveShadow = true;
+      curbRim.castShadow = castShadow;
+      pg.add(curbRim);
+
+      const soilFill = new THREE.Mesh(
+        trackGeo(new THREE.CylinderGeometry(radius * 0.90, radius * 0.88, 0.12, 14)),
+        mats.gardenSoil
+      );
+      soilFill.position.y = height - 0.08;
+      soilFill.receiveShadow = true;
+      pg.add(soilFill);
+
+      const soilCrown = new THREE.Mesh(
+        trackGeo(new THREE.SphereGeometry(radius * 0.86, 12, 8, 0, Math.PI * 2, 0, Math.PI * 0.5)),
+        mats.gardenSoil
+      );
+      soilCrown.scale.set(1.0, 0.22, 1.0);
+      soilCrown.position.y = height - 0.03;
+      soilCrown.receiveShadow = true;
+      pg.add(soilCrown);
+
+      for (let k = 0; k < 7; k++) {
+        const a = (k / 7) * Math.PI * 2 + pz * 0.2;
+        const dist = radius * (0.55 + (k % 2) * 0.16);
+        const st = new THREE.Mesh(pebbleGeo, planterPebbleMat);
+        st.position.set(Math.cos(a) * dist, height + 0.01, Math.sin(a) * dist);
+        st.scale.set(1.25, 0.62, 0.95);
+        st.rotation.y = a;
+        pg.add(st);
+      }
+      root.add(pg);
+      return gy + height - 0.02;
+    }
+
+    // Turned glazed terracotta flower urn for courtyard shrubs on pavement
+    const urnScaleR = radius / 0.48;
+    const urnScaleH = height / 0.58;
+    const urn = new THREE.Mesh(ceramicUrnGeo, mats.terracotta);
+    urn.scale.set(urnScaleR, urnScaleH, urnScaleR);
+    urn.castShadow = castShadow;
+    urn.receiveShadow = true;
+    pg.add(urn);
+
+    const potSoil = new THREE.Mesh(
+      trackGeo(new THREE.CylinderGeometry(radius * 0.80, radius * 0.76, 0.09, 12)),
+      mats.gardenSoil
+    );
+    potSoil.position.y = height * 0.86;
+    potSoil.receiveShadow = true;
+    pg.add(potSoil);
+
+    root.add(pg);
+    return gy + height * 0.86;
+  };
+
   blossomTrees.forEach(([bx, bz, sc], idx) => {
     if (!isValidTreePosition(bx, bz, 2.2)) return;
-    const by = groundHeightAt(bx, bz, 0) - 0.14;
+    const pavedType = isPavedTreeSite(bx, bz);
+    let by = groundHeightAt(bx, bz, 0) - 0.14;
+    if (pavedType) {
+      const soilY = addTreePlanter(bx, bz, 'octagonal_basin', 0.98 * Math.min(1.08, sc), 0.56);
+      by = soilY - 0.06;
+    }
     const tg = new THREE.Group();
     tg.position.set(bx, by, bz);
     tg.rotation.y = idx * 1.47;
@@ -2753,7 +3902,12 @@ export function buildWeilongArchitecture(
     [0.8, 51.0, 1.04],
   ];
   willowPositions.forEach(([wx, wz, sc], idx) => {
-    const wy = groundHeightAt(wx, wz, 0) - 0.12;
+    const pavedType = isPavedTreeSite(wx, wz);
+    let wy = groundHeightAt(wx, wz, 0) - 0.12;
+    if (pavedType) {
+      const soilY = addTreePlanter(wx, wz, 'stone_well', 1.12, 0.42);
+      wy = soilY - 0.06;
+    }
     const wg = new THREE.Group();
     wg.position.set(wx, wy, wz);
     const toPondYaw = Math.atan2(0 - wx, 43.2 - wz);
@@ -2807,7 +3961,7 @@ export function buildWeilongArchitecture(
     root.add(wg);
   });
 
-  // 8H. 14 Multi-Cluster Sculpted Courtyard Flowering Shrubs with airy leaf sprigs
+  // 8H. 14 Multi-Cluster Sculpted Courtyard Flowering Shrubs seated in terracotta planters on paved grounds
   const flowerAccentMats = [
     createPaintedWoodMat(HANDCRAFTED_PAL.verm, trackMat, 0.58),
     createPaintedWoodMat(HANDCRAFTED_PAL.lilac, trackMat, 0.58),
@@ -2833,7 +3987,12 @@ export function buildWeilongArchitecture(
     [21.2, 18.2, 0.92],
   ];
   shrubSpots.forEach(([sx, sz, sc], idx) => {
-    const sy = groundHeightAt(sx, sz, 0) - 0.04;
+    const pavedType = isPavedTreeSite(sx, sz);
+    let sy = groundHeightAt(sx, sz, 0) - 0.04;
+    if (pavedType) {
+      const soilY = addTreePlanter(sx, sz, 'terracotta_pot', 0.44 * sc, 0.52 * sc);
+      sy = soilY - 0.06;
+    }
     const sg = new THREE.Group();
     sg.position.set(sx, sy, sz);
     sg.rotation.y = idx * 1.25;
@@ -2884,6 +4043,13 @@ export function buildWeilongArchitecture(
       pondUniforms.uTime.value = t;
       pondUniforms.uNight.value = nightFactor;
       pondUniforms.uRain.value = rainFactor;
+      eaveRainUniforms.uTime.value = t;
+      eaveRainUniforms.uRain.value = rainFactor;
+      eaveRainUniforms.uNight.value = nightFactor;
+      const showRainDrain = rainFactor > 0.02;
+      for (let i = 0; i < rainCurtainMeshes.length; i++) {
+        rainCurtainMeshes[i].visible = showRainDrain;
+      }
       if (skyZenithHex !== undefined) pondUniforms.uSkyZenith.value.setHex(skyZenithHex);
       if (skyHorizonHex !== undefined) pondUniforms.uSkyHorizon.value.setHex(skyHorizonHex);
       if (sunColorHex !== undefined) pondUniforms.uSunColor.value.setHex(sunColorHex);

@@ -333,6 +333,8 @@ export interface LanternSharedGeos {
   tasselFringe: THREE.BufferGeometry;
   ribRing: THREE.BufferGeometry;
   miniRoof: THREE.BufferGeometry;
+  topRing: THREE.BufferGeometry;
+  mountPlate: THREE.BufferGeometry;
 }
 
 export function createLanternSharedGeos(
@@ -367,16 +369,20 @@ export function createLanternSharedGeos(
   return {
     melonBody,
     collar: trackGeo(new THREE.CylinderGeometry(0.115, 0.125, 0.055, 10)),
-    cord: trackGeo(new THREE.CylinderGeometry(0.011, 0.011, 0.34, 6)),
+    cord: trackGeo(new THREE.CylinderGeometry(0.012, 0.012, 0.34, 6)),
     tasselKnot: trackGeo(new THREE.SphereGeometry(0.036, 8, 6)),
     tasselFringe: trackGeo(new THREE.CylinderGeometry(0.022, 0.052, 0.25, 8)),
     ribRing: trackGeo(new THREE.TorusGeometry(0.25, 0.01, 5, 14)),
     miniRoof: trackGeo(new THREE.ConeGeometry(0.46, 0.22, 4)),
+    topRing: trackGeo(new THREE.TorusGeometry(0.032, 0.009, 6, 12)),
+    mountPlate: trackGeo(new THREE.CylinderGeometry(0.044, 0.052, 0.022, 10)),
   };
 }
 
 /**
- * Builds a refined handcrafted Hakka melon-ribbed hanging lantern (木托金环瓜形红灯笼).
+ * Builds a refined handcrafted Hakka melon-ribbed hanging lantern (木托金环瓜形红灯笼)
+ * complete with top forged-brass hanging ring and beam-mount rosette.
+ * Cord & mount rosette terminate cleanly at local y = 0.26 + cordLen.
  */
 export function createCraftedLantern(
   mats: MaterialLibrary,
@@ -389,6 +395,15 @@ export function createCraftedLantern(
   cord.scale.set(1, cordLen / 0.34, 1);
   cord.position.y = 0.26 + cordLen * 0.5;
   g.add(cord);
+
+  // Forged brass hanging hook ring & eave/beam attachment rosette at top of cord
+  const hookRing = new THREE.Mesh(geos.topRing, mats.bronzeMetal);
+  hookRing.position.y = 0.26 + cordLen - 0.028;
+  g.add(hookRing);
+
+  const mountPlate = new THREE.Mesh(geos.mountPlate, mats.bronzeMetal);
+  mountPlate.position.y = 0.26 + cordLen - 0.002;
+  g.add(mountPlate);
 
   const body = new THREE.Mesh(geos.melonBody, mats.lanternPaper);
   g.add(body);

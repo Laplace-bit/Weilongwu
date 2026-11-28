@@ -76,6 +76,15 @@ export type CameraViewMode =
   | 'first_person'
   | 'aerial';
 
+export interface MinimapBlip {
+  id: string;
+  x: number;
+  z: number;
+  yaw: number;
+  kind: 'villager' | 'dog' | 'poultry' | 'livestock' | 'cat';
+  playing: boolean;
+}
+
 export interface HudSnapshot {
   currentNodeId: string;
   currentNodeName: string;
@@ -103,4 +112,5 @@ export interface HudSnapshot {
   timePeriodLabel: string;
   formattedTime: string;
   volume: number;
+  minimapBlips: MinimapBlip[];
 }

@@ -8,8 +8,8 @@ import {
 } from './proceduralTextures';
 import { groundHeightAt } from './worldMath';
 import {
-  sampleClosedLoopPath,
   sampleFlockOrbit,
+  sampleOpenPolyline,
   samplePondSwimPath,
   type PathPoint2D,
 } from './livingPaths';
@@ -19,22 +19,66 @@ import {
   createTaperedCurveGeometry,
   createTurnedLatheGeometry,
 } from './sculptHelpers';
-
+import {
+  buildArticulatedArm,
+  buildArticulatedLeg,
+  buildHakkaLapelAndSash,
+  createCraftFabricMat,
+  createCraftSkinMat,
+  createCraftStrawMat,
+  createPleatedRobeGeometry,
+  damp,
+  dampAngle,
+  populateCraftFace,
+  Spring1D,
+  VIRTUAL_MASS,
+} from './characterCraft';
+import {
+  classifyZone,
+  computeZoneBridgeWaypoints,
+  FreeRoamSystem,
+  type MinimapBlip,
+  type RoamAgentState,
+} from './freeRoamSystem';
 import { evaluateLivingBehavior } from './livingBehavior';
+
+export interface GrainLiveState {
+  spread: number;
+  basketFill: number;
+  matDeployed: number;
+  isGathering: boolean;
+}
 
 export interface LivingWorldRefs {
   root: THREE.Group;
-  update: (dt: number, t: number, weather: WeatherMode, timeOfDay?: number) => void;
+  update: (
+    dt: number,
+    t: number,
+    weather: WeatherMode,
+    timeOfDay?: number,
+    doumenOpen?: boolean
+  ) => void;
+  getGrainLiveState: () => GrainLiveState;
+  getMinimapBlips: () => MinimapBlip[];
   dispose: () => void;
 }
 
 interface WalkingVillagerAnim {
+  id: string;
   group: THREE.Group;
+  torso: THREE.Object3D;
   leftArm: THREE.Object3D;
   rightArm: THREE.Object3D;
+  leftElbow: THREE.Object3D;
+  rightElbow: THREE.Object3D;
   leftLeg: THREE.Object3D;
   rightLeg: THREE.Object3D;
+  leftKnee: THREE.Object3D;
+  rightKnee: THREE.Object3D;
   head: THREE.Object3D;
+  sashTailL: THREE.Object3D;
+  sashTailR: THREE.Object3D;
+  sashSpring: Spring1D;
   waypoints: readonly PathPoint2D[];
   speed: number;
   phaseOffset: number;
@@ -43,14 +87,30 @@ interface WalkingVillagerAnim {
   hasUmbrella?: boolean;
   rainUmbrella?: THREE.Group;
   isChild?: boolean;
+  roamAgent: RoamAgentState;
+  homeRoom: { x: number; z: number; yaw: number };
+  homeAnchor: { x: number; z: number } | null;
+  homeRoute: PathPoint2D[];
+  homeBlendSmooth: number;
+  stridePhase: number;
 }
 
 interface IdleVillagerAnim {
+  id: string;
   group: THREE.Group;
   head: THREE.Object3D;
   leftArm: THREE.Object3D;
   rightArm: THREE.Object3D;
+  leftElbow: THREE.Object3D;
+  rightElbow: THREE.Object3D;
+  leftLeg: THREE.Object3D;
+  rightLeg: THREE.Object3D;
+  leftKnee: THREE.Object3D;
+  rightKnee: THREE.Object3D;
   torso: THREE.Object3D;
+  sashTailL: THREE.Object3D;
+  sashTailR: THREE.Object3D;
+  sashSpring: Spring1D;
   kind: 'rake' | 'wash' | 'fan' | 'chat' | 'tea' | 'bow' | 'tend';
   phaseOffset: number;
   ripple?: THREE.Mesh;
@@ -58,12 +118,18 @@ interface IdleVillagerAnim {
   baseX: number;
   baseZ: number;
   baseYaw: number;
-  shelterX?: number;
-  shelterZ?: number;
-  shelterYaw?: number;
+  seated?: boolean;
+  homeRoute: PathPoint2D[];
+  homeYaw: number;
+  homeBlendSmooth: number;
+  stridePhase: number;
+  curX: number;
+  curZ: number;
+  curYaw: number;
 }
 
 interface PoultryAnim {
+  id: string;
   group: THREE.Group;
   body: THREE.Object3D;
   head: THREE.Object3D;
@@ -74,6 +140,10 @@ interface PoultryAnim {
   speed: number;
   isChick?: boolean;
   leaderIdx?: number;
+  roamAgent?: RoamAgentState;
+  coopTarget: { x: number; z: number; entryX: number; entryZ: number };
+  homeAnchor: { x: number; z: number } | null;
+  coopBlendSmooth: number;
 }
 
 interface WaterfowlAnim {
@@ -87,9 +157,14 @@ interface WaterfowlAnim {
   speed: number;
   phaseOffset: number;
   dir: 1 | -1;
+  nestX: number;
+  nestZ: number;
+  nestYaw: number;
+  nestBlendSmooth: number;
 }
 
 interface QuadrupedAnim {
+  id: string;
   group: THREE.Group;
   head: THREE.Object3D;
   tail: THREE.Object3D;
@@ -101,6 +176,13 @@ interface QuadrupedAnim {
   baseX: number;
   baseZ: number;
   baseY: number;
+  roamAgent: RoamAgentState;
+  homeRouteTail: PathPoint2D[];
+  homeYaw: number;
+  homeAnchor: { x: number; z: number } | null;
+  homeRoute: PathPoint2D[];
+  homeBlendSmooth: number;
+  gaitPhase: number;
 }
 
 interface CraneAnim {
@@ -131,6 +213,9 @@ interface ButterflyAnim {
   rz: number;
   speed: number;
   phaseOffset: number;
+  perchX: number;
+  perchY: number;
+  perchZ: number;
 }
 
 interface SmokePuff {
@@ -200,43 +285,12 @@ export function buildLivingWorld(
     return m;
   };
 
-  // Woven Hakka linen/cotton fabric with physical micro-fiber sheen (Pillar 2)
-  const clothMat = (hex: number, sheenHex: number, rough = 0.84): THREE.MeshStandardMaterial => {
-    const m = trackMat(
-      new THREE.MeshPhysicalMaterial({
-        color: hex,
-        normalMap: woodMicro.normal,
-        normalScale: new THREE.Vector2(0.12, 0.12),
-        roughnessMap: woodMicro.roughness,
-        roughness: rough,
-        metalness: 0.0,
-        sheen: 0.48,
-        sheenRoughness: 0.72,
-        sheenColor: new THREE.Color(sheenHex),
-      })
-    );
-    return m;
-  };
+  // Woven Hakka linen/cotton fabric with tactile cross-hatch normal + physical sheen (cinematic-slide-craft)
+  const clothMat = (hex: number, sheenHex: number, rough = 0.84): THREE.MeshStandardMaterial =>
+    createCraftFabricMat(hex, sheenHex, trackMat, rough, 0.56);
 
-  // Warm woodcarved skin with soft Subsurface Scattering (SSS) wrap translucency
-  const skinMat = attachSubsurfaceShader(
-    trackMat(
-      new THREE.MeshStandardMaterial({
-        color: HANDCRAFTED_PAL.skin,
-        normalMap: woodMicro.normal,
-        normalScale: new THREE.Vector2(0.08, 0.08),
-        roughness: 0.66,
-        metalness: 0.0,
-      })
-    ),
-    {
-      key: 'villager_skin',
-      tintHex: 0xf8ad8a,
-      backStrength: 0.34,
-      wrapStrength: 0.26,
-      power: 2.8,
-    }
-  );
+  // Warm sculpted skin with soft Subsurface Scattering (SSS) wrap translucency
+  const skinMat = createCraftSkinMat('villager_skin', trackMat, HANDCRAFTED_PAL.skin);
   const cheekMat = attachSubsurfaceShader(
     trackMat(
       new THREE.MeshStandardMaterial({
@@ -253,12 +307,55 @@ export function buildLivingWorld(
       power: 2.6,
     }
   );
+  const lipMat = trackMat(
+    new THREE.MeshStandardMaterial({
+      color: 0xc9766a,
+      roughness: 0.48,
+      metalness: 0.0,
+    })
+  );
+  const scleraMat = trackMat(
+    new THREE.MeshStandardMaterial({
+      color: 0xfaf6ee,
+      roughness: 0.22,
+      metalness: 0.0,
+    })
+  );
+  const eyeIrisMat = trackMat(
+    new THREE.MeshPhysicalMaterial({
+      color: 0x261d17,
+      roughness: 0.14,
+      metalness: 0.0,
+      clearcoat: 0.92,
+      clearcoatRoughness: 0.08,
+    })
+  );
   const inkMat = woodPaintMat(HANDCRAFTED_PAL.ink, 0.42);
   const eyeHighlightMat = trackMat(new THREE.MeshBasicMaterial({ color: 0xffffff }));
-  const hairDarkMat = woodPaintMat(0x232632, 0.58);
-  const hairSilverMat = woodPaintMat(0xe2ddd2, 0.68);
-  const strawMat = woodPaintMat(0xe8cb82, 0.82);
-  const strawRimMat = woodPaintMat(0xc8a35a, 0.78);
+  const hairDarkMat = trackMat(
+    new THREE.MeshPhysicalMaterial({
+      color: 0x232632,
+      normalMap: woodMicro.normal,
+      normalScale: new THREE.Vector2(0.14, 0.14),
+      roughness: 0.48,
+      sheen: 0.32,
+      sheenRoughness: 0.52,
+      sheenColor: new THREE.Color(0x5a637d),
+    })
+  );
+  const hairSilverMat = trackMat(
+    new THREE.MeshPhysicalMaterial({
+      color: 0xe2ddd2,
+      normalMap: woodMicro.normal,
+      normalScale: new THREE.Vector2(0.12, 0.12),
+      roughness: 0.56,
+      sheen: 0.38,
+      sheenRoughness: 0.58,
+      sheenColor: new THREE.Color(0xffffff),
+    })
+  );
+  const strawMat = createCraftStrawMat(0xe8cb82, trackMat, 0.8);
+  const strawRimMat = createCraftStrawMat(0xc8a35a, trackMat, 0.76);
   const bambooPoleMat = woodPaintMat(0xb89452, 0.64);
   const clothIndigoMat = clothMat(0x2d5e92, 0x82b2e0, 0.84);
   const clothCeruleanMat = clothMat(HANDCRAFTED_PAL.cer, 0x9cd2ef, 0.82);
@@ -303,48 +400,23 @@ export function buildLivingWorld(
   const shadowDiscGeo = trackGeo(new THREE.CircleGeometry(1, 14));
   shadowDiscGeo.rotateX(-Math.PI * 0.5);
 
-  // Turned woodcarving villager geometries
+  // Pleated tailored Hakka tunic/robe with oval anatomical torso cross-section & hem drapery
   const robeGeo = trackGeo(
-    createTurnedLatheGeometry(
+    createPleatedRobeGeometry(
       [
-        [0.01, -0.02],
-        [0.29, -0.02],
-        [0.275, 0.08],
-        [0.24, 0.24],
-        [0.225, 0.38],
-        [0.235, 0.54],
-        [0.19, 0.62],
-        [0.125, 0.65],
-        [0.0, 0.65],
+        [0.01, -0.04],
+        [0.275, -0.04],
+        [0.258, 0.08],
+        [0.218, 0.24],
+        [0.212, 0.38],
+        [0.224, 0.54],
+        [0.184, 0.61],
+        [0.118, 0.64],
+        [0.0, 0.64],
       ],
-      16
-    )
-  );
-  const sleeveGeo = trackGeo(
-    createTurnedLatheGeometry(
-      [
-        [0.068, 0.0],
-        [0.082, -0.08],
-        [0.074, -0.26],
-        [0.088, -0.4],
-        [0.04, -0.42],
-      ],
-      12
-    )
-  );
-  const headGeo = trackGeo(
-    createTurnedLatheGeometry(
-      [
-        [0.0, -0.185],
-        [0.09, -0.172],
-        [0.155, -0.12],
-        [0.184, -0.02],
-        [0.182, 0.085],
-        [0.145, 0.16],
-        [0.075, 0.195],
-        [0.0, 0.205],
-      ],
-      16
+      22,
+      10,
+      0.012
     )
   );
   const douliGeo = trackGeo(
@@ -641,10 +713,16 @@ export function buildLivingWorld(
     head: THREE.Group;
     leftArm: THREE.Group;
     rightArm: THREE.Group;
+    leftElbow: THREE.Group;
+    rightElbow: THREE.Group;
     leftHandSocket: THREE.Group;
     rightHandSocket: THREE.Group;
     leftLeg: THREE.Group;
     rightLeg: THREE.Group;
+    leftKnee: THREE.Group;
+    rightKnee: THREE.Group;
+    sashTailL: THREE.Group;
+    sashTailR: THREE.Group;
   }
 
   const createVillager = (spec: VillagerSpec): BuiltVillager => {
@@ -656,206 +734,140 @@ export function buildLivingWorld(
     rig.scale.setScalar(sc);
     g.add(rig);
 
-    const hipY = spec.seated ? 0.45 : 0.66;
+    const hipY = 0.66;
 
-    // Articulated standing OR true bent-knee seated legs (no diagonal poking!)
-    const makeLeg = (side: -1 | 1): THREE.Group => {
-      const leg = new THREE.Group();
-      leg.position.set(side * 0.105, hipY, 0);
+    // Unified 2-segment articulated legs for BOTH standing and seated villagers so seated
+    // villagers smoothly stand up off stools/benches and stride naturally when walking indoors!
+    const makeLeg = (side: -1 | 1): { hip: THREE.Group; knee: THREE.Group } =>
+      buildArticulatedLeg({
+        side,
+        hipPos: [side * 0.102, hipY, 0],
+        thighLen: 0.32,
+        calfLen: 0.34,
+        faceSign: 1,
+        trouserMat: spec.pantsMat,
+        shoeMat: inkMat,
+        soleMat: clothCreamMat,
+        trackGeo,
+        castShadow,
+      });
 
-      if (spec.seated) {
-        // Horizontal thigh resting on seat + rounded knee + vertical shin + resting cloth shoe
-        const thigh = new THREE.Mesh(cylGeo, spec.pantsMat);
-        thigh.scale.set(0.088, 0.32, 0.088);
-        thigh.rotation.x = Math.PI * 0.5;
-        thigh.position.set(0, -0.02, 0.15);
-        leg.add(thigh);
-
-        const knee = new THREE.Mesh(sphereGeo, spec.pantsMat);
-        knee.scale.setScalar(0.086);
-        knee.position.set(0, -0.025, 0.3);
-        leg.add(knee);
-
-        const shin = new THREE.Mesh(cylGeo, spec.pantsMat);
-        shin.scale.set(0.076, 0.38, 0.076);
-        shin.position.set(0, -0.22, 0.31);
-        leg.add(shin);
-
-        const shoe = new THREE.Mesh(sphereGeo, inkMat);
-        shoe.scale.set(0.078, 0.048, 0.125);
-        shoe.position.set(0, -0.41, 0.36);
-        leg.add(shoe);
-
-        const sole = new THREE.Mesh(cylGeo, clothCreamMat);
-        sole.scale.set(0.076, 0.018, 0.118);
-        sole.position.set(0, -0.435, 0.36);
-        leg.add(sole);
-      } else {
-        const legCyl = new THREE.Mesh(cylGeo, spec.pantsMat);
-        legCyl.scale.set(0.082, 0.62, 0.082);
-        legCyl.position.set(0, -0.31, 0);
-        leg.add(legCyl);
-
-        const cuff = new THREE.Mesh(cylGeo, clothCreamMat);
-        cuff.scale.set(0.084, 0.04, 0.084);
-        cuff.position.set(0, -0.58, 0);
-        leg.add(cuff);
-
-        const shoe = new THREE.Mesh(sphereGeo, inkMat);
-        shoe.scale.set(0.078, 0.048, 0.125);
-        shoe.position.set(0, -0.62, 0.042);
-        leg.add(shoe);
-
-        const sole = new THREE.Mesh(cylGeo, clothCreamMat);
-        sole.scale.set(0.075, 0.018, 0.118);
-        sole.position.set(0, -0.648, 0.042);
-        leg.add(sole);
-      }
-      return leg;
-    };
-
-    const leftLeg = makeLeg(-1);
-    const rightLeg = makeLeg(1);
+    const leftLegBuilt = makeLeg(-1);
+    const rightLegBuilt = makeLeg(1);
+    const leftLeg = leftLegBuilt.hip;
+    const rightLeg = rightLegBuilt.hip;
+    const leftKnee = leftLegBuilt.knee;
+    const rightKnee = rightLegBuilt.knee;
     rig.add(leftLeg, rightLeg);
 
-    // Turned wooden-doll Hakka torso with diagonal cross-collar lapel (大襟斜领) & waist sash
+    if (spec.seated) {
+      rig.position.y = -0.21 * sc;
+      leftLeg.rotation.x = -Math.PI * 0.46;
+      rightLeg.rotation.x = -Math.PI * 0.46;
+      leftKnee.rotation.x = Math.PI * 0.46;
+      rightKnee.rotation.x = Math.PI * 0.46;
+    }
+    g.userData.rig = rig;
+    g.userData.rigScale = sc;
+    g.userData.seated = Boolean(spec.seated);
+
+    // Tailored pleated Hakka robe torso with diagonal lapel, 3 frog buttons & swaying waist sash
     const torso = new THREE.Group();
     torso.position.set(0, hipY, 0);
     rig.add(torso);
 
     const robe = new THREE.Mesh(robeGeo, spec.tunicMat);
     robe.castShadow = castShadow;
+    robe.receiveShadow = true;
     torso.add(robe);
 
     const trimMat = spec.scarfMat ?? clothCreamMat;
 
-    // Hakka diagonal cross-collar lapel piping (大襟)
-    const lapelDiag = new THREE.Mesh(boxGeo, trimMat);
-    lapelDiag.scale.set(0.24, 0.028, 0.032);
-    lapelDiag.position.set(0.04, 0.49, 0.215);
-    lapelDiag.rotation.z = -0.58;
-    torso.add(lapelDiag);
+    const { sashTailL, sashTailR } = buildHakkaLapelAndSash({
+      parent: torso,
+      faceSign: 1,
+      waistY: 0.22,
+      chestY: 0.48,
+      radius: 0.215,
+      trimMat,
+      buttonMat: mats.gildedGold,
+      trackGeo,
+      castShadow,
+    });
 
-    const lapelVert = new THREE.Mesh(boxGeo, trimMat);
-    lapelVert.scale.set(0.028, 0.34, 0.032);
-    lapelVert.position.set(0.13, 0.27, 0.22);
-    torso.add(lapelVert);
-
-    // Traditional Hakka front apron
+    // Traditional Hakka layered front apron with pleated drape
     if (spec.apronMat) {
       const apron = new THREE.Mesh(boxGeo, spec.apronMat);
-      apron.scale.set(0.26, 0.42, 0.042);
-      apron.position.set(0, 0.16, 0.245);
+      apron.scale.set(0.25, 0.41, 0.036);
+      apron.position.set(0, 0.14, 0.218);
+      apron.castShadow = castShadow;
       torso.add(apron);
     }
 
-    // Waist sash + front bow knot
-    const sash = new THREE.Mesh(cylGeo, spec.scarfMat ?? clothVermMat);
-    sash.scale.set(0.238, 0.068, 0.238);
-    sash.position.y = 0.22;
-    torso.add(sash);
-    const bowKnot = new THREE.Mesh(sphereGeo, spec.scarfMat ?? clothVermMat);
-    bowKnot.scale.set(0.052, 0.042, 0.042);
-    bowKnot.position.set(-0.07, 0.22, 0.235);
-    torso.add(bowKnot);
-
-    // Mandarin stand collar + warm neck cylinder
-    const collar = new THREE.Mesh(cylGeo, trimMat);
-    collar.scale.set(0.132, 0.065, 0.132);
-    collar.position.y = 0.63;
-    torso.add(collar);
-    const neck = new THREE.Mesh(cylGeo, skinMat);
-    neck.scale.set(0.078, 0.09, 0.078);
-    neck.position.y = 0.68;
-    torso.add(neck);
-
-    // Sculpted tapered wide sleeves + contrasting cuffs + explicit hand sockets for zero-drift prop attachment
-    const makeArm = (side: -1 | 1): { arm: THREE.Group; handSocket: THREE.Group } => {
-      const arm = new THREE.Group();
-      arm.position.set(side * 0.225, 0.56, 0);
-
-      const shoulder = new THREE.Mesh(sphereGeo, spec.tunicMat);
-      shoulder.scale.setScalar(0.078);
-      arm.add(shoulder);
-
-      const sleeve = new THREE.Mesh(sleeveGeo, spec.tunicMat);
-      sleeve.rotation.z = side * 0.13;
-      sleeve.castShadow = castShadow;
-      arm.add(sleeve);
-
-      const cuff = new THREE.Mesh(cylGeo, trimMat);
-      cuff.scale.set(0.088, 0.042, 0.088);
-      cuff.position.set(side * 0.05, -0.39, 0);
-      cuff.rotation.z = side * 0.13;
-      arm.add(cuff);
-
-      const handSocket = new THREE.Group();
-      handSocket.position.set(side * 0.056, -0.45, 0.02);
-      const hand = new THREE.Mesh(sphereGeo, skinMat);
-      hand.scale.set(0.062, 0.068, 0.062);
-      handSocket.add(hand);
-      arm.add(handSocket);
-
-      return { arm, handSocket };
-    };
-    const leftArmBuilt = makeArm(-1);
-    const rightArmBuilt = makeArm(1);
-    const leftArm = leftArmBuilt.arm;
-    const rightArm = rightArmBuilt.arm;
-    const leftHandSocket = leftArmBuilt.handSocket;
-    const rightHandSocket = rightArmBuilt.handSocket;
+    // 2-segment articulated arms (upper sleeve + elbow pivot + flared lower sleeve + cuff + sculpted palm/thumb)
+    const leftArmBuilt = buildArticulatedArm({
+      side: -1,
+      shoulderPos: [-0.23, 0.56, 0],
+      upperLen: 0.21,
+      lowerLen: 0.21,
+      sleeveMat: spec.tunicMat,
+      cuffMat: trimMat,
+      skinMat,
+      trackGeo,
+      castShadow,
+    });
+    const rightArmBuilt = buildArticulatedArm({
+      side: 1,
+      shoulderPos: [0.23, 0.56, 0],
+      upperLen: 0.21,
+      lowerLen: 0.21,
+      sleeveMat: spec.tunicMat,
+      cuffMat: trimMat,
+      skinMat,
+      trackGeo,
+      castShadow,
+    });
+    const leftArm = leftArmBuilt.shoulder;
+    const rightArm = rightArmBuilt.shoulder;
+    const leftElbow = leftArmBuilt.elbow;
+    const rightElbow = rightArmBuilt.elbow;
+    const leftHandSocket = leftArmBuilt.hand;
+    const rightHandSocket = rightArmBuilt.hand;
     torso.add(leftArm, rightArm);
 
-    // Expressive carved-wood doll head with chin contour, tiny nose, smiling eyes & blush
+    // Sculpted facial anatomy with contoured jaw, nose bridge, glossy catchlight eyes, arched brows & warm smile
     const head = new THREE.Group();
-    head.position.set(0, 0.84, 0);
+    head.position.set(0, 0.83, 0);
     torso.add(head);
 
-    const skull = new THREE.Mesh(headGeo, skinMat);
-    skull.castShadow = castShadow;
-    head.add(skull);
-
-    // Tiny button nose & ears
-    const nose = new THREE.Mesh(sphereGeo, skinMat);
-    nose.scale.set(0.02, 0.022, 0.024);
-    nose.position.set(0, -0.015, 0.184);
-    head.add(nose);
-
-    for (const sx of [-1, 1]) {
-      const ear = new THREE.Mesh(sphereGeo, skinMat);
-      ear.scale.set(0.032, 0.046, 0.024);
-      ear.position.set(sx * 0.182, -0.005, -0.01);
-      head.add(ear);
-
-      const eye = new THREE.Mesh(sphereGeo, inkMat);
-      eye.scale.set(0.023, 0.026, 0.018);
-      eye.position.set(sx * 0.066, 0.018, 0.168);
-      head.add(eye);
-
-      const glint = new THREE.Mesh(sphereGeo, eyeHighlightMat);
-      glint.scale.setScalar(0.0085);
-      glint.position.set(sx * 0.059, 0.026, 0.184);
-      head.add(glint);
-
-      const cheek = new THREE.Mesh(sphereGeo, cheekMat);
-      cheek.scale.set(0.038, 0.024, 0.016);
-      cheek.position.set(sx * 0.104, -0.032, 0.148);
-      head.add(cheek);
-    }
-
-    // Hair & sculpted traditional Hakka headwear
     const hairMat = spec.elder ? hairSilverMat : hairDarkMat;
+    populateCraftFace(head, {
+      faceSign: 1,
+      skinMat,
+      hairMat,
+      cheekMat,
+      lipMat,
+      eyeIrisMat,
+      scleraMat,
+      catchlightMat: eyeHighlightMat,
+      trackGeo,
+      castShadow,
+      isElder: spec.elder,
+      isChild: spec.hat === 'child_tufts',
+    });
+
+    // Sculpted layered hair crown & traditional Hakka headwear
     const hairCap = new THREE.Mesh(sphereGeo, hairMat);
-    hairCap.scale.set(0.194, 0.19, 0.196);
-    hairCap.position.set(0, 0.042, -0.024);
+    hairCap.scale.set(0.168, 0.164, 0.174);
+    hairCap.position.set(0, 0.044, -0.022);
     head.add(hairCap);
 
-    // Soft curved storybook front bangs (刘海) for children and women
+    // Soft curved front bangs (刘海) for children and women
     if (spec.hat === 'child_tufts' || spec.hat === 'bun' || spec.hat === 'hakka_curtain') {
       for (const sx of [-1, 1]) {
         const bang = new THREE.Mesh(sphereGeo, hairMat);
-        bang.scale.set(0.095, 0.068, 0.088);
-        bang.position.set(sx * 0.062, 0.118, 0.092);
+        bang.scale.set(0.084, 0.058, 0.078);
+        bang.position.set(sx * 0.056, 0.114, 0.084);
         bang.rotation.z = -sx * 0.28;
         head.add(bang);
       }
@@ -863,21 +875,21 @@ export function buildLivingWorld(
 
     if (spec.elder && spec.hat !== 'bun') {
       const mustache = new THREE.Mesh(sphereGeo, hairSilverMat);
-      mustache.scale.set(0.065, 0.022, 0.025);
-      mustache.position.set(0, -0.065, 0.168);
+      mustache.scale.set(0.056, 0.018, 0.022);
+      mustache.position.set(0, -0.044, 0.152);
       head.add(mustache);
 
       const beard = new THREE.Mesh(coneGeo, hairSilverMat);
-      beard.scale.set(0.058, 0.16, 0.048);
+      beard.scale.set(0.05, 0.145, 0.042);
       beard.rotation.x = Math.PI;
-      beard.position.set(0, -0.175, 0.118);
+      beard.position.set(0, -0.145, 0.112);
       head.add(beard);
     }
 
     if (spec.hat === 'hakka_curtain') {
-      // Iconic Meizhou Hakka Liangmao (客家凉帽): turned bamboo brim + pleated indigo curtain + colorful ribbons!
+      // Iconic Meizhou Hakka Liangmao (客家凉帽): woven bamboo brim + pleated indigo curtain + silk ribbons
       const brim = new THREE.Mesh(liangmaoBrimGeo, strawMat);
-      brim.position.y = 0.15;
+      brim.position.y = 0.14;
       head.add(brim);
 
       const brimTrim = new THREE.Mesh(
@@ -885,72 +897,71 @@ export function buildLivingWorld(
         strawRimMat
       );
       brimTrim.rotation.x = Math.PI * 0.5;
-      brimTrim.position.y = 0.155;
+      brimTrim.position.y = 0.145;
       head.add(brimTrim);
 
       const curtain = new THREE.Mesh(liangmaoCurtainGeo, clothIndigoMat);
-      curtain.position.y = 0.035;
-      curtain.rotation.y = Math.PI; // open in front so expressive face is visible!
+      curtain.position.y = 0.025;
+      curtain.rotation.y = Math.PI;
       head.add(curtain);
 
-      // Pair of colorful silk tie ribbons cascading down back-sides
       for (const sx of [-1, 1]) {
         const ribbon = new THREE.Mesh(boxGeo, sx < 0 ? clothVermMat : clothPeachMat);
         ribbon.scale.set(0.032, 0.24, 0.012);
-        ribbon.position.set(sx * 0.22, -0.04, -0.25);
+        ribbon.position.set(sx * 0.22, -0.05, -0.25);
         ribbon.rotation.z = sx * 0.18;
         head.add(ribbon);
       }
     } else if (spec.hat === 'conical') {
       const douli = new THREE.Mesh(douliGeo, strawMat);
-      douli.position.y = 0.125;
+      douli.position.y = 0.115;
       head.add(douli);
       const band = new THREE.Mesh(
         trackGeo(new THREE.TorusGeometry(0.415, 0.014, 6, 18)),
         strawRimMat
       );
       band.rotation.x = Math.PI * 0.5;
-      band.position.y = 0.128;
+      band.position.y = 0.118;
       head.add(band);
     } else if (spec.hat === 'elder_cap') {
       const cap = new THREE.Mesh(elderCapGeo, clothNavyMat);
-      cap.position.y = 0.11;
+      cap.position.y = 0.1;
       head.add(cap);
       const capBand = new THREE.Mesh(cylGeo, mats.gildedGold);
-      capBand.scale.set(0.186, 0.022, 0.186);
-      capBand.position.y = 0.12;
+      capBand.scale.set(0.172, 0.02, 0.172);
+      capBand.position.y = 0.108;
       head.add(capBand);
       const knot = new THREE.Mesh(sphereGeo, clothVermMat);
-      knot.scale.setScalar(0.034);
-      knot.position.y = 0.26;
+      knot.scale.setScalar(0.03);
+      knot.position.y = 0.245;
       head.add(knot);
     } else if (spec.hat === 'bun') {
       const bun = new THREE.Mesh(sphereGeo, hairMat);
-      bun.scale.set(0.088, 0.078, 0.082);
-      bun.position.set(0, 0.08, -0.185);
+      bun.scale.set(0.082, 0.072, 0.078);
+      bun.position.set(0, 0.075, -0.165);
       head.add(bun);
       const pin = new THREE.Mesh(cylGeo, celadonMat);
-      pin.scale.set(0.012, 0.22, 0.012);
+      pin.scale.set(0.011, 0.21, 0.011);
       pin.rotation.z = Math.PI * 0.42;
-      pin.position.set(0, 0.09, -0.185);
+      pin.position.set(0, 0.085, -0.165);
       head.add(pin);
       const pinBead = new THREE.Mesh(sphereGeo, mats.gildedGold);
-      pinBead.scale.setScalar(0.024);
-      pinBead.position.set(0.1, 0.12, -0.185);
+      pinBead.scale.setScalar(0.022);
+      pinBead.position.set(0.095, 0.112, -0.165);
       head.add(pinBead);
     } else if (spec.hat === 'child_tufts') {
       for (const sx of [-1, 1]) {
         const tuft = new THREE.Mesh(sphereGeo, hairDarkMat);
-        tuft.scale.setScalar(0.072);
-        tuft.position.set(sx * 0.155, 0.145, -0.02);
+        tuft.scale.setScalar(0.066);
+        tuft.position.set(sx * 0.14, 0.135, -0.018);
         head.add(tuft);
         const rib = new THREE.Mesh(cylGeo, clothVermMat);
-        rib.scale.set(0.058, 0.026, 0.058);
-        rib.position.set(sx * 0.155, 0.105, -0.02);
+        rib.scale.set(0.052, 0.024, 0.052);
+        rib.position.set(sx * 0.14, 0.098, -0.018);
         head.add(rib);
         const tailRib = new THREE.Mesh(boxGeo, clothVermMat);
-        tailRib.scale.set(0.022, 0.12, 0.01);
-        tailRib.position.set(sx * 0.19, 0.06, -0.03);
+        tailRib.scale.set(0.02, 0.115, 0.01);
+        tailRib.position.set(sx * 0.175, 0.055, -0.026);
         tailRib.rotation.z = sx * 0.32;
         head.add(tailRib);
       }
@@ -962,10 +973,16 @@ export function buildLivingWorld(
       head,
       leftArm,
       rightArm,
+      leftElbow,
+      rightElbow,
       leftHandSocket,
       rightHandSocket,
       leftLeg,
       rightLeg,
+      leftKnee,
+      rightKnee,
+      sashTailL,
+      sashTailR,
     };
   };
 
@@ -1028,20 +1045,379 @@ export function buildLivingWorld(
   };
 
   // =========================================================================
-  // 2. PLACE 19 LIVELY HAKKA VILLAGERS + HANDCRAFTED COURTYARD PROPS
-  //    (Grain mats are unified in propsBuilder.ts at [-6.0, 28.8] & [5.2, 29.2] — zero overlap!)
+  // 2. SHARED WHOLE-MAP FREE-ROAM ENGINE & PHYSICAL ANIMAL SHELTERS/NESTS
   // =========================================================================
+  const freeRoam = new FreeRoamSystem(202605);
   const walkingVillagers: WalkingVillagerAnim[] = [];
   const idleVillagers: IdleVillagerAnim[] = [];
+
+  // Dedicated handcrafted shelters & nests for every animal species (Module 4)
+  {
+    const hayMat = createCraftStrawMat(0xdcb866, trackMat, 0.88);
+    const shelterRoot = new THREE.Group();
+    shelterRoot.name = 'AnimalSheltersAndNests';
+    root.add(shelterRoot);
+
+    // 2.0A Courtyard Pitched-Roof Wooden Doghouse (狗窝) at (-9.6, 22.85), facing South (+Z)
+    {
+      const dx = -9.6;
+      const dz = 22.85;
+      const dy = groundHeightAt(dx, dz, 0);
+      const doghouse = new THREE.Group();
+      doghouse.position.set(dx, dy, dz);
+      addShadowDisc(doghouse, 0.86, 0.78);
+
+      const floor = new THREE.Mesh(boxGeo, mats.darkTimber);
+      floor.scale.set(1.24, 0.08, 1.12);
+      floor.position.y = 0.04;
+      doghouse.add(floor);
+
+      // Left, right & back plank walls
+      for (const sx of [-0.56, 0.56]) {
+        const wall = new THREE.Mesh(boxGeo, mats.weatheredWoodDoor);
+        wall.scale.set(0.08, 0.78, 1.04);
+        wall.position.set(sx, 0.45, 0);
+        wall.castShadow = castShadow;
+        doghouse.add(wall);
+      }
+      const backWall = new THREE.Mesh(boxGeo, mats.weatheredWoodDoor);
+      backWall.scale.set(1.2, 0.96, 0.08);
+      backWall.position.set(0, 0.54, -0.49);
+      backWall.castShadow = castShadow;
+      doghouse.add(backWall);
+
+      // Front doorway frame pillars + lintel (open arch facing +Z)
+      for (const sx of [-0.42, 0.42]) {
+        const post = new THREE.Mesh(boxGeo, mats.darkTimber);
+        post.scale.set(0.28, 0.78, 0.08);
+        post.position.set(sx, 0.45, 0.49);
+        doghouse.add(post);
+      }
+      const lintel = new THREE.Mesh(boxGeo, mats.darkTimber);
+      lintel.scale.set(1.16, 0.18, 0.1);
+      lintel.position.set(0, 0.84, 0.49);
+      doghouse.add(lintel);
+
+      // Pitched Qing-tile gable roof
+      for (const sx of [-1, 1]) {
+        const slope = new THREE.Mesh(boxGeo, mats.roofTile);
+        slope.scale.set(0.86, 0.07, 1.32);
+        slope.position.set(sx * 0.36, 1.02, 0.02);
+        slope.rotation.z = -sx * 0.46;
+        slope.castShadow = castShadow;
+        doghouse.add(slope);
+      }
+      const ridge = new THREE.Mesh(cylGeo, mats.roofTileDark);
+      ridge.scale.set(0.055, 1.34, 0.055);
+      ridge.rotation.x = Math.PI * 0.5;
+      ridge.position.set(0, 1.22, 0.02);
+      doghouse.add(ridge);
+
+      // Warm straw cushion inside + ceramic water bowl by entrance
+      const bed = new THREE.Mesh(trackGeo(createSoftPillowGeometry(0.46, 1.2, 0.24, 10, 8)), hayMat);
+      bed.position.set(0, 0.13, -0.05);
+      doghouse.add(bed);
+
+      const bowl = new THREE.Mesh(cylGeo, celadonMat);
+      bowl.scale.set(0.14, 0.08, 0.14);
+      bowl.position.set(0.56, 0.04, 0.68);
+      doghouse.add(bowl);
+
+      shelterRoot.add(doghouse);
+    }
+
+    // 2.0B Courtyard Timber Chicken Coop (鸡舍) at (13.4, 22.95)
+    {
+      const cx = 13.4;
+      const cz = 22.95;
+      const cy = groundHeightAt(cx, cz, 0);
+      const coop = new THREE.Group();
+      coop.position.set(cx, cy, cz);
+      addShadowDisc(coop, 1.18, 0.92);
+
+      const base = new THREE.Mesh(boxGeo, mats.darkTimber);
+      base.scale.set(1.86, 0.1, 1.34);
+      base.position.y = 0.05;
+      coop.add(base);
+
+      // Slatted coop back & side walls + timber corner posts
+      for (const px of [-0.88, 0.88]) {
+        for (const pz of [-0.62, 0.62]) {
+          const post = new THREE.Mesh(boxGeo, mats.darkTimber);
+          post.scale.set(0.09, 1.05, 0.09);
+          post.position.set(px, 0.56, pz);
+          post.castShadow = castShadow;
+          coop.add(post);
+        }
+      }
+      const back = new THREE.Mesh(boxGeo, mats.weatheredWoodDoor);
+      back.scale.set(1.78, 0.98, 0.07);
+      back.position.set(0, 0.56, -0.62);
+      coop.add(back);
+      const eastWall = new THREE.Mesh(boxGeo, mats.weatheredWoodDoor);
+      eastWall.scale.set(0.07, 0.98, 1.26);
+      eastWall.position.set(0.88, 0.56, 0);
+      coop.add(eastWall);
+
+      // Bamboo slats along front-east & west sides leaving an inviting low coop opening
+      for (let s = 0; s < 5; s++) {
+        const slat = new THREE.Mesh(cylGeo, bambooPoleMat);
+        slat.scale.set(0.018, 0.92, 0.018);
+        slat.position.set(0.18 + s * 0.15, 0.54, 0.62);
+        coop.add(slat);
+      }
+
+      // Sloped Qing-tile shed roof
+      const roof = new THREE.Mesh(boxGeo, mats.roofTile);
+      roof.scale.set(2.14, 0.08, 1.62);
+      roof.position.set(0, 1.16, 0.04);
+      roof.rotation.x = 0.2;
+      roof.castShadow = castShadow;
+      coop.add(roof);
+
+      // Straw floor + wooden roosting perch bars inside
+      const strawFloor = new THREE.Mesh(boxGeo, hayMat);
+      strawFloor.scale.set(1.66, 0.05, 1.14);
+      strawFloor.position.set(0, 0.12, 0);
+      coop.add(strawFloor);
+      for (const pz of [-0.28, 0.12]) {
+        const perch = new THREE.Mesh(cylGeo, bambooPoleMat);
+        perch.scale.set(0.025, 1.64, 0.025);
+        perch.rotation.z = Math.PI * 0.5;
+        perch.position.set(0, 0.36, pz);
+        coop.add(perch);
+      }
+      // Small wooden entry ramp
+      const ramp = new THREE.Mesh(boxGeo, mats.weatheredWoodDoor);
+      ramp.scale.set(0.46, 0.04, 0.52);
+      ramp.position.set(-0.46, 0.06, 0.82);
+      ramp.rotation.x = 0.18;
+      coop.add(ramp);
+
+      shelterRoot.add(coop);
+    }
+
+    // 2.0C Huatai Corner Chicken Hutch (化胎小鸡舍) at (-3.8, -17.0)
+    {
+      const hx = -3.8;
+      const hz = -17.0;
+      const hy = groundHeightAt(hx, hz, 1.0);
+      const hutch = new THREE.Group();
+      hutch.position.set(hx, hy, hz);
+      const base = new THREE.Mesh(boxGeo, mats.darkTimber);
+      base.scale.set(1.16, 0.08, 0.96);
+      base.position.y = 0.04;
+      hutch.add(base);
+      const back = new THREE.Mesh(boxGeo, mats.weatheredWoodDoor);
+      back.scale.set(1.12, 0.76, 0.07);
+      back.position.set(0, 0.44, -0.44);
+      hutch.add(back);
+      for (const sx of [-0.54, 0.54]) {
+        const side = new THREE.Mesh(boxGeo, mats.weatheredWoodDoor);
+        side.scale.set(0.07, 0.76, 0.9);
+        side.position.set(sx, 0.44, 0);
+        hutch.add(side);
+      }
+      const roof = new THREE.Mesh(boxGeo, mats.roofTile);
+      roof.scale.set(1.36, 0.07, 1.18);
+      roof.position.set(0, 0.88, 0.02);
+      roof.rotation.x = 0.18;
+      hutch.add(roof);
+      const straw = new THREE.Mesh(boxGeo, hayMat);
+      straw.scale.set(0.98, 0.04, 0.8);
+      straw.position.set(0, 0.1, 0);
+      hutch.add(straw);
+      shelterRoot.add(hutch);
+    }
+
+    // 2.0D Woven Bamboo Cat Basket Nook (下堂竹编猫窝) inside Lower Hall east alcove (3.4, 20.6)
+    {
+      const bx = 3.4;
+      const bz = 20.6;
+      const by = groundHeightAt(bx, bz, 0);
+      const catNest = new THREE.Group();
+      catNest.position.set(bx, by, bz);
+      const rim = new THREE.Mesh(
+        trackGeo(new THREE.TorusGeometry(0.36, 0.068, 8, 18)),
+        strawRimMat
+      );
+      rim.rotation.x = Math.PI * 0.5;
+      rim.position.y = 0.09;
+      catNest.add(rim);
+      const floor = new THREE.Mesh(cylGeo, strawMat);
+      floor.scale.set(0.36, 0.05, 0.36);
+      floor.position.y = 0.03;
+      catNest.add(floor);
+      const cushion = new THREE.Mesh(
+        trackGeo(createSoftPillowGeometry(0.31, 0.8, 0.28, 10, 8)),
+        clothIndigoMat
+      );
+      cushion.position.y = 0.08;
+      catNest.add(cushion);
+      shelterRoot.add(catNest);
+    }
+
+    // 2.0E East Meadow Timber Buffalo Shed (东草坪牛棚) at (25.6, 43.2)
+    {
+      const bx = 25.6;
+      const bz = 43.2;
+      const by = groundHeightAt(bx, bz, 0);
+      const shed = new THREE.Group();
+      shed.position.set(bx, by, bz);
+      addShadowDisc(shed, 2.35, 1.95);
+      for (const px of [-1.85, 1.85]) {
+        for (const pz of [-1.45, 1.45]) {
+          const post = new THREE.Mesh(cylGeo, mats.darkTimber);
+          post.scale.set(0.11, 2.55, 0.11);
+          post.position.set(px, 1.275, pz);
+          post.castShadow = castShadow;
+          shed.add(post);
+        }
+      }
+      // Back & east windbreak rails
+      for (const ry of [0.65, 1.35]) {
+        const backRail = new THREE.Mesh(boxGeo, mats.weatheredWoodDoor);
+        backRail.scale.set(3.8, 0.12, 0.08);
+        backRail.position.set(0, ry, -1.45);
+        shed.add(backRail);
+        const sideRail = new THREE.Mesh(boxGeo, mats.weatheredWoodDoor);
+        sideRail.scale.set(0.08, 0.12, 2.95);
+        sideRail.position.set(1.85, ry, 0);
+        shed.add(sideRail);
+      }
+      // Gable tile roof with wooden rafters
+      for (const sx of [-1, 1]) {
+        const slope = new THREE.Mesh(boxGeo, mats.roofTile);
+        slope.scale.set(2.5, 0.1, 3.6);
+        slope.position.set(sx * 1.05, 2.86, 0);
+        slope.rotation.z = -sx * 0.34;
+        slope.castShadow = castShadow;
+        shed.add(slope);
+      }
+      const ridge = new THREE.Mesh(cylGeo, mats.roofTileDark);
+      ridge.scale.set(0.08, 3.65, 0.08);
+      ridge.rotation.x = Math.PI * 0.5;
+      ridge.position.set(0, 3.26, 0);
+      shed.add(ridge);
+      const bedding = new THREE.Mesh(boxGeo, hayMat);
+      bedding.scale.set(3.2, 0.08, 2.4);
+      bedding.position.set(0, 0.04, 0);
+      shed.add(bedding);
+      const manger = new THREE.Mesh(boxGeo, mats.weatheredWoodDoor);
+      manger.scale.set(1.6, 0.45, 0.55);
+      manger.position.set(0.4, 0.28, -1.1);
+      shed.add(manger);
+      const hayHeap = new THREE.Mesh(trackGeo(createSoftPillowGeometry(0.65, 1.4, 0.45, 10, 8)), hayMat);
+      hayHeap.position.set(0.4, 0.56, -1.1);
+      shed.add(hayHeap);
+      shelterRoot.add(shed);
+    }
+
+    // 2.0F West Meadow Timber Goat Shed (西草坪羊圈) at (-25.8, 42.4)
+    {
+      const gx = -25.8;
+      const gz = 42.4;
+      const gy = groundHeightAt(gx, gz, 0);
+      const shed = new THREE.Group();
+      shed.position.set(gx, gy, gz);
+      addShadowDisc(shed, 1.95, 1.55);
+      for (const px of [-1.45, 1.45]) {
+        for (const pz of [-1.1, 1.1]) {
+          const post = new THREE.Mesh(cylGeo, mats.darkTimber);
+          post.scale.set(0.085, 1.92, 0.085);
+          post.position.set(px, 0.96, pz);
+          post.castShadow = castShadow;
+          shed.add(post);
+        }
+      }
+      for (const ry of [0.45, 0.92]) {
+        const backRail = new THREE.Mesh(boxGeo, mats.weatheredWoodDoor);
+        backRail.scale.set(2.96, 0.09, 0.07);
+        backRail.position.set(0, ry, -1.1);
+        shed.add(backRail);
+        const sideRail = new THREE.Mesh(boxGeo, mats.weatheredWoodDoor);
+        sideRail.scale.set(0.07, 0.09, 2.25);
+        sideRail.position.set(-1.45, ry, 0);
+        shed.add(sideRail);
+      }
+      for (const sx of [-1, 1]) {
+        const slope = new THREE.Mesh(boxGeo, mats.roofTile);
+        slope.scale.set(1.95, 0.08, 2.85);
+        slope.position.set(sx * 0.82, 2.18, 0);
+        slope.rotation.z = -sx * 0.34;
+        slope.castShadow = castShadow;
+        shed.add(slope);
+      }
+      const bedding = new THREE.Mesh(boxGeo, hayMat);
+      bedding.scale.set(2.45, 0.06, 1.85);
+      bedding.position.set(0, 0.03, 0);
+      shed.add(bedding);
+      shelterRoot.add(shed);
+    }
+
+    // 2.0G Two Half-Moon Pond Shoreline Reed Waterfowl Nests (水禽芦苇窝) at (-11.8, 39.8) & (11.8, 39.8)
+    const reedMat = woodPaintMat(0x5a7f46, 0.82);
+    for (const [nx, nz] of [
+      [-11.8, 39.8],
+      [11.8, 39.8],
+    ]) {
+      const nest = new THREE.Group();
+      nest.position.set(nx, -0.18, nz);
+      const ring = new THREE.Mesh(trackGeo(new THREE.TorusGeometry(0.92, 0.18, 7, 18)), hayMat);
+      ring.rotation.x = Math.PI * 0.5;
+      ring.position.y = 0.06;
+      nest.add(ring);
+      const pad = new THREE.Mesh(cylGeo, hayMat);
+      pad.scale.set(0.88, 0.08, 0.88);
+      pad.position.y = 0.02;
+      nest.add(pad);
+      // Tufted lakeside reeds shielding each nest
+      for (let r = 0; r < 7; r++) {
+        const ang = (r / 7) * Math.PI * 1.1 - Math.PI * 0.55 + (nx < 0 ? Math.PI : 0);
+        const blade = new THREE.Mesh(cylGeo, reedMat);
+        blade.scale.set(0.024, 0.72 + (r % 3) * 0.16, 0.024);
+        blade.position.set(Math.cos(ang) * 0.98, 0.36, Math.sin(ang) * 0.98);
+        blade.rotation.z = Math.cos(ang) * 0.16;
+        nest.add(blade);
+      }
+      shelterRoot.add(nest);
+    }
+  }
 
   // 2A. Two Raking Farmers standing cleanly beside the two unified He-Ping grain mats!
   //     Each 7-tooth wooden grain rake is a single unified rig parented directly to rightHandSocket
   //     so palm, bamboo shaft, crossbar, and all 7 teeth move together with zero detachment!
-  const farmerPlacements: Array<[number, number, number, number, number, THREE.MeshStandardMaterial]> = [
-    [-8.65, 28.8, Math.PI * 0.5, -8.5, 22.8, clothIndigoMat], // West mat [-6.0, 28.8], facing East
-    [7.85, 29.2, -Math.PI * 0.5, 8.2, 22.8, clothTealMat],    // East mat [5.2, 29.2], facing West
+  const farmerPlacements: Array<[number, number, number, PathPoint2D[], number, THREE.MeshStandardMaterial]> = [
+    [
+      -8.65,
+      28.8,
+      Math.PI * 0.5,
+      [
+        { x: -8.65, z: 28.8 },
+        { x: -3.2, z: 24.4 },
+        { x: 0.0, z: 23.0 },
+        { x: 0.0, z: 20.0 },
+        { x: -5.2, z: 19.2 },
+      ],
+      0.35,
+      clothIndigoMat,
+    ],
+    [
+      7.85,
+      29.2,
+      -Math.PI * 0.5,
+      [
+        { x: 7.85, z: 29.2 },
+        { x: 3.2, z: 24.4 },
+        { x: 0.0, z: 23.0 },
+        { x: 0.0, z: 20.0 },
+        { x: 5.2, z: 19.2 },
+      ],
+      -0.35,
+      clothTealMat,
+    ],
   ];
-  farmerPlacements.forEach(([fx, fz, yaw, shX, shZ, tunic], idx) => {
+  farmerPlacements.forEach(([fx, fz, yaw, homeRoute, homeYaw, tunic], idx) => {
     const farmer = createVillager({
       tunicMat: tunic,
       pantsMat: clothNavyMat,
@@ -1087,20 +1463,34 @@ export function buildLivingWorld(
 
     root.add(farmer.group);
     idleVillagers.push({
+      id: `farmer_${idx}`,
       group: farmer.group,
       head: farmer.head,
       leftArm: farmer.leftArm,
       rightArm: farmer.rightArm,
+      leftElbow: farmer.leftElbow,
+      rightElbow: farmer.rightElbow,
+      leftLeg: farmer.leftLeg,
+      rightLeg: farmer.rightLeg,
+      leftKnee: farmer.leftKnee,
+      rightKnee: farmer.rightKnee,
       torso: farmer.torso,
+      sashTailL: farmer.sashTailL,
+      sashTailR: farmer.sashTailR,
+      sashSpring: new Spring1D(0, VIRTUAL_MASS.clothStiffness, VIRTUAL_MASS.clothDamping),
       kind: 'rake',
       phaseOffset: idx * 2.1,
       rakeGroup,
       baseX: fx,
       baseZ: fz,
       baseYaw: yaw,
-      shelterX: shX,
-      shelterZ: shZ,
-      shelterYaw: 0,
+      homeRoute,
+      homeYaw,
+      homeBlendSmooth: 0,
+      stridePhase: 0,
+      curX: fx,
+      curZ: fz,
+      curYaw: yaw,
     });
   });
 
@@ -1169,13 +1559,23 @@ export function buildLivingWorld(
   carrier.torso.add(carryPoleGroup);
   carrier.rightArm.rotation.x = -0.78;
   root.add(carrier.group);
+  const carrierAgent = freeRoam.registerAgent('villager_carrier', 'villager_stroll', -6.5, 25.2, Math.PI * 0.5);
   walkingVillagers.push({
+    id: 'villager_carrier',
     group: carrier.group,
+    torso: carrier.torso,
     leftArm: carrier.leftArm,
     rightArm: carrier.rightArm,
+    leftElbow: carrier.leftElbow,
+    rightElbow: carrier.rightElbow,
     leftLeg: carrier.leftLeg,
     rightLeg: carrier.rightLeg,
+    leftKnee: carrier.leftKnee,
+    rightKnee: carrier.rightKnee,
     head: carrier.head,
+    sashTailL: carrier.sashTailL,
+    sashTailR: carrier.sashTailR,
+    sashSpring: new Spring1D(0, VIRTUAL_MASS.clothStiffness, VIRTUAL_MASS.clothDamping),
     carryPole: carryPoleGroup,
     waypoints: [
       { x: -13.5, z: 24.4 },
@@ -1187,6 +1587,12 @@ export function buildLivingWorld(
     ],
     speed: 0.017,
     phaseOffset: 0.12,
+    roamAgent: carrierAgent,
+    homeRoom: { x: 7.4, z: 18.8, yaw: -0.4 },
+    homeAnchor: null,
+    homeRoute: [],
+    homeBlendSmooth: 0,
+    stridePhase: 0,
   });
 
   // 2C. Two Hakka Women in Curtained Hats (客家凉帽) Washing Laundry at Half-Moon Pond Steps!
@@ -1260,17 +1666,41 @@ export function buildLivingWorld(
     root.add(ripple);
 
     idleVillagers.push({
+      id: `washer_${idx}`,
       group: woman.group,
       head: woman.head,
       leftArm: woman.leftArm,
       rightArm: woman.rightArm,
+      leftElbow: woman.leftElbow,
+      rightElbow: woman.rightElbow,
+      leftLeg: woman.leftLeg,
+      rightLeg: woman.rightLeg,
+      leftKnee: woman.leftKnee,
+      rightKnee: woman.rightKnee,
       torso: woman.torso,
+      sashTailL: woman.sashTailL,
+      sashTailR: woman.sashTailR,
+      sashSpring: new Spring1D(0, VIRTUAL_MASS.clothStiffness, VIRTUAL_MASS.clothDamping),
       kind: 'wash',
       phaseOffset: idx * 1.9,
       ripple,
       baseX: wx,
       baseZ: wz,
       baseYaw: idx === 0 ? 0.18 : -0.22,
+      seated: true,
+      homeRoute: [
+        { x: wx, z: wz },
+        { x: wx * 0.7, z: 33.5 },
+        { x: 0.0, z: 23.4 },
+        { x: 0.0, z: 19.6 },
+        { x: idx === 0 ? -7.2 : 7.2, z: 19.2 },
+      ],
+      homeYaw: idx === 0 ? 0.4 : -0.4,
+      homeBlendSmooth: 0,
+      stridePhase: 0,
+      curX: wx,
+      curZ: wz,
+      curYaw: idx === 0 ? 0.18 : -0.22,
     });
   });
 
@@ -1343,16 +1773,40 @@ export function buildLivingWorld(
   elderA.rightArm.rotation.x = -0.82;
   root.add(elderA.group);
   idleVillagers.push({
+    id: 'elder_a',
     group: elderA.group,
     head: elderA.head,
     leftArm: elderA.leftArm,
     rightArm: elderA.rightArm,
+    leftElbow: elderA.leftElbow,
+    rightElbow: elderA.rightElbow,
+    leftLeg: elderA.leftLeg,
+    rightLeg: elderA.rightLeg,
+    leftKnee: elderA.leftKnee,
+    rightKnee: elderA.rightKnee,
     torso: elderA.torso,
+    sashTailL: elderA.sashTailL,
+    sashTailR: elderA.sashTailR,
+    sashSpring: new Spring1D(0, VIRTUAL_MASS.clothStiffness, VIRTUAL_MASS.clothDamping),
     kind: 'fan',
     phaseOffset: 0.4,
     baseX: benchX - 0.5,
     baseZ: benchZ + 0.02,
     baseYaw: 0.35,
+    seated: true,
+    homeRoute: [
+      { x: benchX - 0.5, z: benchZ + 0.02 },
+      { x: -2.2, z: 23.6 },
+      { x: 0.0, z: 23.2 },
+      { x: 0.0, z: 19.6 },
+      { x: -3.4, z: 19.1 },
+    ],
+    homeYaw: 0.25,
+    homeBlendSmooth: 0,
+    stridePhase: 0,
+    curX: benchX - 0.5,
+    curZ: benchZ + 0.02,
+    curYaw: 0.35,
   });
 
   const elderB = createVillager({
@@ -1368,16 +1822,40 @@ export function buildLivingWorld(
   elderB.group.rotation.y = -0.4;
   root.add(elderB.group);
   idleVillagers.push({
+    id: 'elder_b',
     group: elderB.group,
     head: elderB.head,
     leftArm: elderB.leftArm,
     rightArm: elderB.rightArm,
+    leftElbow: elderB.leftElbow,
+    rightElbow: elderB.rightElbow,
+    leftLeg: elderB.leftLeg,
+    rightLeg: elderB.rightLeg,
+    leftKnee: elderB.leftKnee,
+    rightKnee: elderB.rightKnee,
     torso: elderB.torso,
+    sashTailL: elderB.sashTailL,
+    sashTailR: elderB.sashTailR,
+    sashSpring: new Spring1D(0, VIRTUAL_MASS.clothStiffness, VIRTUAL_MASS.clothDamping),
     kind: 'chat',
     phaseOffset: 1.7,
     baseX: benchX + 0.5,
     baseZ: benchZ + 0.02,
     baseYaw: -0.4,
+    seated: true,
+    homeRoute: [
+      { x: benchX + 0.5, z: benchZ + 0.02 },
+      { x: -1.8, z: 23.6 },
+      { x: 0.0, z: 23.2 },
+      { x: 0.0, z: 19.6 },
+      { x: -2.2, z: 19.1 },
+    ],
+    homeYaw: -0.25,
+    homeBlendSmooth: 0,
+    stridePhase: 0,
+    curX: benchX + 0.5,
+    curZ: benchZ + 0.02,
+    curYaw: -0.4,
   });
 
   // 2E. Three Joyful Children Playing across open He-Ping paths (completely clear of grain mats!)
@@ -1462,18 +1940,42 @@ export function buildLivingWorld(
       child.rightArm.rotation.x = -0.9;
     }
     root.add(child.group);
+    const childStart = cs.path[0];
+    const childId = `child_${walkingVillagers.length}`;
+    const childAgent = freeRoam.registerAgent(childId, 'child_playful', childStart.x, childStart.z, 0);
+    const childHomeRooms = [
+      { x: -4.2, z: 18.8, yaw: 0.2 },
+      { x: 4.2, z: 18.8, yaw: -0.2 },
+      { x: 2.6, z: 18.8, yaw: -0.1 },
+    ];
+    const homeRoom = childHomeRooms[walkingVillagers.length % childHomeRooms.length];
     walkingVillagers.push({
+      id: childId,
       group: child.group,
+      torso: child.torso,
       leftArm: child.leftArm,
       rightArm: child.rightArm,
+      leftElbow: child.leftElbow,
+      rightElbow: child.rightElbow,
       leftLeg: child.leftLeg,
       rightLeg: child.rightLeg,
+      leftKnee: child.leftKnee,
+      rightKnee: child.rightKnee,
       head: child.head,
+      sashTailL: child.sashTailL,
+      sashTailR: child.sashTailR,
+      sashSpring: new Spring1D(0, VIRTUAL_MASS.clothStiffness, VIRTUAL_MASS.clothDamping),
       waypoints: cs.path,
       speed: cs.speed,
       phaseOffset: cs.phase,
       pinwheel,
       isChild: true,
+      roamAgent: childAgent,
+      homeRoom,
+      homeAnchor: null,
+      homeRoute: [],
+      homeBlendSmooth: 0,
+      stridePhase: 0,
     });
   });
 
@@ -1490,13 +1992,23 @@ export function buildLivingWorld(
   umbrellaWalker.rightHandSocket.add(umbGroup);
   umbrellaWalker.rightArm.rotation.x = -0.68;
   root.add(umbrellaWalker.group);
+  const umbAgent = freeRoam.registerAgent('villager_umbrella', 'villager_stroll', -4.2, 35.0, Math.PI * 0.5);
   walkingVillagers.push({
+    id: 'villager_umbrella',
     group: umbrellaWalker.group,
+    torso: umbrellaWalker.torso,
     leftArm: umbrellaWalker.leftArm,
     rightArm: umbrellaWalker.rightArm,
+    leftElbow: umbrellaWalker.leftElbow,
+    rightElbow: umbrellaWalker.rightElbow,
     leftLeg: umbrellaWalker.leftLeg,
     rightLeg: umbrellaWalker.rightLeg,
+    leftKnee: umbrellaWalker.leftKnee,
+    rightKnee: umbrellaWalker.rightKnee,
     head: umbrellaWalker.head,
+    sashTailL: umbrellaWalker.sashTailL,
+    sashTailR: umbrellaWalker.sashTailR,
+    sashSpring: new Spring1D(0, VIRTUAL_MASS.clothStiffness, VIRTUAL_MASS.clothDamping),
     hasUmbrella: true,
     waypoints: [
       { x: -13.2, z: 35.1 },
@@ -1508,6 +2020,12 @@ export function buildLivingWorld(
     ],
     speed: 0.015,
     phaseOffset: 0.65,
+    roamAgent: umbAgent,
+    homeRoom: { x: -6.4, z: 18.8, yaw: 0.3 },
+    homeAnchor: null,
+    homeRoute: [],
+    homeBlendSmooth: 0,
+    stridePhase: 0,
   });
 
   // 2G. Two Tea-Drinking Neighbors Seated in the Front Skywell Courtyard (下堂天井品茗)!
@@ -1633,16 +2151,39 @@ export function buildLivingWorld(
     guest.group.rotation.y = yaw;
     root.add(guest.group);
     idleVillagers.push({
+      id: `tea_guest_${idx}`,
       group: guest.group,
       head: guest.head,
       leftArm: guest.leftArm,
       rightArm: guest.rightArm,
+      leftElbow: guest.leftElbow,
+      rightElbow: guest.rightElbow,
+      leftLeg: guest.leftLeg,
+      rightLeg: guest.rightLeg,
+      leftKnee: guest.leftKnee,
+      rightKnee: guest.rightKnee,
       torso: guest.torso,
+      sashTailL: guest.sashTailL,
+      sashTailR: guest.sashTailR,
+      sashSpring: new Spring1D(0, VIRTUAL_MASS.clothStiffness, VIRTUAL_MASS.clothDamping),
       kind: 'tea',
       phaseOffset: idx * 2.4,
       baseX: tx,
       baseZ: tz,
       baseYaw: yaw,
+      seated: true,
+      homeRoute: [
+        { x: tx, z: tz },
+        { x: 6.0, z: 10.4 },
+        { x: 11.4, z: 11.8 },
+        { x: 14.2, z: idx === 0 ? 11.2 : 12.6 },
+      ],
+      homeYaw: -Math.PI * 0.5,
+      homeBlendSmooth: 0,
+      stridePhase: 0,
+      curX: tx,
+      curZ: tz,
+      curYaw: yaw,
     });
   });
 
@@ -1671,16 +2212,38 @@ export function buildLivingWorld(
   }
   root.add(worshipper.group);
   idleVillagers.push({
+    id: 'worshipper_0',
     group: worshipper.group,
     head: worshipper.head,
     leftArm: worshipper.leftArm,
     rightArm: worshipper.rightArm,
+    leftElbow: worshipper.leftElbow,
+    rightElbow: worshipper.rightElbow,
+    leftLeg: worshipper.leftLeg,
+    rightLeg: worshipper.rightLeg,
+    leftKnee: worshipper.leftKnee,
+    rightKnee: worshipper.rightKnee,
     torso: worshipper.torso,
+    sashTailL: worshipper.sashTailL,
+    sashTailR: worshipper.sashTailR,
+    sashSpring: new Spring1D(0, VIRTUAL_MASS.clothStiffness, VIRTUAL_MASS.clothDamping),
     kind: 'bow',
     phaseOffset: 0.9,
     baseX: 1.8,
     baseZ: -1.6,
     baseYaw: Math.PI,
+    homeRoute: [
+      { x: 1.8, z: -1.6 },
+      { x: 0.0, z: 3.4 },
+      { x: -11.2, z: 3.4 },
+      { x: -14.8, z: -0.8 },
+    ],
+    homeYaw: Math.PI * 0.5,
+    homeBlendSmooth: 0,
+    stridePhase: 0,
+    curX: 1.8,
+    curZ: -1.6,
+    curYaw: Math.PI,
   });
 
   // 2I. Two Hakka Women on the Sun-Warmed Huatai (化胎) Cobble Courtyard with Harvest Baskets
@@ -1714,16 +2277,37 @@ export function buildLivingWorld(
 
     root.add(w.group);
     idleVillagers.push({
+      id: `huatai_woman_${idx}`,
       group: w.group,
       head: w.head,
       leftArm: w.leftArm,
       rightArm: w.rightArm,
+      leftElbow: w.leftElbow,
+      rightElbow: w.rightElbow,
+      leftLeg: w.leftLeg,
+      rightLeg: w.rightLeg,
+      leftKnee: w.leftKnee,
+      rightKnee: w.rightKnee,
       torso: w.torso,
+      sashTailL: w.sashTailL,
+      sashTailR: w.sashTailR,
+      sashSpring: new Spring1D(0, VIRTUAL_MASS.clothStiffness, VIRTUAL_MASS.clothDamping),
       kind: 'tend',
       phaseOffset: idx * 1.6,
       baseX: hx,
       baseZ: hz,
       baseYaw: yaw,
+      homeRoute: [
+        { x: hx, z: hz },
+        { x: idx === 0 ? -9.8 : 9.8, z: -15.6 },
+        { x: idx === 0 ? -13.6 : 13.6, z: -17.2 },
+      ],
+      homeYaw: idx === 0 ? 0.6 : -0.6,
+      homeBlendSmooth: 0,
+      stridePhase: 0,
+      curX: hx,
+      curZ: hz,
+      curYaw: yaw,
     });
   });
 
@@ -1792,17 +2376,40 @@ export function buildLivingWorld(
     rainUmbrella.visible = false;
     v.rightHandSocket.add(rainUmbrella);
     root.add(v.group);
+    const wwStarts: Array<[number, number, { x: number; z: number; yaw: number }]> = [
+      [-6.5, -14.8, { x: -4.2, z: -18.2, yaw: 0.1 }],
+      [11.2, 26.2, { x: 8.2, z: 19.0, yaw: -0.35 }],
+      [-11.2, 26.2, { x: -8.2, z: 19.0, yaw: 0.35 }],
+    ];
+    const [sx, sz, hRoom] = wwStarts[idx % wwStarts.length];
+    const wwId = `villager_roam_${idx}`;
+    const wwAgent = freeRoam.registerAgent(wwId, 'villager_stroll', sx, sz, 0);
     walkingVillagers.push({
+      id: wwId,
       group: v.group,
+      torso: v.torso,
       leftArm: v.leftArm,
       rightArm: v.rightArm,
+      leftElbow: v.leftElbow,
+      rightElbow: v.rightElbow,
       leftLeg: v.leftLeg,
       rightLeg: v.rightLeg,
+      leftKnee: v.leftKnee,
+      rightKnee: v.rightKnee,
       head: v.head,
+      sashTailL: v.sashTailL,
+      sashTailR: v.sashTailR,
+      sashSpring: new Spring1D(0, VIRTUAL_MASS.clothStiffness, VIRTUAL_MASS.clothDamping),
       rainUmbrella,
       waypoints: ww.path,
       speed: ww.speed,
       phaseOffset: ww.phase,
+      roamAgent: wwAgent,
+      homeRoom: hRoom,
+      homeAnchor: null,
+      homeRoute: [],
+      homeBlendSmooth: 0,
+      stridePhase: 0,
     });
   });
 
@@ -1954,7 +2561,35 @@ export function buildLivingWorld(
     g.position.set(baseX, by, baseZ);
     root.add(g);
 
+    const pId = `${kind}_${poultryList.length}`;
+    const isHuataiBird = baseZ < 0;
+    const birdIdx = poultryList.length;
+    const coopTarget = isHuataiBird
+      ? {
+          x: -3.8 + ((birdIdx % 3) - 1) * 0.24,
+          z: -17.0 + ((birdIdx % 2) - 0.5) * 0.22,
+          entryX: -3.8,
+          entryZ: -15.9,
+        }
+      : {
+          x: 13.4 + (((birdIdx % 5) - 2) * 0.28),
+          z: 22.95 + (((Math.floor(birdIdx / 5) % 2) - 0.5) * 0.34),
+          entryX: 12.6,
+          entryZ: 24.0,
+        };
+    const roamAgent =
+      kind === 'chick'
+        ? undefined
+        : freeRoam.registerAgent(
+            pId,
+            kind === 'rooster' ? 'rooster' : 'hen',
+            baseX,
+            baseZ,
+            phaseOffset
+          );
+
     poultryList.push({
+      id: pId,
       group: g,
       body,
       head,
@@ -1965,6 +2600,10 @@ export function buildLivingWorld(
       speed: kind === 'chick' ? 1.45 : kind === 'rooster' ? 0.65 : 0.85,
       isChick: kind === 'chick',
       leaderIdx,
+      roamAgent,
+      coopTarget,
+      homeAnchor: null,
+      coopBlendSmooth: 0,
     });
   };
 
@@ -2114,6 +2753,11 @@ export function buildLivingWorld(
     g.add(wake);
 
     root.add(g);
+    const wfIdx = waterfowlList.length;
+    const westNest = cx < 0 || wfIdx % 2 === 0;
+    const nestBaseX = westNest ? -11.8 : 11.8;
+    const nestBaseZ = 39.8;
+    const slotAngle = (wfIdx % 4) * 1.55;
     waterfowlList.push({
       group: g,
       neck,
@@ -2125,6 +2769,10 @@ export function buildLivingWorld(
       speed,
       phaseOffset,
       dir,
+      nestX: nestBaseX + Math.cos(slotAngle) * 0.42,
+      nestZ: nestBaseZ + Math.sin(slotAngle) * 0.36,
+      nestYaw: westNest ? 0.8 : -0.8,
+      nestBlendSmooth: 0,
     });
   };
 
@@ -2271,7 +2919,18 @@ export function buildLivingWorld(
     const baseY = groundHeightAt(posX, posZ, 0);
     g.position.set(posX, baseY, posZ);
     root.add(g);
+    const dogId = kind === 'puppy_hop' ? 'puppy_0' : 'dog_0';
+    const dogAgent = freeRoam.registerAgent(
+      dogId,
+      kind === 'puppy_hop' ? 'puppy_playful' : 'dog_patrol',
+      posX,
+      posZ,
+      0
+    );
+    const insideX = kind === 'puppy_hop' ? -9.42 : -9.76;
+    const insideZ = kind === 'puppy_hop' ? 22.92 : 22.74;
     quadrupeds.push({
+      id: dogId,
       group: g,
       head,
       tail,
@@ -2283,6 +2942,16 @@ export function buildLivingWorld(
       baseX: posX,
       baseZ: posZ,
       baseY,
+      roamAgent: dogAgent,
+      homeRouteTail: [
+        { x: -9.6, z: 24.3 },
+        { x: insideX, z: insideZ },
+      ],
+      homeYaw: 0.15,
+      homeAnchor: null,
+      homeRoute: [],
+      homeBlendSmooth: 0,
+      gaitPhase: 0,
     });
   };
 
@@ -2386,7 +3055,9 @@ export function buildLivingWorld(
     catG.position.set(cx, cy, cz);
     catG.rotation.y = -0.65;
     root.add(catG);
+    const catAgent = freeRoam.registerAgent('cat_0', 'cat_curious', cx, cz, -0.65);
     quadrupeds.push({
+      id: 'cat_0',
       group: catG,
       head,
       tail,
@@ -2397,6 +3068,17 @@ export function buildLivingWorld(
       baseX: cx,
       baseZ: cz,
       baseY: cy,
+      roamAgent: catAgent,
+      homeRouteTail: [
+        { x: 0.0, z: 22.6 },
+        { x: 0.0, z: 20.6 },
+        { x: 3.4, z: 20.6 },
+      ],
+      homeYaw: -0.45,
+      homeAnchor: null,
+      homeRoute: [],
+      homeBlendSmooth: 0,
+      gaitPhase: 0,
     });
   }
 
@@ -2501,7 +3183,9 @@ export function buildLivingWorld(
     bufG.position.set(bx, by, bz);
     bufG.rotation.y = -1.25;
     root.add(bufG);
+    const bufAgent = freeRoam.registerAgent('buffalo_0', 'buffalo', bx, bz, -1.25);
     quadrupeds.push({
+      id: 'buffalo_0',
       group: bufG,
       head,
       tail,
@@ -2512,6 +3196,16 @@ export function buildLivingWorld(
       baseX: bx,
       baseZ: bz,
       baseY: by,
+      roamAgent: bufAgent,
+      homeRouteTail: [
+        { x: 24.4, z: 42.2 },
+        { x: 25.5, z: 43.3 },
+      ],
+      homeYaw: -1.1,
+      homeAnchor: null,
+      homeRoute: [],
+      homeBlendSmooth: 0,
+      gaitPhase: 0,
     });
   }
 
@@ -2597,7 +3291,13 @@ export function buildLivingWorld(
     goatG.position.set(gx, gy, gz);
     goatG.rotation.y = yaw;
     root.add(goatG);
+    const goatIdx = quadrupeds.length;
+    const goatId = `goat_${goatIdx}`;
+    const goatAgent = freeRoam.registerAgent(goatId, 'goat', gx, gz, yaw);
+    const shedSlotX = goatIdx % 2 === 0 ? -25.2 : -26.3;
+    const shedSlotZ = goatIdx % 2 === 0 ? 42.2 : 42.7;
     quadrupeds.push({
+      id: goatId,
       group: goatG,
       head,
       tail,
@@ -2608,6 +3308,16 @@ export function buildLivingWorld(
       baseX: gx,
       baseZ: gz,
       baseY: gy,
+      roamAgent: goatAgent,
+      homeRouteTail: [
+        { x: -24.4, z: 41.8 },
+        { x: shedSlotX, z: shedSlotZ },
+      ],
+      homeYaw: 0.85,
+      homeAnchor: null,
+      homeRoute: [],
+      homeBlendSmooth: 0,
+      gaitPhase: 0,
     });
   });
 
@@ -2710,6 +3420,19 @@ export function buildLivingWorld(
     const sc = 0.88 + (i % 3) * 0.14;
     cg.scale.setScalar(sc);
     root.add(cg);
+    // Physical woven twig bird nest tucked beneath each crane's treetop roost!
+    const nestTwigMat = woodPaintMat(0x6e4e32, 0.9);
+    const twigNest = new THREE.Group();
+    twigNest.position.set(roostX, roostY - 0.14, roostZ);
+    const nestRim = new THREE.Mesh(trackGeo(new THREE.TorusGeometry(0.46, 0.11, 6, 14)), nestTwigMat);
+    nestRim.rotation.x = Math.PI * 0.5;
+    twigNest.add(nestRim);
+    const nestBowl = new THREE.Mesh(cylGeo, strawRimMat);
+    nestBowl.scale.set(0.42, 0.12, 0.42);
+    nestBowl.position.y = -0.05;
+    twigNest.add(nestBowl);
+    root.add(twigNest);
+
     cranes.push({
       group: cg,
       leftWing,
@@ -2785,6 +3508,7 @@ export function buildLivingWorld(
     const rw = makeBfWing(1);
     bg.add(lw, rw);
     root.add(bg);
+    const perchGroundY = groundHeightAt(cx, cz, 0);
     butterflies.push({
       group: bg,
       leftWing: lw,
@@ -2796,6 +3520,9 @@ export function buildLivingWorld(
       rz: 1.2 + (idx % 2) * 0.7,
       speed: 0.7 + (idx % 4) * 0.22,
       phaseOffset: idx * 0.9,
+      perchX: cx + (idx % 2 === 0 ? 0.35 : -0.35),
+      perchY: perchGroundY + 0.52,
+      perchZ: cz + (idx % 3 === 0 ? 0.25 : -0.25),
     });
   });
 
@@ -2928,134 +3655,388 @@ export function buildLivingWorld(
   root.add(skyLanternGroup);
 
   // =========================================================================
-  // 7. ZERO-GC PER-FRAME TIME + WEATHER DYNAMIC BEHAVIOR FSM LOOP
+  // 7. ZERO-GC PER-FRAME CONTINUOUS FREE-ROAM + SOCIAL PLAY + HOME/NEST + GRAIN LOOP
+  //    Strictly ZERO `visible = false` popping & ZERO teleporting across day/night/weather!
   // =========================================================================
-  let walkClock = 0;
   let fowlClock = 0;
-  let poultryClock = 0;
   let craneRoostSmooth = 0;
-  let farmerShelterSmooth = 0;
+  let butterflyPerchSmooth = 0;
+  let liveGrainSpread = 1.0;
+  let liveGrainBasketFill = 0.08;
+  let liveGrainMatDeployed = 1.0;
+  let liveFarmerHome = 0.0;
+  let liveIsGathering = false;
   let lastTimeOfDay = 10.5;
   let initialized = false;
 
-  const update = (dt: number, t: number, weather: WeatherMode, timeOfDay = 10.5) => {
+  const buildDynamicHomeRoute = (
+    startX: number,
+    startZ: number,
+    tail: readonly PathPoint2D[]
+  ): PathPoint2D[] => {
+    const dest = tail[tail.length - 1];
+    const fromZone = classifyZone(startX, startZ);
+    const toZone = classifyZone(dest.x, dest.z);
+    const bridges = computeZoneBridgeWaypoints(fromZone, toZone);
+    return [{ x: startX, z: startZ }, ...bridges, ...tail];
+  };
+
+  const update = (
+    dt: number,
+    t: number,
+    weather: WeatherMode,
+    timeOfDay = 10.5,
+    doumenOpen = true
+  ) => {
     const b = evaluateLivingBehavior(timeOfDay, weather);
     const scrubbed = !initialized || Math.abs(timeOfDay - lastTimeOfDay) > 0.35;
     initialized = true;
     lastTimeOfDay = timeOfDay;
 
-    walkClock += dt * b.walkSpeedScale;
-    fowlClock += dt * (b.waterfowlState === 'swimming' ? 1.0 : 0.14);
-    poultryClock += dt * (b.poultryState === 'foraging' ? 1.0 : 0.0);
+    // Step whole-map autonomous free-roam & social play coordinator!
+    freeRoam.update(dt, doumenOpen, Math.max(0.45, b.walkSpeedScale));
 
-    const targetCraneRoost = b.craneRoostBlend;
+    fowlClock += dt * (1 - b.waterfowlNestBlend * 0.85);
     craneRoostSmooth = scrubbed
-      ? targetCraneRoost
-      : THREE.MathUtils.damp(craneRoostSmooth, targetCraneRoost, 1.8, dt);
+      ? b.craneRoostBlend
+      : damp(craneRoostSmooth, b.craneRoostBlend, 1.8, dt);
+    butterflyPerchSmooth = scrubbed
+      ? b.butterflyPerchBlend
+      : damp(butterflyPerchSmooth, b.butterflyPerchBlend, 1.9, dt);
 
-    const targetFarmerShelter = b.farmerState === 'resting_indoors' ? 1.0 : 0.0;
-    farmerShelterSmooth = scrubbed
-      ? targetFarmerShelter
-      : THREE.MathUtils.damp(farmerShelterSmooth, targetFarmerShelter, 2.4, dt);
+    // Progressive Grain Drying & Gathering State (continuous 0..1 on live rain/sun OR timeline scrub!)
+    if (scrubbed) {
+      liveGrainSpread = b.grainSpreadProgress;
+      liveGrainBasketFill = b.grainBasketFill;
+      liveGrainMatDeployed = b.grainMatDeployed;
+      liveFarmerHome = b.farmerHomeBlend;
+      liveIsGathering = b.farmerPhase === 'gathering';
+    } else {
+      const targetSpread = b.grainSpreadProgress;
+      const targetMat = b.grainMatDeployed;
+      const spreadDiff = targetSpread - liveGrainSpread;
+      // Smooth progressive spreading/sweeping (~4.8s full sweep so user sees farmers gather grain!)
+      const sweepRate = weather === 'rain' ? 0.24 : 0.19;
+      if (Math.abs(spreadDiff) > 0.004) {
+        liveGrainSpread += Math.sign(spreadDiff) * Math.min(Math.abs(spreadDiff), dt * sweepRate);
+      } else {
+        liveGrainSpread = targetSpread;
+      }
 
-    // 1. Walking villagers (daytime stroll, rain umbrellas & slowed pace, indoors at night)
+      // Mats only roll up once grain is mostly swept (< 0.08), and unroll before grain spreads out!
+      if (targetMat < 0.5 && liveGrainSpread < 0.08) {
+        liveGrainMatDeployed = Math.max(targetMat, liveGrainMatDeployed - dt * 0.48);
+      } else if (targetMat > 0.5) {
+        liveGrainMatDeployed = Math.min(targetMat, liveGrainMatDeployed + dt * 0.55);
+      } else {
+        liveGrainMatDeployed = damp(liveGrainMatDeployed, targetMat, 2.2, dt);
+      }
+
+      // Basket fills inversely as grain is swept in, then empties smoothly as farmer carries inside
+      const targetBasket =
+        liveGrainMatDeployed < 0.15 && b.farmerHomeBlend > 0.6
+          ? 0.06
+          : THREE.MathUtils.clamp(0.08 + (1 - liveGrainSpread) * 0.92, 0.06, 1.0);
+      liveGrainBasketFill = damp(liveGrainBasketFill, targetBasket, 3.0, dt);
+
+      // Farmers stay by the mats actively raking until grain is gathered & mats rolled up!
+      const effectiveFarmerHomeTarget =
+        liveGrainSpread > 0.06 || (targetMat < 0.5 && liveGrainMatDeployed > 0.12)
+          ? 0
+          : b.farmerHomeBlend;
+      liveFarmerHome = damp(liveFarmerHome, effectiveFarmerHomeTarget, 1.4, dt);
+      liveIsGathering =
+        (weather === 'rain' && liveGrainSpread > 0.02) ||
+        (spreadDiff < -0.01 && liveGrainSpread > 0.02);
+    }
+
+    // -----------------------------------------------------------------------
+    // 1. FREE-ROAMING VILLAGERS & CHILDREN (whole-map roam + social play + continuous room return)
+    // -----------------------------------------------------------------------
     for (let i = 0; i < walkingVillagers.length; i++) {
       const v = walkingVillagers[i];
-      const shouldShow = v.isChild
-        ? b.villagerState === 'outdoor_active'
-        : b.villagerState !== 'night_rest';
-      v.group.visible = shouldShow;
-      if (!shouldShow) continue;
+      v.group.visible = true; // Strictly NEVER vanish!
+
+      const targetHome = v.isChild ? b.childHomeBlend : b.villagerHomeBlend;
+      if (scrubbed) {
+        v.homeBlendSmooth = targetHome;
+        const fallbackStart = v.waypoints[0];
+        if (targetHome > 0.04) {
+          v.homeAnchor = { x: fallbackStart.x, z: fallbackStart.z };
+          v.homeRoute = buildDynamicHomeRoute(fallbackStart.x, fallbackStart.z, [
+            { x: v.homeRoom.x, z: v.homeRoom.z },
+          ]);
+        } else {
+          v.homeAnchor = null;
+          v.roamAgent.externalControl = false;
+          v.roamAgent.x = fallbackStart.x;
+          v.roamAgent.z = fallbackStart.z;
+          v.roamAgent.waypoints = [];
+          v.roamAgent.zone = classifyZone(fallbackStart.x, fallbackStart.z);
+          v.roamAgent.pauseTimer = 0.25;
+        }
+      } else {
+        v.homeBlendSmooth = damp(v.homeBlendSmooth, targetHome, 0.95, dt);
+      }
 
       if (v.rainUmbrella) {
-        v.rainUmbrella.visible = b.villagersCarryUmbrellas;
+        v.rainUmbrella.visible = b.villagersCarryUmbrellas && v.homeBlendSmooth < 0.88;
       }
 
-      const p = sampleClosedLoopPath(v.waypoints, walkClock * v.speed + v.phaseOffset);
-      const y = groundHeightAt(p.x, p.z, 0);
-      const strideRate = (v.isChild ? 9.5 : 5.2) * Math.max(0.35, b.walkSpeedScale);
-      const swing = Math.sin(walkClock * strideRate + v.phaseOffset * 10);
-      const bob = Math.abs(swing) * (v.isChild ? 0.072 : 0.038) * b.walkSpeedScale;
+      let px: number;
+      let pz: number;
+      let yaw: number;
+      let moveSpeed = 0;
+      let socialPose = v.roamAgent.socialPose;
 
-      v.group.position.set(p.x, y + bob, p.z);
-      v.group.rotation.y = p.yaw;
-      v.leftLeg.rotation.x = swing * 0.48 * b.walkSpeedScale;
-      v.rightLeg.rotation.x = -swing * 0.48 * b.walkSpeedScale;
-      v.leftArm.rotation.x = -swing * 0.42 * b.walkSpeedScale;
+      if (v.homeBlendSmooth > 0.04) {
+        v.roamAgent.externalControl = true;
+        if (!v.homeAnchor) {
+          v.homeAnchor = { x: v.roamAgent.x, z: v.roamAgent.z };
+          v.homeRoute = buildDynamicHomeRoute(v.homeAnchor.x, v.homeAnchor.z, [
+            { x: v.homeRoom.x, z: v.homeRoom.z },
+          ]);
+        }
+        const sample = sampleOpenPolyline(v.homeRoute, v.homeBlendSmooth);
+        px = sample.x;
+        pz = sample.z;
+        const atRoom = v.homeBlendSmooth > 0.96;
+        yaw = atRoom ? v.homeRoom.yaw : sample.yaw;
+        moveSpeed = atRoom ? 0 : 1.25;
+        v.roamAgent.x = px;
+        v.roamAgent.z = pz;
+        v.roamAgent.yaw = yaw;
+        socialPose = 'none';
+      } else {
+        v.roamAgent.externalControl = false;
+        v.homeAnchor = null;
+        px = v.roamAgent.x;
+        pz = v.roamAgent.z;
+        yaw = v.roamAgent.yaw;
+        moveSpeed = v.roamAgent.speed;
+      }
 
+      const py = groundHeightAt(px, pz, 0);
+      const isMoving = moveSpeed > 0.08;
+      v.stridePhase += dt * (isMoving ? moveSpeed * (v.isChild ? 4.4 : 3.4) : 0);
+      const strideAmp = isMoving ? Math.min(1, moveSpeed / (v.isChild ? 2.1 : 1.35)) : 0;
+      const swing = Math.sin(v.stridePhase) * strideAmp;
+      const bob = Math.abs(swing) * (v.isChild ? 0.068 : 0.036);
+
+      v.group.position.set(px, py + bob, pz);
+      v.group.rotation.y = dampAngle(v.group.rotation.y, yaw, VIRTUAL_MASS.torsoLambda, dt);
+
+      // Articulated 2-segment legs & knees
+      v.leftLeg.rotation.x = damp(v.leftLeg.rotation.x, swing * 0.48, VIRTUAL_MASS.limbLambda, dt);
+      v.rightLeg.rotation.x = damp(v.rightLeg.rotation.x, -swing * 0.48, VIRTUAL_MASS.limbLambda, dt);
+      v.leftKnee.rotation.x = damp(
+        v.leftKnee.rotation.x,
+        Math.max(0, -swing) * 0.56,
+        VIRTUAL_MASS.limbLambda,
+        dt
+      );
+      v.rightKnee.rotation.x = damp(
+        v.rightKnee.rotation.x,
+        Math.max(0, swing) * 0.56,
+        VIRTUAL_MASS.limbLambda,
+        dt
+      );
+
+      // Expressive arms, elbows & social/play gestures!
       const holdingUmb = Boolean(v.hasUmbrella || (v.rainUmbrella && v.rainUmbrella.visible));
-      if (holdingUmb) {
-        v.rightArm.rotation.x = -0.68;
-      } else if (!v.carryPole && !v.pinwheel) {
-        v.rightArm.rotation.x = swing * 0.42 * b.walkSpeedScale;
+      let targetLeftArmX = -swing * 0.42;
+      let targetRightArmX = holdingUmb ? -0.68 : v.carryPole ? -0.78 : v.pinwheel ? -0.9 : swing * 0.42;
+      let targetLeftElbowX = -0.18 - Math.max(0, swing) * 0.34;
+      let targetRightElbowX = holdingUmb || v.carryPole || v.pinwheel ? -0.32 : -0.18 - Math.max(0, -swing) * 0.34;
+      let targetTorsoX = isMoving ? 0.06 * strideAmp : Math.sin(t * 1.4 + v.phaseOffset) * 0.015;
+      let targetHeadY = Math.sin(t * 1.2 + v.phaseOffset * 6) * 0.16;
+
+      if (socialPose === 'pet_dog') {
+        // Warmly bends slightly forward and pats/waves at the playful village dog!
+        targetTorsoX = 0.24;
+        targetLeftArmX = -0.72 + Math.sin(t * 6.5 + v.phaseOffset) * 0.22;
+        targetLeftElbowX = -0.45;
+        if (!holdingUmb && !v.carryPole) {
+          targetRightArmX = -0.64 + Math.cos(t * 6.5 + v.phaseOffset) * 0.18;
+          targetRightElbowX = -0.42;
+        }
+        targetHeadY = Math.sin(t * 2.4) * 0.12;
+      } else if (socialPose === 'chat') {
+        // Animated conversational hand gestures while greeting a neighbor
+        targetLeftArmX = -0.42 + Math.sin(t * 3.4 + v.phaseOffset) * 0.22;
+        targetLeftElbowX = -0.58;
+        if (!holdingUmb && !v.carryPole) {
+          targetRightArmX = -0.38 + Math.cos(t * 2.9 + v.phaseOffset) * 0.2;
+          targetRightElbowX = -0.52;
+        }
+        targetHeadY = Math.sin(t * 2.2 + v.phaseOffset) * 0.2;
+      } else if (socialPose === 'chase_play') {
+        // Joyful raised arms & energetic play bounce!
+        targetTorsoX = 0.14;
+        targetLeftArmX = -0.58 + Math.sin(t * 8.5 + v.phaseOffset) * 0.35;
+        targetLeftElbowX = -0.48;
       }
-      v.head.rotation.y = Math.sin(t * 1.3 + v.phaseOffset * 6) * 0.18;
+
+      v.torso.rotation.x = damp(v.torso.rotation.x, targetTorsoX, VIRTUAL_MASS.torsoLambda, dt);
+      v.leftArm.rotation.x = damp(v.leftArm.rotation.x, targetLeftArmX, VIRTUAL_MASS.limbLambda, dt);
+      v.rightArm.rotation.x = damp(v.rightArm.rotation.x, targetRightArmX, VIRTUAL_MASS.limbLambda, dt);
+      v.leftElbow.rotation.x = damp(v.leftElbow.rotation.x, targetLeftElbowX, VIRTUAL_MASS.limbLambda, dt);
+      v.rightElbow.rotation.x = damp(v.rightElbow.rotation.x, targetRightElbowX, VIRTUAL_MASS.limbLambda, dt);
+      v.head.rotation.y = damp(v.head.rotation.y, targetHeadY, VIRTUAL_MASS.headLambda, dt);
+
+      // Spring-driven secondary waist sash tail sway
+      const sashSwing = v.sashSpring.step(
+        (isMoving ? -0.18 - strideAmp * 0.25 : 0) + Math.sin(t * 2.2 + v.phaseOffset) * 0.05,
+        dt
+      );
+      v.sashTailL.rotation.x = sashSwing;
+      v.sashTailR.rotation.x = sashSwing * 0.84;
 
       if (v.carryPole) {
-        v.carryPole.rotation.z = Math.sin(walkClock * strideRate + v.phaseOffset * 10) * 0.055;
+        v.carryPole.rotation.z = swing * 0.055;
       }
       if (v.pinwheel) {
-        v.pinwheel.rotation.z += dt * 7.8;
+        v.pinwheel.rotation.z += dt * (isMoving ? 10.5 : 4.2);
       }
     }
 
-    // 2. Storytelling idle villagers (Farmers respond to Sun / Rain / Night!)
+    // -----------------------------------------------------------------------
+    // 2. STORYTELLING VILLAGERS (Farmers, Washers, Elders, Tea, Worshipper, Huatai)
+    //    Walk smoothly along doorway-respecting homeRoutes into interior rooms — ZERO popping!
+    // -----------------------------------------------------------------------
     for (let i = 0; i < idleVillagers.length; i++) {
       const iv = idleVillagers[i];
+      iv.group.visible = true; // Strictly NEVER vanish!
       const ph = t + iv.phaseOffset;
+
+      let targetBlend = 0;
+      if (iv.kind === 'rake') targetBlend = liveFarmerHome;
+      else if (iv.kind === 'wash') targetBlend = b.washHomeBlend;
+      else if (iv.kind === 'fan' || iv.kind === 'chat') targetBlend = b.elderHomeBlend;
+      else if (iv.kind === 'tea') targetBlend = b.teaHomeBlend;
+      else if (iv.kind === 'bow') targetBlend = b.worshipHomeBlend;
+      else if (iv.kind === 'tend') targetBlend = b.huataiHomeBlend;
+
+      iv.homeBlendSmooth = scrubbed
+        ? targetBlend
+        : damp(iv.homeBlendSmooth, targetBlend, 1.25, dt);
+
+      const hb = iv.homeBlendSmooth;
+      const inTransit = hb > 0.03 && hb < 0.97;
+      const atHome = hb >= 0.97;
+
+      const sample = sampleOpenPolyline(iv.homeRoute, hb);
+      const px = sample.x;
+      const pz = sample.z;
+      const targetYaw = hb < 0.03 ? iv.baseYaw : atHome ? iv.homeYaw : sample.yaw;
+      iv.curX = px;
+      iv.curZ = pz;
+      iv.curYaw = targetYaw;
+
+      const py = groundHeightAt(px, pz, iv.kind === 'bow' ? 0.85 : iv.kind === 'tend' ? 1.0 : 0);
+      if (inTransit) {
+        iv.stridePhase += dt * 5.6;
+      }
+      const walkSwing = inTransit ? Math.sin(iv.stridePhase) : 0;
+      const walkBob = inTransit ? Math.abs(walkSwing) * 0.036 : 0;
+      const yOffset = iv.kind === 'wash' && hb < 0.03 ? -0.06 : 0;
+
+      iv.group.position.set(px, py + yOffset + walkBob, pz);
+      iv.group.rotation.y = dampAngle(iv.group.rotation.y, targetYaw, VIRTUAL_MASS.torsoLambda, dt);
+
+      // Smooth stand-up transition for seated villagers (tea guests, elders, washers) when walking home!
+      const isSeatedRole = Boolean(iv.group.userData.seated);
+      const rigObj = iv.group.userData.rig as THREE.Group | undefined;
+      const rigScale = (iv.group.userData.rigScale as number | undefined) ?? 1;
+      const sitBlend = isSeatedRole ? THREE.MathUtils.clamp(1.0 - hb / 0.12, 0, 1) : 0;
+      if (rigObj) {
+        const targetRigY = -0.21 * rigScale * sitBlend;
+        rigObj.position.y = scrubbed ? targetRigY : damp(rigObj.position.y, targetRigY, 10, dt);
+      }
+
+      if (sitBlend > 0.05) {
+        const hipSit = -Math.PI * 0.46 * sitBlend;
+        const kneeSit = Math.PI * 0.46 * sitBlend;
+        iv.leftLeg.rotation.x = scrubbed ? hipSit : damp(iv.leftLeg.rotation.x, hipSit, VIRTUAL_MASS.limbLambda, dt);
+        iv.rightLeg.rotation.x = scrubbed ? hipSit : damp(iv.rightLeg.rotation.x, hipSit, VIRTUAL_MASS.limbLambda, dt);
+        iv.leftKnee.rotation.x = scrubbed ? kneeSit : damp(iv.leftKnee.rotation.x, kneeSit, VIRTUAL_MASS.limbLambda, dt);
+        iv.rightKnee.rotation.x = scrubbed ? kneeSit : damp(iv.rightKnee.rotation.x, kneeSit, VIRTUAL_MASS.limbLambda, dt);
+      } else if (inTransit) {
+        iv.leftLeg.rotation.x = damp(iv.leftLeg.rotation.x, walkSwing * 0.44, VIRTUAL_MASS.limbLambda, dt);
+        iv.rightLeg.rotation.x = damp(iv.rightLeg.rotation.x, -walkSwing * 0.44, VIRTUAL_MASS.limbLambda, dt);
+        iv.leftKnee.rotation.x = damp(iv.leftKnee.rotation.x, Math.max(0, -walkSwing) * 0.5, VIRTUAL_MASS.limbLambda, dt);
+        iv.rightKnee.rotation.x = damp(iv.rightKnee.rotation.x, Math.max(0, walkSwing) * 0.5, VIRTUAL_MASS.limbLambda, dt);
+      } else {
+        iv.leftLeg.rotation.x = damp(iv.leftLeg.rotation.x, 0, VIRTUAL_MASS.limbLambda, dt);
+        iv.rightLeg.rotation.x = damp(iv.rightLeg.rotation.x, 0, VIRTUAL_MASS.limbLambda, dt);
+        iv.leftKnee.rotation.x = damp(iv.leftKnee.rotation.x, 0, VIRTUAL_MASS.limbLambda, dt);
+        iv.rightKnee.rotation.x = damp(iv.rightKnee.rotation.x, 0, VIRTUAL_MASS.limbLambda, dt);
+      }
+
+      const sashSwing = iv.sashSpring.step(inTransit ? -0.26 : Math.sin(ph * 1.4) * 0.04, dt);
+      iv.sashTailL.rotation.x = sashSwing;
+      iv.sashTailR.rotation.x = sashSwing * 0.85;
+
+      if (iv.ripple) {
+        iv.ripple.visible = hb < 0.06;
+      }
+
+      if (inTransit) {
+        iv.torso.rotation.x = damp(iv.torso.rotation.x, 0.06, VIRTUAL_MASS.torsoLambda, dt);
+        iv.leftArm.rotation.set(damp(iv.leftArm.rotation.x, -walkSwing * 0.4, 12, dt), 0, 0);
+        iv.rightArm.rotation.set(damp(iv.rightArm.rotation.x, walkSwing * 0.4, 12, dt), 0, 0);
+        iv.leftElbow.rotation.x = damp(iv.leftElbow.rotation.x, -0.25, 12, dt);
+        iv.rightElbow.rotation.x = damp(iv.rightElbow.rotation.x, -0.25, 12, dt);
+        iv.head.rotation.set(0, Math.sin(ph * 1.1) * 0.14, 0);
+        if (iv.rakeGroup) iv.rakeGroup.visible = true;
+        continue;
+      }
+
+      if (atHome) {
+        // Resting calmly inside their room!
+        iv.torso.rotation.x = damp(iv.torso.rotation.x, Math.sin(ph * 0.7) * 0.025, 6, dt);
+        iv.leftArm.rotation.set(damp(iv.leftArm.rotation.x, -0.08, 8, dt), 0, 0);
+        iv.rightArm.rotation.set(damp(iv.rightArm.rotation.x, -0.08, 8, dt), 0, 0);
+        iv.leftElbow.rotation.x = damp(iv.leftElbow.rotation.x, -0.18, 8, dt);
+        iv.rightElbow.rotation.x = damp(iv.rightElbow.rotation.x, -0.18, 8, dt);
+        iv.head.rotation.set(0.05, Math.sin(ph * 0.6) * 0.12, 0);
+        if (iv.rakeGroup) iv.rakeGroup.visible = false;
+        continue;
+      }
+
+      // Active daytime storytelling animations!
       switch (iv.kind) {
         case 'rake': {
-          const sx = iv.shelterX ?? iv.baseX;
-          const sz = iv.shelterZ ?? iv.baseZ;
-          const syaw = iv.shelterYaw ?? 0;
-          const fx = THREE.MathUtils.lerp(iv.baseX, sx, farmerShelterSmooth);
-          const fz = THREE.MathUtils.lerp(iv.baseZ, sz, farmerShelterSmooth);
-          iv.group.position.set(fx, groundHeightAt(fx, fz, 0), fz);
-
-          // Shortest-angle yaw blend between mat facing and veranda rest facing
-          const dyaw = Math.atan2(Math.sin(syaw - iv.baseYaw), Math.cos(syaw - iv.baseYaw));
-          iv.group.rotation.y = iv.baseYaw + dyaw * farmerShelterSmooth;
-
-          if (iv.rakeGroup) {
-            iv.rakeGroup.visible = b.farmerState !== 'resting_indoors';
-          }
-
-          if (b.farmerState === 'raking') {
-            // Sunny daytime: rhythmic two-handed grain turning with rake teeth skimming the rice mat
-            const stroke = Math.sin(ph * 2.4);
-            iv.torso.rotation.x = 0.16 + stroke * 0.06;
-            iv.rightArm.rotation.set(-0.62 + stroke * 0.14, -0.06, 0.06);
-            iv.leftArm.rotation.set(-0.56 + stroke * 0.12, 0.34, -0.14);
-            iv.head.rotation.x = 0.18;
-            iv.head.rotation.y = Math.sin(ph * 1.2) * 0.12;
-          } else if (b.farmerState === 'harvest_rush') {
-            // Rainy daytime: urgent rapid scooping & gathering grain before soaking
-            const rush = Math.sin(ph * 5.2);
-            iv.torso.rotation.x = 0.24 + rush * 0.08;
-            iv.rightArm.rotation.set(-0.68 + rush * 0.18, -0.08, 0.08);
-            iv.leftArm.rotation.set(-0.62 + rush * 0.16, 0.36, -0.16);
-            iv.head.rotation.x = 0.24;
-            iv.head.rotation.y = Math.sin(ph * 2.8) * 0.18;
+          if (iv.rakeGroup) iv.rakeGroup.visible = true;
+          if (liveIsGathering || b.farmerPhase === 'gathering') {
+            // Urgent sweeping & gathering rice inward toward center mound & baskets!
+            const rush = Math.sin(ph * 5.6);
+            iv.torso.rotation.x = 0.25 + rush * 0.08;
+            iv.rightArm.rotation.set(-0.68 + rush * 0.22, -0.08, 0.08);
+            iv.leftArm.rotation.set(-0.62 + rush * 0.2, 0.36, -0.16);
+            iv.rightElbow.rotation.x = -0.34 - Math.max(0, rush) * 0.22;
+            iv.leftElbow.rotation.x = -0.34 - Math.max(0, rush) * 0.22;
+            iv.head.rotation.set(0.24, Math.sin(ph * 2.8) * 0.18, 0);
           } else {
-            // Night / Post-dusk: grain stowed, resting calmly under front veranda eaves
-            iv.torso.rotation.x = Math.sin(ph * 0.8) * 0.03;
-            iv.rightArm.rotation.set(-0.08, 0, 0);
-            iv.leftArm.rotation.set(-0.08, 0, 0);
-            iv.head.rotation.x = 0.0;
-            iv.head.rotation.y = Math.sin(ph * 0.7) * 0.16;
+            // Rhythmic morning spreading or midday sunny grain turning
+            const rate = b.farmerPhase === 'spreading' ? 3.8 : 2.4;
+            const stroke = Math.sin(ph * rate);
+            iv.torso.rotation.x = 0.16 + stroke * 0.06;
+            iv.rightArm.rotation.set(-0.62 + stroke * 0.16, -0.06, 0.06);
+            iv.leftArm.rotation.set(-0.56 + stroke * 0.14, 0.34, -0.14);
+            iv.rightElbow.rotation.x = -0.26 - stroke * 0.12;
+            iv.leftElbow.rotation.x = -0.26 - stroke * 0.12;
+            iv.head.rotation.set(0.18, Math.sin(ph * 1.2) * 0.12, 0);
           }
           break;
         }
         case 'wash': {
-          const activeWash = b.villagerState === 'outdoor_active';
-          iv.group.visible = activeWash;
-          if (iv.ripple) iv.ripple.visible = activeWash;
-          if (!activeWash) break;
-
           const scrub = Math.sin(ph * 4.2);
           iv.torso.rotation.x = 0.32 + scrub * 0.08;
           iv.leftArm.rotation.x = -0.78 + scrub * 0.24;
           iv.rightArm.rotation.x = -0.78 - scrub * 0.24;
+          iv.leftElbow.rotation.x = -0.42;
+          iv.rightElbow.rotation.x = -0.42;
           if (iv.ripple) {
             const rCycle = (t * 0.65 + iv.phaseOffset * 0.3) % 1;
             const sc = 0.6 + rCycle * 2.6;
@@ -3065,106 +4046,140 @@ export function buildLivingWorld(
           break;
         }
         case 'fan': {
-          const eldersOut = b.timeOfDay >= 6.2 && b.timeOfDay <= 21.2;
-          iv.group.visible = eldersOut;
-          if (!eldersOut) break;
           const fanSpeed = b.weather === 'rain' || b.isNight ? 1.4 : 4.8;
-          iv.rightArm.rotation.z = -0.15 + Math.sin(ph * fanSpeed) * (b.isNight ? 0.08 : 0.28);
-          iv.head.rotation.y = 0.15 + Math.sin(ph * 1.1) * 0.16;
+          iv.rightArm.rotation.set(-0.82, 0, -0.15 + Math.sin(ph * fanSpeed) * (b.isNight ? 0.08 : 0.28));
+          iv.rightElbow.rotation.x = -0.35;
+          iv.head.rotation.set(0, 0.15 + Math.sin(ph * 1.1) * 0.16, 0);
           break;
         }
         case 'chat': {
-          const eldersOut = b.timeOfDay >= 6.2 && b.timeOfDay <= 21.2;
-          iv.group.visible = eldersOut;
-          if (!eldersOut) break;
-          iv.head.rotation.x = Math.sin(ph * 2.2) * 0.1;
-          iv.head.rotation.y = -0.15 + Math.sin(ph * 1.0) * 0.14;
+          iv.head.rotation.set(Math.sin(ph * 2.2) * 0.1, -0.15 + Math.sin(ph * 1.0) * 0.14, 0);
           iv.leftArm.rotation.x = -0.35 + Math.sin(ph * 1.8) * 0.14;
+          iv.leftElbow.rotation.x = -0.48;
           break;
         }
         case 'tea': {
-          const teaOut = b.weather !== 'rain' && b.timeOfDay >= 7.0 && b.timeOfDay <= 20.5;
-          iv.group.visible = teaOut;
-          if (!teaOut) break;
           const sip = Math.max(0, Math.sin(ph * 0.85));
           iv.rightArm.rotation.x = -0.35 - sip * 0.55;
-          iv.head.rotation.x = sip * 0.16;
+          iv.rightElbow.rotation.x = -0.45 - sip * 0.32;
+          iv.head.rotation.set(sip * 0.16, 0, 0);
           break;
         }
         case 'bow': {
-          // Respectful ancestral hall incense offering during daytime & evening hours
-          const worshipOut = b.timeOfDay >= 6.0 && b.timeOfDay <= 21.5;
-          iv.group.visible = worshipOut;
-          if (!worshipOut) break;
           const bowCycle = Math.max(0, Math.sin(ph * 0.9));
           iv.torso.rotation.x = bowCycle * 0.32;
           iv.leftArm.rotation.x = -0.75;
           iv.rightArm.rotation.x = -0.75;
+          iv.leftElbow.rotation.x = -0.5;
+          iv.rightElbow.rotation.x = -0.5;
           break;
         }
         case 'tend': {
-          const tendOut = b.villagerState === 'outdoor_active';
-          iv.group.visible = tendOut;
-          if (!tendOut) break;
           iv.rightArm.rotation.x = -0.45 + Math.sin(ph * 2.1) * 0.25;
-          iv.head.rotation.y = Math.sin(ph * 1.2) * 0.22;
+          iv.rightElbow.rotation.x = -0.38;
+          iv.head.rotation.set(0.12, Math.sin(ph * 1.2) * 0.22, 0);
           break;
         }
       }
     }
 
-    // 3. Animated Poultry (forage daytime -> huddle/shelter in rain -> roost quietly at night)
+    // -----------------------------------------------------------------------
+    // 3. POULTRY (Whole-map free-roam + flock pecking -> walk continuously into Chicken Coop!)
+    // -----------------------------------------------------------------------
     for (let i = 0; i < poultryList.length; i++) {
       const p = poultryList[i];
-      if (b.poultryState === 'foraging') {
-        const ph = poultryClock * p.speed + p.phaseOffset;
-        let tx: number;
-        let tz: number;
-        let yaw: number;
+      p.group.visible = true;
+      p.coopBlendSmooth = scrubbed
+        ? b.poultryCoopBlend
+        : damp(p.coopBlendSmooth, b.poultryCoopBlend, 1.1, dt);
+      const cb = p.coopBlendSmooth;
 
-        if (p.isChick && p.leaderIdx !== undefined) {
-          const mom = poultryList[p.leaderIdx];
-          const a = ph * 1.1 + p.phaseOffset * 2.3;
-          tx = mom.group.position.x + Math.cos(a) * 0.65;
-          tz = mom.group.position.z + Math.sin(a) * 0.65;
-          yaw = Math.atan2(-Math.sin(a), Math.cos(a));
+      let tx: number;
+      let tz: number;
+      let yaw: number;
+      let activeForaging = cb < 0.06;
+
+      if (p.isChick && p.leaderIdx !== undefined) {
+        const mom = poultryList[p.leaderIdx];
+        const a = t * 1.2 + p.phaseOffset * 2.3;
+        const spreadR = THREE.MathUtils.lerp(0.62, 0.24, cb);
+        tx = mom.group.position.x + Math.cos(a) * spreadR;
+        tz = mom.group.position.z + Math.sin(a) * spreadR;
+        yaw = Math.atan2(mom.group.position.x - tx, mom.group.position.z - tz);
+      } else if (p.roamAgent) {
+        if (cb > 0.04) {
+          p.roamAgent.externalControl = true;
+          if (!p.homeAnchor || scrubbed) {
+            p.homeAnchor = scrubbed
+              ? { x: p.baseX, z: p.baseZ }
+              : { x: p.roamAgent.x, z: p.roamAgent.z };
+          }
+          const route = buildDynamicHomeRoute(p.homeAnchor.x, p.homeAnchor.z, [
+            { x: p.coopTarget.entryX, z: p.coopTarget.entryZ },
+            { x: p.coopTarget.x, z: p.coopTarget.z },
+          ]);
+          const sample = sampleOpenPolyline(route, cb);
+          tx = sample.x;
+          tz = sample.z;
+          yaw = cb > 0.94 ? Math.PI * 0.25 : sample.yaw;
+          p.roamAgent.x = tx;
+          p.roamAgent.z = tz;
+          p.roamAgent.yaw = yaw;
         } else {
-          tx = p.baseX + Math.sin(ph * 0.65) * p.wanderR;
-          tz = p.baseZ + Math.cos(ph * 0.52) * p.wanderR * 0.78;
-          const dx = Math.cos(ph * 0.65) * p.wanderR * 0.65;
-          const dz = -Math.sin(ph * 0.52) * p.wanderR * 0.78 * 0.52;
-          yaw = Math.atan2(dx, dz);
+          if (scrubbed) {
+            p.roamAgent.x = p.baseX;
+            p.roamAgent.z = p.baseZ;
+            p.roamAgent.waypoints = [];
+            p.roamAgent.zone = classifyZone(p.baseX, p.baseZ);
+            p.roamAgent.pauseTimer = 0.25;
+          }
+          p.roamAgent.externalControl = false;
+          p.homeAnchor = null;
+          tx = p.roamAgent.x;
+          tz = p.roamAgent.z;
+          yaw = p.roamAgent.yaw;
         }
+      } else {
+        tx = p.baseX;
+        tz = p.baseZ;
+        yaw = 0;
+      }
 
-        const py = groundHeightAt(tx, tz, 0);
-        const hop = p.isChick ? Math.abs(Math.sin(t * 7.5 + p.phaseOffset * 4)) * 0.068 : 0;
-        p.group.position.set(tx, py + hop, tz);
-        p.group.rotation.y = yaw;
+      const py = groundHeightAt(tx, tz, 0);
+      const coopPerchLift = cb > 0.92 ? 0.14 * ((cb - 0.92) / 0.08) : 0;
+      const hop =
+        activeForaging && p.isChick
+          ? Math.abs(Math.sin(t * 7.5 + p.phaseOffset * 4)) * 0.068
+          : 0;
+      p.group.position.set(tx, py + hop + coopPerchLift, tz);
+      p.group.rotation.y = dampAngle(p.group.rotation.y, yaw, 9.0, dt);
 
-        const peck = Math.max(0, Math.sin(t * 3.1 + p.phaseOffset * 5) - 0.55) * 1.45;
+      if (cb > 0.92) {
+        // Roosting calmly inside timber chicken coop
+        p.body.position.y = -0.04;
+        p.body.rotation.x = 0.08;
+        p.head.rotation.x = 0.28 + Math.sin(t * 1.1 + p.phaseOffset) * 0.04;
+      } else {
+        const isFlockPeck = p.roamAgent?.socialPose === 'flock_peck';
+        const peckFreq = isFlockPeck ? 4.8 : 3.1;
+        const peck = Math.max(0, Math.sin(t * peckFreq + p.phaseOffset * 5) - 0.52) * 1.45;
         p.body.position.y = 0;
         p.body.rotation.x = peck * 0.5;
         p.head.rotation.x = peck * 0.62;
-      } else {
-        // Sheltering or night roosting: settled calmly near base / mother hen with tucked head
-        const restX = p.isChick && p.leaderIdx !== undefined
-          ? poultryList[p.leaderIdx].baseX + Math.cos(p.phaseOffset * 3) * 0.35
-          : p.baseX;
-        const restZ = p.isChick && p.leaderIdx !== undefined
-          ? poultryList[p.leaderIdx].baseZ + Math.sin(p.phaseOffset * 3) * 0.35
-          : p.baseZ;
-        const py = groundHeightAt(restX, restZ, 0);
-        p.group.position.set(restX, py, restZ);
-        p.body.position.y = -0.05;
-        p.body.rotation.x = 0.08;
-        p.head.rotation.x = 0.25 + Math.sin(t * 1.2 + p.phaseOffset) * 0.04;
       }
     }
 
-    // 4. Pond Waterfowl (swim daytime -> calm shore rest at night)
+    // -----------------------------------------------------------------------
+    // 4. POND WATERFOWL (Swim freely -> glide smoothly into Shoreline Reed Nests!)
+    // -----------------------------------------------------------------------
     for (let i = 0; i < waterfowlList.length; i++) {
       const wf = waterfowlList[i];
-      const isResting = b.waterfowlState === 'shore_rest';
+      wf.group.visible = true;
+      wf.nestBlendSmooth = scrubbed
+        ? b.waterfowlNestBlend
+        : damp(wf.nestBlendSmooth, b.waterfowlNestBlend, 1.0, dt);
+      const nb = wf.nestBlendSmooth;
+
       const sample = samplePondSwimPath(
         wf.cx,
         wf.cz,
@@ -3173,13 +4188,18 @@ export function buildLivingWorld(
         fowlClock * wf.speed + wf.phaseOffset,
         wf.dir
       );
-      const bob = Math.sin(t * (isResting ? 1.4 : 2.6) + wf.phaseOffset * 3) * (isResting ? 0.012 : 0.024);
-      wf.group.position.set(sample.x, -0.2 + bob, sample.z);
-      wf.group.rotation.y = sample.yaw;
+      const wx = THREE.MathUtils.lerp(sample.x, wf.nestX, nb);
+      const wz = THREE.MathUtils.lerp(sample.z, wf.nestZ, nb);
+      const swimToNestYaw = Math.atan2(wf.nestX - sample.x, wf.nestZ - sample.z);
+      const targetYaw = nb < 0.08 ? sample.yaw : nb > 0.92 ? wf.nestYaw : swimToNestYaw;
+      const bob = Math.sin(t * THREE.MathUtils.lerp(2.6, 1.2, nb) + wf.phaseOffset * 3) * THREE.MathUtils.lerp(0.024, 0.008, nb);
 
-      if (isResting) {
+      wf.group.position.set(wx, -0.2 + bob + nb * 0.06, wz);
+      wf.group.rotation.y = dampAngle(wf.group.rotation.y, targetYaw, 5.0, dt);
+
+      if (nb > 0.85) {
         wf.neck.rotation.x = 0.28 + Math.sin(t * 0.8 + wf.phaseOffset) * 0.04;
-        wf.wake.scale.set(0.65, 1, 0.65);
+        wf.wake.scale.set(0.55, 1, 0.55);
       } else {
         const dip = Math.max(0, Math.sin(t * 1.1 + wf.phaseOffset * 5) - 0.75) * 1.5;
         wf.neck.rotation.x = dip * 0.45;
@@ -3189,81 +4209,138 @@ export function buildLivingWorld(
       }
     }
 
-    // 5. Domestic Animals (active daytime -> shelter in rain -> peaceful sleep at night)
+    // -----------------------------------------------------------------------
+    // 5. DOMESTIC ANIMALS (Whole-map free-roam + dog/human play -> continuous shelter return!)
+    // -----------------------------------------------------------------------
     for (let i = 0; i < quadrupeds.length; i++) {
       const q = quadrupeds[i];
+      q.group.visible = true;
       const ph = t + q.phaseOffset;
-      const resting = b.quadrupedState !== 'active';
 
-      if (q.kind === 'dog_patrol' && q.waypoints) {
-        if (resting) {
-          // Rests peacefully beside the front gate veranda
-          const rx = -4.2;
-          const rz = 23.0;
-          const ry = groundHeightAt(rx, rz, 0);
-          q.group.position.set(rx, ry - 0.14, rz);
-          q.group.rotation.y = 0.35;
-          q.tail.rotation.z = Math.sin(t * 1.8) * 0.08;
-          q.head.rotation.y = Math.sin(t * 0.6) * 0.08;
-          q.head.rotation.x = 0.22;
-          for (let l = 0; l < q.legs.length; l++) q.legs[l].rotation.x = 0;
+      const targetHome =
+        q.kind === 'dog_patrol' || q.kind === 'puppy_hop'
+          ? b.dogKennelBlend
+          : q.kind === 'cat_loaf'
+            ? b.catNestBlend
+            : b.livestockShedBlend;
+
+      if (scrubbed) {
+        q.homeBlendSmooth = targetHome;
+        if (targetHome > 0.04) {
+          q.homeAnchor = { x: q.baseX, z: q.baseZ };
+          q.homeRoute = buildDynamicHomeRoute(q.baseX, q.baseZ, q.homeRouteTail);
         } else {
-          const s = sampleClosedLoopPath(q.waypoints, walkClock * q.speed + q.phaseOffset);
-          const y = groundHeightAt(s.x, s.z, 0);
-          const trot = Math.sin(walkClock * 9.2);
-          q.group.position.set(s.x, y + Math.abs(trot) * 0.042, s.z);
-          q.group.rotation.y = s.yaw;
-          q.tail.rotation.z = Math.sin(t * 11.5) * 0.42;
-          q.head.rotation.y = Math.sin(t * 2.1) * 0.16;
-          q.head.rotation.x = 0;
-          if (q.legs.length === 4) {
-            q.legs[0].rotation.x = trot * 0.45;
-            q.legs[1].rotation.x = -trot * 0.45;
-            q.legs[2].rotation.x = -trot * 0.45;
-            q.legs[3].rotation.x = trot * 0.45;
-          }
+          q.homeAnchor = null;
+          q.roamAgent.externalControl = false;
+          q.roamAgent.x = q.baseX;
+          q.roamAgent.z = q.baseZ;
+          q.roamAgent.waypoints = [];
+          q.roamAgent.zone = classifyZone(q.baseX, q.baseZ);
+          q.roamAgent.pauseTimer = 0.2;
         }
-      } else if (q.kind === 'puppy_hop') {
-        if (resting) {
-          q.group.position.y = q.baseY - 0.08;
-          q.tail.rotation.z = Math.sin(ph * 1.6) * 0.08;
-          q.head.rotation.z = 0.12;
-        } else {
-          const hop = Math.abs(Math.sin(ph * 5.2)) * 0.11;
-          q.group.position.y = q.baseY + hop;
-          q.group.rotation.y = Math.sin(ph * 1.1) * 0.65;
-          q.tail.rotation.z = Math.sin(ph * 14.0) * 0.52;
-          q.head.rotation.z = Math.sin(ph * 2.2) * 0.18;
+      } else {
+        q.homeBlendSmooth = damp(q.homeBlendSmooth, targetHome, 1.0, dt);
+      }
+
+      const hb = q.homeBlendSmooth;
+      let px: number;
+      let pz: number;
+      let yaw: number;
+      let speed = 0;
+      let socialPose = q.roamAgent.socialPose;
+
+      if (hb > 0.04) {
+        q.roamAgent.externalControl = true;
+        if (!q.homeAnchor) {
+          q.homeAnchor = { x: q.roamAgent.x, z: q.roamAgent.z };
+          q.homeRoute = buildDynamicHomeRoute(q.homeAnchor.x, q.homeAnchor.z, q.homeRouteTail);
+        }
+        const sample = sampleOpenPolyline(q.homeRoute, hb);
+        px = sample.x;
+        pz = sample.z;
+        const settled = hb > 0.95;
+        yaw = settled ? q.homeYaw : sample.yaw;
+        speed = settled ? 0 : q.roamAgent.profile.speed;
+        q.roamAgent.x = px;
+        q.roamAgent.z = pz;
+        q.roamAgent.yaw = yaw;
+        socialPose = 'none';
+      } else {
+        q.roamAgent.externalControl = false;
+        q.homeAnchor = null;
+        px = q.roamAgent.x;
+        pz = q.roamAgent.z;
+        yaw = q.roamAgent.yaw;
+        speed = q.roamAgent.speed;
+      }
+
+      const groundY = groundHeightAt(px, pz, 0);
+      const settled = hb > 0.95;
+      const isMoving = speed > 0.06;
+      q.gaitPhase += dt * (isMoving ? speed * (q.kind === 'buffalo' ? 3.2 : 5.6) : 0);
+      const trot = isMoving ? Math.sin(q.gaitPhase) : 0;
+
+      if (q.kind === 'dog_patrol' || q.kind === 'puppy_hop') {
+        const playing = socialPose === 'dog_play' || socialPose === 'chase_play';
+        const hopBoost =
+          playing
+            ? Math.abs(Math.sin(t * 9.5 + q.phaseOffset)) * (q.kind === 'puppy_hop' ? 0.14 : 0.08)
+            : isMoving
+              ? Math.abs(trot) * 0.045
+              : 0;
+        const restSink = settled ? (q.kind === 'puppy_hop' ? -0.07 : -0.14) : 0;
+        q.group.position.set(px, groundY + hopBoost + restSink, pz);
+        q.group.rotation.y = dampAngle(q.group.rotation.y, yaw, 9.5, dt);
+        q.tail.rotation.z = Math.sin(t * (playing ? 18.0 : settled ? 1.8 : 10.5)) * (playing ? 0.62 : settled ? 0.08 : 0.4);
+        q.head.rotation.y = Math.sin(t * (playing ? 3.6 : 1.6) + q.phaseOffset) * (settled ? 0.06 : 0.22);
+        q.head.rotation.x = settled ? 0.24 : playing ? -0.14 : 0;
+        if (q.legs.length === 4) {
+          const legAmp = settled ? 0 : isMoving ? 0.48 : 0;
+          q.legs[0].rotation.x = trot * legAmp;
+          q.legs[1].rotation.x = -trot * legAmp;
+          q.legs[2].rotation.x = -trot * legAmp;
+          q.legs[3].rotation.x = trot * legAmp;
         }
       } else if (q.kind === 'cat_loaf') {
-        q.tail.rotation.y = Math.sin(ph * (resting ? 0.9 : 2.2)) * (resting ? 0.12 : 0.32);
-        q.head.rotation.y = Math.sin(ph * 0.7) * (resting ? 0.06 : 0.2);
+        const stepHop = isMoving ? Math.abs(trot) * 0.025 : 0;
+        const nestLift = settled ? 0.09 : 0;
+        q.group.position.set(px, groundY + stepHop + nestLift, pz);
+        q.group.rotation.y = dampAngle(q.group.rotation.y, yaw, 7.0, dt);
+        q.tail.rotation.y = Math.sin(ph * (settled ? 0.8 : isMoving ? 4.2 : 2.2)) * (settled ? 0.1 : 0.34);
+        q.head.rotation.y = Math.sin(ph * 0.8) * (settled ? 0.06 : 0.22);
       } else if (q.kind === 'buffalo') {
-        if (resting) {
-          q.group.position.y = q.baseY - 0.26;
-          q.head.rotation.x = 0.32 + Math.sin(ph * 0.6) * 0.04;
-          q.head.rotation.y = 0;
-          q.tail.rotation.z = Math.sin(ph * 1.1) * 0.08;
-        } else {
-          q.group.position.y = q.baseY;
-          q.head.rotation.x = 0.24 + Math.sin(ph * 1.2) * 0.14;
-          q.head.rotation.y = Math.sin(ph * 0.45) * 0.15;
-          q.tail.rotation.z = Math.sin(ph * 2.6) * 0.24;
+        const restSink = settled ? -0.24 : 0;
+        q.group.position.set(px, groundY + restSink, pz);
+        q.group.rotation.y = dampAngle(q.group.rotation.y, yaw, 3.2, dt);
+        q.head.rotation.x = settled ? 0.34 : isMoving ? 0.12 : 0.28 + Math.sin(ph * 1.2) * 0.14;
+        q.head.rotation.y = settled ? 0 : Math.sin(ph * 0.45) * 0.15;
+        q.tail.rotation.z = Math.sin(ph * (settled ? 1.0 : 2.6)) * (settled ? 0.08 : 0.24);
+        if (q.legs.length === 4) {
+          const legAmp = isMoving && !settled ? 0.28 : 0;
+          q.legs[0].rotation.x = trot * legAmp;
+          q.legs[1].rotation.x = -trot * legAmp;
+          q.legs[2].rotation.x = -trot * legAmp;
+          q.legs[3].rotation.x = trot * legAmp;
         }
       } else if (q.kind === 'goat') {
-        if (resting) {
-          q.group.position.y = q.baseY - 0.14;
-          q.head.rotation.x = 0.25;
-          q.tail.rotation.z = Math.sin(ph * 1.5) * 0.06;
-        } else {
-          q.group.position.y = q.baseY;
-          q.head.rotation.x = 0.38 + Math.sin(ph * 1.9) * 0.2;
-          q.tail.rotation.z = Math.sin(ph * 5.2) * 0.25;
+        const restSink = settled ? -0.14 : 0;
+        q.group.position.set(px, groundY + restSink, pz);
+        q.group.rotation.y = dampAngle(q.group.rotation.y, yaw, 5.5, dt);
+        q.head.rotation.x = settled ? 0.26 : isMoving ? 0.1 : 0.38 + Math.sin(ph * 1.9) * 0.2;
+        q.tail.rotation.z = Math.sin(ph * (settled ? 1.4 : 5.2)) * (settled ? 0.06 : 0.25);
+        if (q.legs.length === 4) {
+          const legAmp = isMoving && !settled ? 0.36 : 0;
+          q.legs[0].rotation.x = trot * legAmp;
+          q.legs[1].rotation.x = -trot * legAmp;
+          q.legs[2].rotation.x = -trot * legAmp;
+          q.legs[3].rotation.x = trot * legAmp;
         }
       }
     }
 
-    // 6. White Cranes: Soar over valley in sunny daytime -> descend at dusk -> roost in rear camphor trees at night/rain!
+    // -----------------------------------------------------------------------
+    // 6. WHITE CRANES: Soar over valley -> descend continuously onto their 6 Treetop Twig Nests!
+    // -----------------------------------------------------------------------
     for (let i = 0; i < cranes.length; i++) {
       const c = cranes[i];
       const f = sampleFlockOrbit(c.cx, c.cz, c.rx, c.rz, c.alt, t * c.speed + c.phaseOffset);
@@ -3278,28 +4355,34 @@ export function buildLivingWorld(
       const bank = -f.bank * (1 - rb);
       c.group.rotation.set(0, yaw, bank);
 
-      // Wings flap in flight, fold smoothly along flanks when perched/roosting
       const flap = Math.sin(t * 4.4 + c.phaseOffset * 12) * 0.46 * (1 - rb);
       const folded = 1.02 * rb;
       c.leftWing.rotation.z = flap + folded;
       c.rightWing.rotation.z = -flap - folded;
     }
 
-    // 7. Fluttering Butterflies (sunny daytime only)
+    // -----------------------------------------------------------------------
+    // 7. BUTTERFLIES: Flutter over flowers -> glide down & fold wings on shrub perches (ZERO vanish!)
+    // -----------------------------------------------------------------------
     for (let i = 0; i < butterflies.length; i++) {
       const bf = butterflies[i];
-      bf.group.visible = b.butterfliesActive;
-      if (!b.butterfliesActive) continue;
+      bf.group.visible = true;
+      const pb = butterflyPerchSmooth;
       const a = t * bf.speed + bf.phaseOffset;
+      const fx = bf.cx + Math.cos(a) * bf.rx;
+      const fy = bf.cy + Math.sin(a * 2.3) * 0.35;
+      const fz = bf.cz + Math.sin(a * 1.3) * bf.rz;
+
       bf.group.position.set(
-        bf.cx + Math.cos(a) * bf.rx,
-        bf.cy + Math.sin(a * 2.3) * 0.35,
-        bf.cz + Math.sin(a * 1.3) * bf.rz
+        THREE.MathUtils.lerp(fx, bf.perchX, pb),
+        THREE.MathUtils.lerp(fy, bf.perchY, pb),
+        THREE.MathUtils.lerp(fz, bf.perchZ, pb)
       );
       bf.group.rotation.y = Math.atan2(-Math.sin(a), Math.cos(a * 1.3));
-      const flap = Math.sin(t * 16.0 + bf.phaseOffset * 8) * 0.85;
-      bf.leftWing.rotation.y = flap;
-      bf.rightWing.rotation.y = -flap;
+      const flap = Math.sin(t * 16.0 + bf.phaseOffset * 8) * 0.85 * (1 - pb);
+      const fold = 1.32 * pb; // wings fold upright when resting on leaves
+      bf.leftWing.rotation.y = flap + fold;
+      bf.rightWing.rotation.y = -flap - fold;
     }
 
     // 8. Curling Kitchen Chimney Smoke (peaks during Hakka meal cooking hours)
@@ -3353,9 +4436,35 @@ export function buildLivingWorld(
     }
   };
 
+  const getGrainLiveState = (): GrainLiveState => ({
+    spread: liveGrainSpread,
+    basketFill: liveGrainBasketFill,
+    matDeployed: liveGrainMatDeployed,
+    isGathering: liveIsGathering,
+  });
+
+  const getMinimapBlips = (): MinimapBlip[] => {
+    const blips = freeRoam.getMinimapBlips();
+    // Also include live positions of the storytelling villagers so every villager appears on the GTA minimap!
+    for (let i = 0; i < idleVillagers.length; i++) {
+      const iv = idleVillagers[i];
+      blips.push({
+        id: iv.id,
+        x: iv.curX,
+        z: iv.curZ,
+        yaw: iv.curYaw,
+        kind: 'villager',
+        playing: false,
+      });
+    }
+    return blips;
+  };
+
   return {
     root,
     update,
+    getGrainLiveState,
+    getMinimapBlips,
     dispose: () => {
       geometries.forEach((g) => g.dispose());
       materials.forEach((m) => m.dispose());
