@@ -1,0 +1,168 @@
+{
+  "actors": [
+    {
+      "id": "villager_umbrella",
+      "name": "花伞游廊妇人",
+      "species": "villager",
+      "tier": "T1",
+      "domains": ["ground"],
+      "homeStationId": "room_lower_hall_west",
+      "basePosition": { "x": -4.2, "y": 0.0, "z": 35.0 },
+      "baseYaw": 1.57,
+      "speed": 1.12,
+      "hasRainUmbrella": true,
+      "schedule": [
+        {
+          "startHour": 6.5,
+          "endHour": 20.5,
+          "activity": "stroll_promenade",
+          "zoneId": "zone_pond_promenade",
+          "rainFallbackActivity": "stroll_with_umbrella",
+          "rainFallbackZoneId": "zone_pond_promenade"
+        },
+        {
+          "startHour": 20.5,
+          "endHour": 6.5,
+          "activity": "rest_indoors",
+          "stationId": "room_lower_hall_west"
+        }
+      ],
+      "reactions": [
+        { "stimulus": "WEATHER_CHANGE", "action": "OPEN_UMBRELLA_OR_SHELTER", "durationSec": 4.0 },
+        { "stimulus": "BIRD_SONG", "action": "LOOK_AT_SOURCE", "durationSec": 2.4, "cooldownSec": 6.0 },
+        { "stimulus": "PLAYER_NEAR", "action": "GREET_PLAYER", "durationSec": 2.2, "cooldownSec": 12.0 }
+      ]
+    },
+    {
+      "id": "villager_farmer_west",
+      "name": "晒谷西农夫",
+      "species": "villager",
+      "tier": "T1",
+      "domains": ["ground"],
+      "workStationId": "station_grain_mat_west",
+      "homeStationId": "room_west_wing",
+      "basePosition": { "x": -9.05, "y": 0.0, "z": 28.6 },
+      "baseYaw": 1.35,
+      "speed": 1.25,
+      "hasRainUmbrella": false,
+      "schedule": [
+        {
+          "startHour": 7.0,
+          "endHour": 17.5,
+          "activity": "dry_grain",
+          "stationId": "station_grain_mat_west",
+          "rainFallbackActivity": "gather_grain_urgent",
+          "rainFallbackStationId": "room_west_wing"
+        },
+        {
+          "startHour": 17.5,
+          "endHour": 7.0,
+          "activity": "rest_indoors",
+          "stationId": "room_west_wing"
+        }
+      ],
+      "reactions": [
+        { "stimulus": "WEATHER_CHANGE", "action": "GATHER_GRAIN", "durationSec": 6.0 },
+        { "stimulus": "LOUD_ALARM", "action": "LOOK_AT_SOURCE", "durationSec": 2.8, "cooldownSec": 8.0 }
+      ]
+    },
+    {
+      "id": "villager_farmer_east",
+      "name": "晒谷东农夫",
+      "species": "villager",
+      "tier": "T1",
+      "domains": ["ground"],
+      "workStationId": "station_grain_mat_east",
+      "homeStationId": "room_east_wing",
+      "basePosition": { "x": 9.05, "y": 0.0, "z": 28.8 },
+      "baseYaw": -1.35,
+      "speed": 1.25,
+      "hasRainUmbrella": false,
+      "schedule": [
+        {
+          "startHour": 7.0,
+          "endHour": 17.5,
+          "activity": "dry_grain",
+          "stationId": "station_grain_mat_east",
+          "rainFallbackActivity": "gather_grain_urgent",
+          "rainFallbackStationId": "room_east_wing"
+        },
+        {
+          "startHour": 17.5,
+          "endHour": 7.0,
+          "activity": "rest_indoors",
+          "stationId": "room_east_wing"
+        }
+      ],
+      "reactions": [
+        { "stimulus": "WEATHER_CHANGE", "action": "GATHER_GRAIN", "durationSec": 6.0 },
+        { "stimulus": "LOUD_ALARM", "action": "LOOK_AT_SOURCE", "durationSec": 2.8, "cooldownSec": 8.0 }
+      ]
+    },
+    {
+      "id": "villager_tea_west",
+      "name": "天井品茗邻里甲",
+      "species": "villager",
+      "tier": "T1",
+      "domains": ["ground"],
+      "workStationId": "station_tea_skywell",
+      "homeStationId": "room_lower_hall_east",
+      "basePosition": { "x": 2.45, "y": 0.15, "z": 13.4 },
+      "baseYaw": 1.57,
+      "speed": 1.05,
+      "schedule": [
+        {
+          "startHour": 8.0,
+          "endHour": 19.5,
+          "activity": "drink_tea",
+          "stationId": "station_tea_skywell",
+          "rainFallbackActivity": "shelter_indoors",
+          "rainFallbackStationId": "room_lower_hall_east"
+        },
+        {
+          "startHour": 19.5,
+          "endHour": 8.0,
+          "activity": "rest_indoors",
+          "stationId": "room_lower_hall_east"
+        }
+      ],
+      "reactions": [
+        { "stimulus": "BIRD_SONG", "action": "LOOK_AT_SOURCE", "durationSec": 2.5, "cooldownSec": 5.0 },
+        { "stimulus": "IMPACT", "action": "LOOK_AT_SOURCE", "durationSec": 2.0, "cooldownSec": 5.0 },
+        { "stimulus": "PLAYER_NEAR", "action": "GREET_PLAYER", "durationSec": 2.0, "cooldownSec": 10.0 }
+      ]
+    },
+    {
+      "id": "villager_tea_east",
+      "name": "天井品茗邻里乙",
+      "species": "villager",
+      "tier": "T1",
+      "domains": ["ground"],
+      "workStationId": "station_tea_skywell",
+      "homeStationId": "room_lower_hall_east",
+      "basePosition": { "x": 4.25, "y": 0.15, "z": 13.4 },
+      "baseYaw": -1.57,
+      "speed": 1.05,
+      "schedule": [
+        {
+          "startHour": 8.0,
+          "endHour": 19.5,
+          "activity": "drink_tea",
+          "stationId": "station_tea_skywell",
+          "rainFallbackActivity": "shelter_indoors",
+          "rainFallbackStationId": "room_lower_hall_east"
+        },
+        {
+          "startHour": 19.5,
+          "endHour": 8.0,
+          "activity": "rest_indoors",
+          "stationId": "room_lower_hall_east"
+        }
+      ],
+      "reactions": [
+        { "stimulus": "BIRD_SONG", "action": "LOOK_AT_SOURCE", "durationSec": 2.5, "cooldownSec": 5.0 },
+        { "stimulus": "PLAYER_NEAR", "action": "GREET_PLAYER", "durationSec": 2.0, "cooldownSec": 10.0 }
+      ]
+    }
+  ]
+}

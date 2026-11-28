@@ -1,0 +1,280 @@
+{
+  "stations": [
+    {
+      "id": "station_grain_mat_west",
+      "name": "禾坪西晒谷席",
+      "category": "work",
+      "zoneId": "zone_heping",
+      "sheltered": false,
+      "position": { "x": -6.35, "y": 0.0, "z": 28.4 },
+      "radius": 2.4,
+      "interactableId": "int_grain_drying",
+      "slots": [
+        { "slotId": "rake_west_1", "x": -9.05, "y": 0.0, "z": 28.6, "yaw": 1.35, "posture": "stand" }
+      ]
+    },
+    {
+      "id": "station_grain_mat_east",
+      "name": "禾坪东晒谷席",
+      "category": "work",
+      "zoneId": "zone_heping",
+      "sheltered": false,
+      "position": { "x": 6.35, "y": 0.0, "z": 28.4 },
+      "radius": 2.4,
+      "interactableId": "int_grain_drying",
+      "slots": [
+        { "slotId": "rake_east_1", "x": 9.05, "y": 0.0, "z": 28.8, "yaw": -1.35, "posture": "stand" }
+      ]
+    },
+    {
+      "id": "station_wash_pier",
+      "name": "半月塘洗衣石阶",
+      "category": "work",
+      "zoneId": "zone_pond_promenade",
+      "sheltered": false,
+      "position": { "x": -8.2, "y": 0.0, "z": 36.7 },
+      "radius": 2.2,
+      "slots": [
+        { "slotId": "wash_1", "x": -8.8, "y": 0.0, "z": 36.75, "yaw": 0.06, "posture": "sit" },
+        { "slotId": "wash_2", "x": -7.5, "y": 0.0, "z": 36.68, "yaw": -0.08, "posture": "sit" }
+      ]
+    },
+    {
+      "id": "station_bench_elders",
+      "name": "禾坪西廊石凳",
+      "category": "social",
+      "zoneId": "zone_heping",
+      "sheltered": false,
+      "position": { "x": -11.3, "y": 0.0, "z": 22.7 },
+      "radius": 1.8,
+      "slots": [
+        { "slotId": "elder_left", "x": -11.75, "y": 0.0, "z": 22.7, "yaw": 0.28, "posture": "sit" },
+        { "slotId": "elder_right", "x": -10.85, "y": 0.0, "z": 22.7, "yaw": -0.34, "posture": "sit" }
+      ]
+    },
+    {
+      "id": "station_tea_skywell",
+      "name": "前天井品茗茶桌",
+      "category": "social",
+      "zoneId": "zone_qiantianjing",
+      "sheltered": false,
+      "position": { "x": 3.35, "y": 0.15, "z": 13.4 },
+      "radius": 1.6,
+      "slots": [
+        { "slotId": "tea_west", "x": 2.45, "y": 0.15, "z": 13.4, "yaw": 1.57, "posture": "sit" },
+        { "slotId": "tea_east", "x": 4.25, "y": 0.15, "z": 13.4, "yaw": -1.57, "posture": "sit" }
+      ]
+    },
+    {
+      "id": "station_ancestral_altar",
+      "name": "中堂祖厅香案",
+      "category": "social",
+      "zoneId": "zone_hall_center",
+      "sheltered": true,
+      "position": { "x": 0.0, "y": 0.85, "z": 1.5 },
+      "radius": 1.8,
+      "slots": [
+        { "slotId": "worship_1", "x": 0.0, "y": 0.85, "z": 1.5, "yaw": 3.1416, "posture": "stand" }
+      ]
+    },
+    {
+      "id": "station_huatai_garden",
+      "name": "化胎青石药圃",
+      "category": "work",
+      "zoneId": "zone_huatai",
+      "sheltered": false,
+      "position": { "x": 5.4, "y": 1.0, "z": -16.8 },
+      "radius": 2.0,
+      "slots": [
+        { "slotId": "huatai_1", "x": 5.4, "y": 1.0, "z": -16.8, "yaw": -0.5, "posture": "stand" }
+      ]
+    },
+    {
+      "id": "station_skywell_vat",
+      "name": "前天井太平陶缸",
+      "category": "container",
+      "zoneId": "zone_qiantianjing",
+      "sheltered": false,
+      "position": { "x": -3.4, "y": 0.97, "z": 13.6 },
+      "radius": 0.9,
+      "interactableId": "int_skywell_vat",
+      "emitStimulusOnInteract": {
+        "type": "IMPACT",
+        "radius": 2.6,
+        "intensity": 1.0,
+        "ttl": 4.2
+      },
+      "slots": [
+        { "slotId": "vat_stand", "x": -2.35, "y": 0.15, "z": 13.6, "yaw": -1.57, "posture": "stand" }
+      ]
+    },
+    {
+      "id": "station_skywell_birdcage",
+      "name": "东廊檐下画眉鸟笼",
+      "category": "container",
+      "zoneId": "zone_eaves_east",
+      "sheltered": true,
+      "position": { "x": 4.92, "y": 1.95, "z": 14.65 },
+      "radius": 1.2,
+      "interactableId": "int_hwamei_cage",
+      "emitStimulusOnInteract": {
+        "type": "BIRD_SONG",
+        "radius": 6.2,
+        "intensity": 1.0,
+        "ttl": 3.2
+      },
+      "slots": [
+        { "slotId": "cage_listen", "x": 3.85, "y": 0.15, "z": 14.65, "yaw": 1.57, "posture": "stand" }
+      ]
+    },
+    {
+      "id": "station_pond_feed",
+      "name": "半月塘喂鱼石阶",
+      "category": "interactable",
+      "zoneId": "zone_pond_promenade",
+      "sheltered": false,
+      "position": { "x": 0.0, "y": -0.1, "z": 38.6 },
+      "radius": 2.4,
+      "interactableId": "int_pond_water",
+      "emitStimulusOnInteract": {
+        "type": "FEED",
+        "radius": 14.0,
+        "intensity": 1.0,
+        "ttl": 7.5
+      },
+      "slots": [
+        { "slotId": "pond_feed_1", "x": 0.0, "y": 0.0, "z": 36.8, "yaw": 0.0, "posture": "stand" }
+      ]
+    },
+    {
+      "id": "station_watchtower_gong",
+      "name": "望楼铜锣",
+      "category": "interactable",
+      "zoneId": "zone_heping",
+      "sheltered": true,
+      "position": { "x": -24.0, "y": 4.2, "z": 14.0 },
+      "radius": 2.0,
+      "interactableId": "int_watchtower_gong",
+      "emitStimulusOnInteract": {
+        "type": "LOUD_ALARM",
+        "radius": 58.0,
+        "intensity": 1.0,
+        "ttl": 5.0
+      },
+      "slots": []
+    },
+    {
+      "id": "coop_chicken_heping",
+      "name": "禾坪东木鸡舍",
+      "category": "coop",
+      "zoneId": "zone_heping",
+      "sheltered": true,
+      "position": { "x": 13.4, "y": 0.0, "z": 22.95 },
+      "radius": 1.6,
+      "slots": [
+        { "slotId": "coop_hp_0", "x": 12.84, "y": 0.0, "z": 22.78, "yaw": 0.78, "posture": "perch" },
+        { "slotId": "coop_hp_1", "x": 13.12, "y": 0.0, "z": 22.78, "yaw": 0.78, "posture": "perch" },
+        { "slotId": "coop_hp_2", "x": 13.40, "y": 0.0, "z": 22.78, "yaw": 0.78, "posture": "perch" },
+        { "slotId": "coop_hp_3", "x": 13.68, "y": 0.0, "z": 22.78, "yaw": 0.78, "posture": "perch" },
+        { "slotId": "coop_hp_4", "x": 13.96, "y": 0.0, "z": 22.78, "yaw": 0.78, "posture": "perch" },
+        { "slotId": "coop_hp_5", "x": 12.95, "y": 0.0, "z": 23.12, "yaw": 0.78, "posture": "perch" },
+        { "slotId": "coop_hp_6", "x": 13.35, "y": 0.0, "z": 23.12, "yaw": 0.78, "posture": "perch" },
+        { "slotId": "coop_hp_7", "x": 13.75, "y": 0.0, "z": 23.12, "yaw": 0.78, "posture": "perch" }
+      ]
+    },
+    {
+      "id": "coop_chicken_huatai",
+      "name": "化胎木鸡舍",
+      "category": "coop",
+      "zoneId": "zone_huatai",
+      "sheltered": true,
+      "position": { "x": -3.8, "y": 1.0, "z": -17.0 },
+      "radius": 1.2,
+      "slots": [
+        { "slotId": "coop_ht_0", "x": -4.04, "y": 1.0, "z": -17.1, "yaw": 0.78, "posture": "perch" },
+        { "slotId": "coop_ht_1", "x": -3.56, "y": 1.0, "z": -16.9, "yaw": 0.78, "posture": "perch" }
+      ]
+    },
+    {
+      "id": "pen_goose_west",
+      "name": "半月塘西芦苇鹅窝",
+      "category": "pen",
+      "zoneId": "zone_pond_water",
+      "sheltered": true,
+      "position": { "x": -11.8, "y": -0.14, "z": 39.8 },
+      "radius": 1.4,
+      "slots": [
+        { "slotId": "goose_w_0", "x": -11.38, "y": -0.14, "z": 39.80, "yaw": 0.8, "posture": "rest" },
+        { "slotId": "goose_w_1", "x": -11.80, "y": -0.14, "z": 40.16, "yaw": 0.8, "posture": "rest" },
+        { "slotId": "goose_w_2", "x": -12.22, "y": -0.14, "z": 39.80, "yaw": 0.8, "posture": "rest" },
+        { "slotId": "goose_w_3", "x": -11.80, "y": -0.14, "z": 39.44, "yaw": 0.8, "posture": "rest" }
+      ]
+    },
+    {
+      "id": "pen_goose_east",
+      "name": "半月塘东芦苇鹅窝",
+      "category": "pen",
+      "zoneId": "zone_pond_water",
+      "sheltered": true,
+      "position": { "x": 11.8, "y": -0.14, "z": 39.8 },
+      "radius": 1.4,
+      "slots": [
+        { "slotId": "goose_e_0", "x": 12.22, "y": -0.14, "z": 39.80, "yaw": -0.8, "posture": "rest" },
+        { "slotId": "goose_e_1", "x": 11.80, "y": -0.14, "z": 40.16, "yaw": -0.8, "posture": "rest" },
+        { "slotId": "goose_e_2", "x": 11.38, "y": -0.14, "z": 39.80, "yaw": -0.8, "posture": "rest" }
+      ]
+    },
+    {
+      "id": "room_lower_hall_west",
+      "name": "下堂西厢房",
+      "category": "shelter",
+      "zoneId": "zone_lower_hall",
+      "sheltered": true,
+      "position": { "x": -6.4, "y": 0.15, "z": 18.8 },
+      "radius": 2.4,
+      "slots": [
+        { "slotId": "lh_w_0", "x": -6.4, "y": 0.15, "z": 18.8, "yaw": 0.3, "posture": "rest" },
+        { "slotId": "lh_w_1", "x": -5.6, "y": 0.15, "z": 18.6, "yaw": 0.4, "posture": "rest" }
+      ]
+    },
+    {
+      "id": "room_lower_hall_east",
+      "name": "下堂东厢房",
+      "category": "shelter",
+      "zoneId": "zone_lower_hall",
+      "sheltered": true,
+      "position": { "x": 6.2, "y": 0.15, "z": 18.8 },
+      "radius": 2.4,
+      "slots": [
+        { "slotId": "lh_e_0", "x": 6.2, "y": 0.15, "z": 18.8, "yaw": -0.3, "posture": "rest" },
+        { "slotId": "lh_e_1", "x": 5.4, "y": 0.15, "z": 18.6, "yaw": -0.4, "posture": "rest" }
+      ]
+    },
+    {
+      "id": "room_west_wing",
+      "name": "西横屋厢房",
+      "category": "shelter",
+      "zoneId": "zone_west_wing",
+      "sheltered": true,
+      "position": { "x": -11.2, "y": 0.2, "z": 13.5 },
+      "radius": 3.0,
+      "slots": [
+        { "slotId": "ww_0", "x": -11.2, "y": 0.2, "z": 13.5, "yaw": 1.2, "posture": "rest" },
+        { "slotId": "ww_1", "x": -11.4, "y": 0.2, "z": 9.8, "yaw": 1.2, "posture": "rest" }
+      ]
+    },
+    {
+      "id": "room_east_wing",
+      "name": "东横屋厢房",
+      "category": "shelter",
+      "zoneId": "zone_east_wing",
+      "sheltered": true,
+      "position": { "x": 11.2, "y": 0.2, "z": 13.5 },
+      "radius": 3.0,
+      "slots": [
+        { "slotId": "ew_0", "x": 11.2, "y": 0.2, "z": 13.5, "yaw": -1.2, "posture": "rest" },
+        { "slotId": "ew_1", "x": 11.4, "y": 0.2, "z": 9.8, "yaw": -1.2, "posture": "rest" }
+      ]
+    }
+  ]
+}

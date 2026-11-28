@@ -1,0 +1,76 @@
+{
+  "flocks": [
+    {
+      "flockId": "flock_poultry_west",
+      "species": "hen",
+      "tier": "T2",
+      "domains": ["ground"],
+      "leaderId": "hen_2",
+      "memberIds": ["chick_8", "chick_9", "chick_10"],
+      "coopStationId": "coop_chicken_heping",
+      "followMinDist": 0.45,
+      "followMaxDist": 1.15,
+      "separationDist": 0.36,
+      "scatterRadius": 2.8,
+      "scatterDist": 1.6
+    },
+    {
+      "flockId": "flock_poultry_east",
+      "species": "hen",
+      "tier": "T2",
+      "domains": ["ground"],
+      "leaderId": "hen_3",
+      "memberIds": ["chick_11", "chick_12", "chick_13"],
+      "coopStationId": "coop_chicken_heping",
+      "followMinDist": 0.45,
+      "followMaxDist": 1.15,
+      "separationDist": 0.36,
+      "scatterRadius": 2.8,
+      "scatterDist": 1.6
+    },
+    {
+      "flockId": "flock_geese_pond",
+      "species": "goose",
+      "tier": "T2",
+      "domains": ["ground", "water"],
+      "leaderId": "goose_0",
+      "memberIds": ["goose_1", "goose_2"],
+      "penStationId": "pen_goose_west",
+      "shoreZoneId": "zone_pond_promenade",
+      "waterPortalId": "portal_pond_west",
+      "waddleHours": [[6.2, 8.6], [16.6, 18.4]],
+      "swimHours": [[8.6, 16.6]],
+      "nestHours": [[18.4, 24.0], [0.0, 6.2]],
+      "activeInRain": true,
+      "separationDist": 0.95
+    },
+    {
+      "flockId": "flock_ducks_pond",
+      "species": "duck",
+      "tier": "T2",
+      "domains": ["ground", "water"],
+      "leaderId": "duck_3",
+      "memberIds": ["duck_4", "duck_5", "duck_6"],
+      "penStationId": "pen_goose_east",
+      "shoreZoneId": "zone_pond_promenade",
+      "waterPortalId": "portal_pond_east",
+      "waddleHours": [[6.5, 8.2], [17.0, 18.5]],
+      "swimHours": [[8.2, 17.0]],
+      "nestHours": [[18.5, 24.0], [0.0, 6.5]],
+      "activeInRain": true,
+      "separationDist": 0.72
+    },
+    {
+      "flockId": "flock_cranes_sky",
+      "species": "crane",
+      "tier": "T2",
+      "domains": ["air"],
+      "leaderId": "crane_0",
+      "memberIds": ["crane_1", "crane_2", "crane_3", "crane_4", "crane_5"],
+      "roostHours": [[18.8, 24.0], [0.0, 6.0]],
+      "roostInRain": true,
+      "altitudeMin": 14.0,
+      "altitudeMax": 24.5
+    }
+  ]
+}
