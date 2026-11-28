@@ -21,7 +21,6 @@ import {
   detectNodeIdAt,
   evaluateJiaobei,
   groundHeightAt,
-  resolvePlayerMovement,
   surfaceTypeAt,
 } from './worldMath';
 import {
@@ -59,6 +58,16 @@ import {
   computeHwameiSpatialAcoustics,
   type SpatialAcousticParams,
 } from './hwameiAcoustics';
+import { SpatialPhysicsKernel } from './spatialPhysicsKernel';
+import { SceneValidator } from './sceneValidator';
+import {
+  COLLISION_MASKS,
+  CollisionLayer,
+  DEFAULT_CAPSULE_DIMS,
+  type ContainedEntityRef,
+  type StationSlot,
+  type ValidationReport,
+} from './spatialTypes';
 
 // Pre-allocated scratch vectors for zero-GC per-frame Hwamei spatial audio
 const _hwameiWorldPos = new THREE.Vector3();
@@ -152,9 +161,12 @@ export class WeilongSceneController {
   private lensPass: ShaderPass | null = null;
   private mats: MaterialLibrary;
   private arch: ArchitectureRefs;
+  private physicsKernel: SpatialPhysicsKernel;
   private props: PropAnimationRefs;
   private living: LivingWorldRefs;
   private playerAvatar: PlayerAvatarRefs;
+  private sceneValidator: SceneValidator;
+  private validationReport: ValidationReport | null = null;
   public audio: HakkaAudioEngine;
 
   // Lighting & Poetic Atmosphere (1 shadow caster + zero-shadow GI bounce & sky rim)
@@ -704,17 +716,45 @@ export class WeilongSceneController {
     this.skyRimLight.castShadow = false;
     this.scene.add(this.skyRimLight);
 
-    // Build Procedural Materials, Architecture, Composite Props & Living Hakka Community
+    // Build Procedural Materials, SSOT Architecture, Unified Physics Kernel, Socketed Props & Living Community
     this.mats = createMaterialLibrary(this.renderer);
     this.arch = buildWeilongArchitecture(this.mats, this.isSoftwareGl);
-    this.props = buildWeilongProps(this.mats, this.isSoftwareGl);
-    this.living = buildLivingWorld(this.mats, this.isSoftwareGl);
+    this.physicsKernel = new SpatialPhysicsKernel(this.arch.compiled);
+    this.props = buildWeilongProps(this.mats, this.isSoftwareGl, this.arch.compiler);
+    this.living = buildLivingWorld(this.mats, this.isSoftwareGl, this.physicsKernel);
     this.playerAvatar = buildPlayerAvatar(this.mats, this.isSoftwareGl);
     this.playerAvatar.root.position.copy(this.playerPos);
     this.scene.add(this.arch.root);
     this.scene.add(this.props.root);
     this.scene.add(this.living.root);
     this.scene.add(this.playerAvatar.root);
+
+    // Register Player capsule in unified SpatialPhysicsKernel
+    this.physicsKernel.registerBody({
+      id: 'player',
+      x: this.playerPos.x,
+      y: this.playerPos.y,
+      z: this.playerPos.z,
+      radius: DEFAULT_CAPSULE_DIMS.PLAYER.radius,
+      height: DEFAULT_CAPSULE_DIMS.PLAYER.height,
+      layer: CollisionLayer.PLAYER,
+      mask: COLLISION_MASKS.PLAYER,
+      weight: 1.4,
+    });
+
+    // Register Hwamei birdcage runtime ContainerDomain anchored to socketed birdcage world pos
+    const [bcX, bcY, bcZ] = this.props.birdcageWorldPos;
+    this.physicsKernel.registerContainerDomain({
+      id: 'hwamei_birdcage',
+      label: '画眉鸟笼容器',
+      kind: 'cylinder',
+      cx: bcX,
+      cz: bcZ,
+      radius: 0.30,
+      minY: bcY - 1.42,
+      maxY: bcY - 0.78,
+      margin: 0.02,
+    });
 
     // Held Oil-Paper Umbrella attached to Camera (used in First-Person mode)
     this.umbrellaHeldGroup = this.buildHeldUmbrella();
@@ -724,12 +764,54 @@ export class WeilongSceneController {
 
     // Pooled Zero-GC Wind-Slanted Rain Streaks & Firefly Particle Systems
     this.rainStreaks = this.buildRainStreaks();
+    this.rainStreaks.userData.isWorldVfx = true;
     this.rainStreaks.visible = false;
     this.scene.add(this.rainStreaks);
 
     this.fireflyPoints = this.buildFireflyParticles();
+    this.fireflyPoints.userData.isWorldVfx = true;
     this.fireflyPoints.visible = false;
     this.scene.add(this.fireflyPoints);
+
+    // Automated Startup 3D Scene Static Integrity Linter (SceneValidator)
+    const stations: StationSlot[] = [
+      ...this.living.getStations(),
+      { id: 'station_main_entrance', label: 'Main Entrance', x: 0, y: 0, z: 31.0, radius: 0.32, height: 1.72 },
+      { id: 'station_lower_hall', label: 'Lower Hall Center', x: 0, y: 0.25, z: 19.6, radius: 0.32, height: 1.72 },
+      { id: 'station_upper_hall', label: 'Upper Hall Worship', x: 0, y: 0.85, z: -1.8, radius: 0.32, height: 1.72 },
+    ];
+    const containedEntities: ContainedEntityRef[] = [
+      ...this.arch.koiGroup.children.map((child, idx) => ({
+        id: `pond_koi_${idx}`,
+        domainId: 'half_moon_pond',
+        object: child,
+      })),
+      { id: 'vat_koi_0', domainId: 'courtyard_water_vat', object: this.props.vatKoi },
+      { id: 'caged_hwamei_0', domainId: 'hwamei_birdcage', object: this.props.hwameiBirdObject },
+    ];
+
+    this.sceneValidator = new SceneValidator();
+    this.scene.add(this.sceneValidator.getDebugWireframeGroup());
+    const runValidation = () =>
+      this.sceneValidator.validateAll({
+        sceneRoot: this.scene,
+        compiled: this.arch.compiled,
+        physicsKernel: this.physicsKernel,
+        stations,
+        containedEntities,
+      });
+    this.validationReport = runValidation();
+    document.body.dataset.sceneValidatorErrors = String(this.validationReport.totalErrors);
+    document.body.dataset.sceneValidatorPassed = String(this.validationReport.passed);
+    (window as unknown as Record<string, unknown>).__SCENE_VALIDATOR__ = {
+      report: this.validationReport,
+      revalidate: () => {
+        this.validationReport = runValidation();
+        document.body.dataset.sceneValidatorErrors = String(this.validationReport.totalErrors);
+        document.body.dataset.sceneValidatorPassed = String(this.validationReport.passed);
+        return this.validationReport;
+      },
+    };
 
     // Pillar 4: Physical Camera Post-Processing Pipeline (GPU-only so software WebGL never stalls)
     if (!this.isSoftwareGl) {
@@ -1410,6 +1492,7 @@ export class WeilongSceneController {
 
   public resetToEntrance(): void {
     this.playerPos.set(0, 0, 31.0);
+    this.physicsKernel.syncBodyPosition('player', this.playerPos.x, this.playerPos.y, this.playerPos.z);
     this.playerVelX = 0;
     this.playerVelZ = 0;
     this.eyeYVel = 0;
@@ -1434,6 +1517,7 @@ export class WeilongSceneController {
   public setPlayerPose(x: number, z: number, yaw: number, pitch = -0.16): void {
     const gy = groundHeightAt(x, z, 0);
     this.playerPos.set(x, gy, z);
+    this.physicsKernel.syncBodyPosition('player', x, gy, z);
     this.eyeYVel = 0;
     this.playerVelX = 0;
     this.playerVelZ = 0;
@@ -1679,6 +1763,7 @@ export class WeilongSceneController {
     switch (id) {
       case 'int_doumen_gate':
         this.doumenOpen = !this.doumenOpen;
+        this.physicsKernel.setDoumenOpen(this.doumenOpen);
         customMandarin = this.doumenOpen
           ? '抽开重型横木栓，双开厚木斗门吱呀敞开，可自由出入禾坪！'
           : '合拢重型厚木斗门并落栓上锁，整座围龙屋即成坚固堡垒。';
@@ -1971,15 +2056,44 @@ export class WeilongSceneController {
       c.position.y = d.baseY + cloudDropY + Math.sin(t * 0.22 + d.phase) * 0.7;
     }
 
-    // Swimming Koi in Half-Moon Pond
+    // Swimming Koi in Half-Moon Pond — strictly clamped inside half_moon_pond ContainerDomain
     for (const child of this.arch.koiGroup.children) {
       const d = child.userData;
       d.orbitAngle += dt * d.speed;
-      const nx = d.centerX + Math.cos(d.orbitAngle) * d.orbitRadiusX;
-      const nz = d.centerZ + Math.sin(d.orbitAngle) * d.orbitRadiusZ;
-      child.rotation.y = Math.atan2(nx - child.position.x, nz - child.position.z);
-      child.position.x = nx;
-      child.position.z = nz;
+      const rawX = d.centerX + Math.cos(d.orbitAngle) * d.orbitRadiusX;
+      const rawZ = d.centerZ + Math.sin(d.orbitAngle) * d.orbitRadiusZ;
+      const clamped = this.physicsKernel.clampToContainer(
+        'half_moon_pond',
+        rawX,
+        child.position.y,
+        rawZ
+      );
+      child.rotation.y = Math.atan2(clamped.x - child.position.x, clamped.z - child.position.z);
+      child.position.set(clamped.x, clamped.y, clamped.z);
+    }
+
+    // Courtyard Ceramic Vat Carp — gentle figure-8 clamped strictly inside courtyard_water_vat ContainerDomain
+    {
+      const vatX = -3.4;
+      const vatY = 0.15;
+      const vatZ = 13.6;
+      const desiredWorldX = vatX + Math.cos(t * 0.65) * 0.16;
+      const desiredWorldZ = vatZ + Math.sin(t * 1.3) * 0.11;
+      const clampedVat = this.physicsKernel.clampToContainer(
+        'courtyard_water_vat',
+        desiredWorldX,
+        vatY + 0.82,
+        desiredWorldZ
+      );
+      const nextLocalX = clampedVat.x - vatX;
+      const nextLocalY = clampedVat.y - vatY;
+      const nextLocalZ = clampedVat.z - vatZ;
+      const dx = nextLocalX - this.props.vatKoi.position.x;
+      const dz = nextLocalZ - this.props.vatKoi.position.z;
+      if (dx * dx + dz * dz > 1e-8) {
+        this.props.vatKoi.rotation.y = Math.atan2(dx, dz);
+      }
+      this.props.vatKoi.position.set(nextLocalX, nextLocalY, nextLocalZ);
     }
 
     // Floating golden interaction beacons subtle bob
@@ -2269,17 +2383,15 @@ export class WeilongSceneController {
     if (horizSpeed > 0.03) {
       const prevX = this.playerPos.x;
       const prevZ = this.playerPos.z;
-      const nextX = prevX + this.playerVelX * dt;
-      const nextZ = prevZ + this.playerVelZ * dt;
+      const desiredDelta = {
+        x: this.playerVelX * dt,
+        z: this.playerVelZ * dt,
+      };
 
-      const res = resolvePlayerMovement(
-        prevX,
-        prevZ,
-        nextX,
-        nextZ,
-        this.playerPos.y,
-        this.doumenOpen
-      );
+      // Route ALL player locomotion through unified 3-stage SpatialPhysicsKernel (Capsule vs BVH Slide + Dynamic Separation + Sub-stepping)
+      const res = this.physicsKernel.moveCapsule('player', desiredDelta, dt, {
+        doumenOpen: this.doumenOpen,
+      });
 
       const movedDist = Math.hypot(res.x - prevX, res.z - prevZ);
       if (movedDist < horizSpeed * dt * 0.25) {
@@ -2290,7 +2402,17 @@ export class WeilongSceneController {
       this.playerPos.z = res.z;
       targetGroundY = res.y;
 
-      if (res.crossedThreshold) {
+      // Detect threshold crossing ("忌踩门槛" step-over lift curve)
+      let crossedThreshold = false;
+      if (Math.abs(res.x) < 2.2) {
+        for (const tz of [21.65, 16.55, 10.2, 5.7, -0.1]) {
+          if ((prevZ - tz) * (res.z - tz) < 0) {
+            crossedThreshold = true;
+            break;
+          }
+        }
+      }
+      if (crossedThreshold) {
         this.thresholdBumpTimer = 0.45;
       }
 
@@ -2543,6 +2665,8 @@ export class WeilongSceneController {
     this.envMaps.rain.dispose();
     this.envMaps.night.dispose();
     this.composer?.dispose();
+    this.sceneValidator.dispose();
+    delete (window as unknown as Record<string, unknown>).__SCENE_VALIDATOR__;
     this.playerAvatar.dispose();
     this.living.dispose();
     this.arch.dispose();

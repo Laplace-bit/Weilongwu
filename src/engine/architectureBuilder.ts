@@ -47,6 +47,11 @@ import {
   computeInnerWeilongLanternAnchor,
   computeLanternCenterY,
 } from './weatherPhysics';
+import { createWeilongArchitectureBlueprint } from './architectureData';
+import {
+  ArchitectureCompiler,
+  type CompiledArchitecture,
+} from './architectureCompiler';
 
 export interface ArchitectureRefs {
   root: THREE.Group;
@@ -58,6 +63,8 @@ export interface ArchitectureRefs {
   koiGroup: THREE.Group;
   lanternLights: THREE.PointLight[];
   rainCurtainMeshes: THREE.Mesh[];
+  compiler: ArchitectureCompiler;
+  compiled: CompiledArchitecture;
   updateWater: (
     t: number,
     nightFactor: number,
@@ -433,6 +440,8 @@ export function buildWeilongArchitecture(
   isSoftwareGl: boolean
 ): ArchitectureRefs {
   const root = new THREE.Group();
+  const blueprint = createWeilongArchitectureBlueprint();
+  const compiler = new ArchitectureCompiler(blueprint);
   const geometries: THREE.BufferGeometry[] = [];
   const localMaterials: THREE.Material[] = [];
   const lanternLights: THREE.PointLight[] = [];
@@ -665,6 +674,7 @@ export function buildWeilongArchitecture(
           mats.roofSheathing
         );
         southSheath.receiveShadow = true;
+        southSheath.userData.isRoofSheathing = true;
         root.add(southSheath);
 
         const northMesh = new THREE.Mesh(
@@ -679,6 +689,7 @@ export function buildWeilongArchitecture(
           mats.roofSheathing
         );
         northSheath.receiveShadow = true;
+        northSheath.userData.isRoofSheathing = true;
         root.add(northSheath);
 
         // Segmented organic lime-mortar main ridge spine (正脊) + shadow-sealing purlin beam
@@ -848,6 +859,7 @@ export function buildWeilongArchitecture(
           mats.roofSheathing
         );
         eastSheath.receiveShadow = true;
+        eastSheath.userData.isRoofSheathing = true;
         root.add(eastSheath);
 
         const westMesh = new THREE.Mesh(
@@ -862,6 +874,7 @@ export function buildWeilongArchitecture(
           mats.roofSheathing
         );
         westSheath.receiveShadow = true;
+        westSheath.userData.isRoofSheathing = true;
         root.add(westSheath);
 
         const ra = r0.clone();
@@ -1036,6 +1049,7 @@ export function buildWeilongArchitecture(
         mats.roofSheathing
       );
       sheathTri.receiveShadow = true;
+      sheathTri.userData.isRoofSheathing = true;
       root.add(sheathTri);
     }
     // Segmented curved pale-grey lime hip ribs along all 4 diagonal ridges!
@@ -1288,12 +1302,13 @@ export function buildWeilongArchitecture(
   addBox(74, 0.1, 4.2, 0, -0.05, 39.0, mats.graniteSlab, 0, root, false);
 
   // Sculpted Hakka Pavilion Lantern Posts (木柱小瓦顶灯柱) flanking He-Ping & Pond promenade
-  for (const [px, pz] of [
+  const lanternPostCoords: [number, number][] = [
     [-16.5, 35.4],
     [16.5, 35.4],
     [-19.5, 24.5],
     [19.5, 24.5],
-  ] as [number, number][]) {
+  ];
+  lanternPostCoords.forEach(([px, pz], postIdx) => {
     const dir = px < 0 ? 1 : -1;
     const postGroup = new THREE.Group();
     postGroup.position.set(px, 0, pz);
@@ -1328,12 +1343,24 @@ export function buildWeilongArchitecture(
     armBracket.position.set(dir * 0.08, 3.42, 0);
     if (dir < 0) armBracket.scale.x = -1;
     postGroup.add(armBracket);
-    // Hanging sculpted melon-ribbed lantern
-    const lantern = createCraftedLantern(mats, lanternGeos, 0.96, 0.24);
-    lantern.position.set(dir * 0.72, 2.98, 0);
-    postGroup.add(lantern);
     root.add(postGroup);
-  }
+
+    // Register projecting cross-arm into overhead anchor BVH & semantic socket
+    const armAnchorId = `lantern_post_arm_${postIdx}`;
+    compiler.registerOverheadAnchorBox(armAnchorId, 0.96, 0.10, 0.12, px + dir * 0.36, 3.46, pz);
+    const socketId = `lantern_post_${postIdx}`;
+    compiler.registerSocket({
+      id: socketId,
+      kind: 'lantern_post',
+      position: [px + dir * 0.72, 3.418, pz],
+      normal: [0, -1, 0],
+      hostId: armAnchorId,
+    });
+    const lantern = createCraftedLantern(mats, lanternGeos, 0.96, 0.24);
+    lantern.name = `LanternPostFixture_${postIdx}`;
+    compiler.mountToSocket(lantern, socketId, { mode: 'hang', embedOffset: 0.01 });
+    root.add(lantern);
+  });
 
   // Half-Moon Pond (半月塘): Sculpted submerged pebble/sandstone basin + crystal-clear optical water!
   const pondBedRings = 12;
@@ -2035,27 +2062,66 @@ export function buildWeilongArchitecture(
   for (const cx of [-2.35, 2.35, -14.45, 14.45]) {
     addBox(0.32, 1.85, 0.04, cx, 1.75, 21.91, mats.redCouplet, 0, root, false);
   }
-  // Golden calligraphy clan plaque "陇西世泽" mounted cleanly on the outer granite portal lintel (zero Z-clipping)
-  addBox(2.58, 0.62, 0.06, 0, 2.94, 21.95, mats.gildedGold, 0, root, false);
-  addBox(2.44, 0.52, 0.08, 0, 2.94, 21.98, mats.plaqueLongxi, 0, root, false);
+  // Golden calligraphy clan plaque "陇西世泽" mounted cleanly via semantic socket on the outer granite portal lintel
+  compiler.registerSocket({
+    id: 'lintel_plaque_outer_portal',
+    kind: 'lintel_plaque',
+    position: [0, 2.94, 21.97],
+    normal: [0, 0, 1],
+    hostId: 'lintel_main_portal',
+  });
+  const outerPlaqueGroup = new THREE.Group();
+  outerPlaqueGroup.name = 'PlaqueOuterLongxi';
+  addBox(2.58, 0.62, 0.06, 0, 0, -0.02, mats.gildedGold, 0, outerPlaqueGroup, false);
+  addBox(2.44, 0.52, 0.08, 0, 0, 0.01, mats.plaqueLongxi, 0, outerPlaqueGroup, false);
+  compiler.mountToSocket(outerPlaqueGroup, 'lintel_plaque_outer_portal', { mode: 'plaque' });
+  root.add(outerPlaqueGroup);
 
   // Horizontal dark-framed windows along the front white facade
   for (const wx of [-12.6, -10.2, -7.2, -4.6, 4.6, 7.2, 10.2, 12.6]) {
     addWindow(1.45, 0.92, wx, 2.05, 21.88, 0);
   }
 
-  // 8 Sculpted Melon-Ribbed Hakka Vermilion-and-Gold Lanterns anchored cleanly under the Front South Eave Purlin!
-  // Front wing south eave purlin is at f = 0.10 => z = FRONT_CENTER_Z + (5.25*0.5 + 0.68)*0.90 = 22.1245
+  // 8 Sculpted Melon-Ribbed Hakka Vermilion-and-Gold Lanterns mounted via Front South Eave Purlin Sockets!
   const frontSouthPurlinZ = FRONT_CENTER_Z + (5.25 * 0.5 + 0.68) * 0.90;
   const frontSouthPurlinBaseY = computeGableSlopeY(3.15, 5.35, 0.10, 0.22) - 0.16 - 0.075;
-  for (const lx of [-17.5, -13.8, -8.8, -3.2, 3.2, 8.8, 13.8, 17.5]) {
+  compiler.registerOverheadAnchorBox(
+    'purlin_front_south_eave',
+    FRONT_STRAIGHT_HALF_W * 2,
+    0.22,
+    0.28,
+    0,
+    frontSouthPurlinBaseY + 0.09,
+    frontSouthPurlinZ
+  );
+  const frontLanternXs = [-17.5, -13.8, -8.8, -3.2, 3.2, 8.8, 13.8, 17.5];
+  frontLanternXs.forEach((lx, idx) => {
     const scale = 0.96;
     const cordLen = 0.30;
     const anchorY = frontSouthPurlinBaseY + organicRoofSettling(lx, frontSouthPurlinZ);
+    const sockId = `eave_hang_front_${idx}`;
+    // Register settled eave purlin segment into overhead ceilingBvh matching organicRoofSettling(lx)
+    compiler.registerOverheadAnchorBox(
+      `purlin_front_south_seg_${idx}`,
+      0.42,
+      0.22,
+      0.28,
+      lx,
+      anchorY + 0.11,
+      frontSouthPurlinZ
+    );
+    compiler.registerSocket({
+      id: sockId,
+      kind: 'eave_hang',
+      position: [lx, anchorY, frontSouthPurlinZ],
+      normal: [0, -1, 0],
+      hostId: `purlin_front_south_seg_${idx}`,
+    });
     const lg = createCraftedLantern(mats, lanternGeos, scale, cordLen);
-    lg.position.set(lx, computeLanternCenterY(anchorY, scale, cordLen), frontSouthPurlinZ);
+    lg.name = `FrontEaveLantern_${idx}`;
+    compiler.mountToSocket(lg, sockId, { mode: 'hang', embedOffset: 0.01 });
     root.add(lg);
-  }
+  });
 
   // Front Straight Wing inner corridor wall at z = 16.55 (tucked cleanly beneath north eave sheathing, zero roof clipping)
   addCraftedWall(10.2, 3.02, 0.36, -7.7, 0.25, 16.55);
@@ -2065,12 +2131,20 @@ export function buildWeilongArchitecture(
     columns.push({ x: cx, yBase: 0.25, z: 16.65, height: 2.86 });
   }
   addBox(5.1, 0.16, 0.20, 0, 3.03, 16.65, mats.darkTimber);
-  // Second doorway clan plaque "陇西世泽" cleanly suspended beneath the Lower Hall colonnade lintel (zero beam clipping!)
+  // Second doorway clan plaque "陇西世泽" mounted via semantic socket with automatic beam-clearance check!
+  compiler.registerSocket({
+    id: 'lintel_plaque_lower_hall',
+    kind: 'lintel_plaque',
+    position: [0, 2.64, 16.78],
+    normal: [0, 0, 1],
+    hostId: 'beam_lower_hall_lintel',
+  });
   const secondPlaqueGroup = new THREE.Group();
-  secondPlaqueGroup.position.set(0, 2.64, 16.78);
+  secondPlaqueGroup.name = 'PlaqueLowerHallLongxi';
   secondPlaqueGroup.rotation.x = 0.10;
   addBox(2.22, 0.58, 0.06, 0, 0, -0.02, mats.gildedGold, 0, secondPlaqueGroup, false);
   addBox(2.08, 0.48, 0.07, 0, 0, 0.01, mats.plaqueLongxi, 0, secondPlaqueGroup, false);
+  compiler.mountToSocket(secondPlaqueGroup, 'lintel_plaque_lower_hall', { mode: 'plaque' });
   root.add(secondPlaqueGroup);
   // Twin wrought-bronze suspension brackets tying the second plaque directly up to the z=16.65 cedar lintel beam
   for (const hx of [-0.78, 0.78]) {
@@ -2157,9 +2231,20 @@ export function buildWeilongArchitecture(
   // Exposed horizontal cedar tie beams (抬梁)
   addBox(22.0, 0.24, 0.24, 0, 4.18, 10.2, mats.darkTimber);
   addBox(22.0, 0.24, 0.24, 0, 4.18, 5.7, mats.darkTimber);
-  // Middle Hall clan plaque "敦亲睦族" suspended cleanly BELOW the 3.90m N-S truss beams via twin bronze hangers (zero clipping!)
-  addBox(2.48, 0.70, 0.08, 0, 3.48, 5.81, mats.gildedGold, 0, root, false);
-  addBox(2.34, 0.60, 0.10, 0, 3.48, 5.85, mats.plaqueJiaxun, 0, root, false);
+  // Middle Hall clan plaque "敦亲睦族" mounted via semantic socket with automatic beam-clearance check!
+  compiler.registerSocket({
+    id: 'lintel_plaque_middle_hall',
+    kind: 'lintel_plaque',
+    position: [0, 3.48, 5.83],
+    normal: [0, 0, 1],
+    hostId: 'beam_middle_hall_n',
+  });
+  const middlePlaqueGroup = new THREE.Group();
+  middlePlaqueGroup.name = 'PlaqueMiddleHallDunqin';
+  addBox(2.48, 0.70, 0.08, 0, 0, -0.02, mats.gildedGold, 0, middlePlaqueGroup, false);
+  addBox(2.34, 0.60, 0.10, 0, 0, 0.02, mats.plaqueJiaxun, 0, middlePlaqueGroup, false);
+  compiler.mountToSocket(middlePlaqueGroup, 'lintel_plaque_middle_hall', { mode: 'plaque' });
+  root.add(middlePlaqueGroup);
   for (const hx of [-0.88, 0.88]) {
     addBox(0.036, 0.34, 0.036, hx, 3.94, 5.76, mats.bronzeMetal, 0, root, false);
     addBox(0.04, 0.036, 0.16, hx, 4.10, 5.74, mats.bronzeMetal, 0, root, false);
@@ -2236,9 +2321,20 @@ export function buildWeilongArchitecture(
     addCraftedWall(4.0, 2.96, 0.28, side * 16.2, 0.32, 8.2, 0, mats.limeWallInterior);
     addCraftedWall(4.0, 2.96, 0.28, side * 16.2, 0.32, 1.4, 0, mats.limeWallInterior);
 
-    // Clan Study plaque "耕读传家" inside West Wing
+    // Clan Study plaque "耕读传家" mounted via semantic socket inside West Wing
     if (side === -1) {
-      addBox(2.2, 0.72, 0.1, -18.12, 2.55, -1.8, mats.plaqueGengdu, Math.PI * 0.5, root, false);
+      compiler.registerSocket({
+        id: 'wall_plaque_gengdu',
+        kind: 'wall_plaque',
+        position: [-18.12, 2.55, -1.8],
+        normal: [1, 0, 0],
+        hostId: 'wall_wing_w_n',
+      });
+      const studyPlaqueGroup = new THREE.Group();
+      studyPlaqueGroup.name = 'PlaqueWestStudyGengdu';
+      addBox(2.2, 0.72, 0.1, 0, 0, 0, mats.plaqueGengdu, Math.PI * 0.5, studyPlaqueGroup, false);
+      compiler.mountToSocket(studyPlaqueGroup, 'wall_plaque_gengdu', { mode: 'plaque' });
+      root.add(studyPlaqueGroup);
     }
 
     // Stepped North-South pitched tiled wing roof aligned cleanly between inner gable x = ±11.44 and outer eave x = ±18.96
@@ -2344,6 +2440,7 @@ export function buildWeilongArchitecture(
         mats.roofSheathing
       );
       innerSheath.receiveShadow = true;
+      innerSheath.userData.isRoofSheathing = true;
       root.add(innerSheath);
 
       const outerSlope = new THREE.Mesh(
@@ -2358,6 +2455,7 @@ export function buildWeilongArchitecture(
         mats.roofSheathing
       );
       outerSheath.receiveShadow = true;
+      outerSheath.userData.isRoofSheathing = true;
       root.add(outerSheath);
 
       // Organic smoothly-curving pale lime ridge spine + shadow-sealing ridge purlin
@@ -2723,13 +2821,38 @@ export function buildWeilongArchitecture(
   // =========================================================================
   // 7. HANGING RED HAKKA LANTERNS & CALIBRATED EAVE DRIPS / SKYWELL DRAINAGE GUTTERS (四水归堂)
   // =========================================================================
-  // Every single lantern is mathematically anchored by its top brass rosette to a real beam or eave purlin.
+  // Register semantic hanging sockets for propsBuilder.ts (Hwamei birdcage & Upper Hall Ding lantern)
+  compiler.registerSocket({
+    id: 'veranda_hang_birdcage',
+    kind: 'veranda_hang',
+    position: [4.92, 3.08, 14.65],
+    normal: [0, -1, 0],
+    hostId: 'beam_front_skywell_veranda_e',
+  });
+  compiler.registerSocket({
+    id: 'ridge_hang_ding_lantern',
+    kind: 'ridge_hang',
+    position: [-2.2, 7.62, -2.7],
+    normal: [0, -1, 0],
+    hostId: 'beam_upper_hall_ridge_purlin',
+  });
+
+  // Every single lantern is mounted via ArchitectureCompiler.mountToSocket() against real beam/eave sockets!
   const weilongWestLantern = computeInnerWeilongLanternAnchor(0.32);
   const weilongNorthLantern = computeInnerWeilongLanternAnchor(0.50);
   const weilongEastLantern = computeInnerWeilongLanternAnchor(0.68);
-  const lanternSpecs: Array<{ x: number; anchorY: number; z: number; scale: number; cordLen: number }> = [
-    // Portal flanking lanterns directly under Front Wing South eave purlin (z = 22.125)
+  const lanternSpecs: Array<{
+    socketId: string;
+    hostId: string;
+    x: number;
+    anchorY: number;
+    z: number;
+    scale: number;
+    cordLen: number;
+  }> = [
     {
+      socketId: 'eave_hang_portal_w',
+      hostId: 'purlin_front_south_portal_w',
       x: -2.1,
       anchorY: frontSouthPurlinBaseY + organicRoofSettling(-2.1, frontSouthPurlinZ),
       z: frontSouthPurlinZ,
@@ -2737,23 +2860,23 @@ export function buildWeilongArchitecture(
       cordLen: 0.32,
     },
     {
+      socketId: 'eave_hang_portal_e',
+      hostId: 'purlin_front_south_portal_e',
       x: 2.1,
       anchorY: frontSouthPurlinBaseY + organicRoofSettling(2.1, frontSouthPurlinZ),
       z: frontSouthPurlinZ,
       scale: 0.98,
       cordLen: 0.32,
     },
-    // Front Skywell flanking veranda eave purlin lanterns (x = ±4.92, purlin bottom y = 3.08)
-    { x: -4.92, anchorY: 3.08, z: 12.45, scale: 0.96, cordLen: 0.30 },
-    { x: 4.92, anchorY: 3.08, z: 12.45, scale: 0.96, cordLen: 0.30 },
-    // Middle Hall North tie beam (z = 5.70, beam bottom y = 4.06)
-    { x: -4.2, anchorY: 4.06, z: 5.70, scale: 1.0, cordLen: 0.36 },
-    { x: 4.2, anchorY: 4.06, z: 5.70, scale: 1.0, cordLen: 0.36 },
-    // Upper Hall South tie beam (z = -0.10, beam bottom y = 4.79)
-    { x: -4.8, anchorY: 4.79, z: -0.10, scale: 1.0, cordLen: 0.36 },
-    { x: 4.8, anchorY: 4.79, z: -0.10, scale: 1.0, cordLen: 0.36 },
-    // Inner Weilong curved inner eave purlin lanterns (exact curve-sampled anchors, zero floating!)
+    { socketId: 'veranda_hang_w', hostId: 'beam_front_skywell_veranda_w', x: -4.92, anchorY: 3.08, z: 12.45, scale: 0.96, cordLen: 0.30 },
+    { socketId: 'veranda_hang_e', hostId: 'beam_front_skywell_veranda_e', x: 4.92, anchorY: 3.08, z: 12.45, scale: 0.96, cordLen: 0.30 },
+    { socketId: 'eave_hang_mid_w', hostId: 'beam_middle_hall_n', x: -4.2, anchorY: 4.06, z: 5.70, scale: 1.0, cordLen: 0.36 },
+    { socketId: 'eave_hang_mid_e', hostId: 'beam_middle_hall_n', x: 4.2, anchorY: 4.06, z: 5.70, scale: 1.0, cordLen: 0.36 },
+    { socketId: 'eave_hang_upper_w', hostId: 'beam_upper_hall_s', x: -4.8, anchorY: 4.79, z: -0.10, scale: 1.0, cordLen: 0.36 },
+    { socketId: 'eave_hang_upper_e', hostId: 'beam_upper_hall_s', x: 4.8, anchorY: 4.79, z: -0.10, scale: 1.0, cordLen: 0.36 },
     {
+      socketId: 'eave_hang_inner_weilong_w',
+      hostId: 'inner_ring_eave_purlin_w',
       x: weilongWestLantern.x,
       anchorY: weilongWestLantern.y + organicRoofSettling(weilongWestLantern.x, weilongWestLantern.z),
       z: weilongWestLantern.z,
@@ -2761,6 +2884,8 @@ export function buildWeilongArchitecture(
       cordLen: 0.34,
     },
     {
+      socketId: 'eave_hang_inner_weilong_n',
+      hostId: 'inner_ring_eave_purlin_n',
       x: weilongNorthLantern.x,
       anchorY: weilongNorthLantern.y + organicRoofSettling(weilongNorthLantern.x, weilongNorthLantern.z),
       z: weilongNorthLantern.z,
@@ -2768,6 +2893,8 @@ export function buildWeilongArchitecture(
       cordLen: 0.34,
     },
     {
+      socketId: 'eave_hang_inner_weilong_e',
+      hostId: 'inner_ring_eave_purlin_e',
       x: weilongEastLantern.x,
       anchorY: weilongEastLantern.y + organicRoofSettling(weilongEastLantern.x, weilongEastLantern.z),
       z: weilongEastLantern.z,
@@ -2776,12 +2903,30 @@ export function buildWeilongArchitecture(
     },
   ];
 
+  // Register local settled purlin anchor pads directly above Inner Weilong & Portal eave lantern sockets
+  for (const spec of lanternSpecs) {
+    if (
+      spec.socketId.startsWith('eave_hang_inner_weilong_') ||
+      spec.socketId.startsWith('eave_hang_portal_')
+    ) {
+      compiler.registerOverheadAnchorBox(spec.hostId, 0.45, 0.18, 0.36, spec.x, spec.anchorY + 0.09, spec.z);
+    }
+    compiler.registerSocket({
+      id: spec.socketId,
+      kind: 'eave_hang',
+      position: [spec.x, spec.anchorY, spec.z],
+      normal: [0, -1, 0],
+      hostId: spec.hostId,
+    });
+  }
+
   // 11 Courtyard & Hall Sculpted Melon-Ribbed Lanterns
   lanternSpecs.forEach((spec, idx) => {
-    const ly = computeLanternCenterY(spec.anchorY, spec.scale, spec.cordLen);
     const lg = createCraftedLantern(mats, lanternGeos, spec.scale, spec.cordLen);
-    lg.position.set(spec.x, ly, spec.z);
+    lg.name = `CourtyardLantern_${spec.socketId}`;
+    compiler.mountToSocket(lg, spec.socketId, { mode: 'hang', embedOffset: 0.01 });
     root.add(lg);
+    const ly = computeLanternCenterY(spec.anchorY, spec.scale, spec.cordLen);
     // Keep active point lights budget disciplined (max 4 non-shadow warm pools)
     if (idx === 0 || idx === 3 || idx === 6 || idx === 9) {
       const pt = new THREE.PointLight(0xff8c42, 0.25, 20, 1.7);
@@ -2900,9 +3045,11 @@ export function buildWeilongArchitecture(
   ];
   for (const [rx, ry, rz, rw, rh, ryRot] of rainCurtainSpecs) {
     const curtain = new THREE.Mesh(trackGeo(new THREE.PlaneGeometry(rw, rh)), rainCurtainMat);
+    curtain.name = 'EaveRainCurtainVfx';
     curtain.position.set(rx, ry, rz);
     curtain.rotation.y = ryRot;
     curtain.visible = false;
+    curtain.userData.isWorldVfx = true;
     root.add(curtain);
     rainCurtainMeshes.push(curtain);
   }
@@ -2970,32 +3117,35 @@ export function buildWeilongArchitecture(
     })
   );
 
+  // Surface-attached splash VFX layers enforce +0.020m outward normal micro-offset + polygonOffset (zero Z-fighting)
   const dripSplashSpecs: Array<[number, number, number, number, number, number]> = [
-    // Front Skywell drainage perimeter
-    [0, 0.162, 15.85, 9.4, 0.66, 0],
-    [0, 0.162, 11.42, 9.4, 0.66, 0],
-    [-4.82, 0.162, 13.6, 4.4, 0.66, Math.PI * 0.5],
-    [4.82, 0.162, 13.6, 4.4, 0.66, Math.PI * 0.5],
-    // Rear Skywell drainage perimeter
-    [0, 0.362, 4.58, 8.8, 0.64, 0],
-    [0, 0.362, 1.08, 8.8, 0.64, 0],
-    [-4.50, 0.362, 2.8, 3.5, 0.64, Math.PI * 0.5],
-    [4.50, 0.362, 2.8, 3.5, 0.64, Math.PI * 0.5],
-    // Front Wing South veranda drip line on He-Ping
+    // Front Skywell drainage perimeter (floor y = 0.15 + 0.020m)
+    [0, 0.170, 15.85, 9.4, 0.66, 0],
+    [0, 0.170, 11.42, 9.4, 0.66, 0],
+    [-4.82, 0.170, 13.6, 4.4, 0.66, Math.PI * 0.5],
+    [4.82, 0.170, 13.6, 4.4, 0.66, Math.PI * 0.5],
+    // Rear Skywell drainage perimeter (floor y = 0.35 + 0.020m)
+    [0, 0.370, 4.58, 8.8, 0.64, 0],
+    [0, 0.370, 1.08, 8.8, 0.64, 0],
+    [-4.50, 0.370, 2.8, 3.5, 0.64, Math.PI * 0.5],
+    [4.50, 0.370, 2.8, 3.5, 0.64, Math.PI * 0.5],
+    // Front Wing South veranda drip line on He-Ping (terrace y = 0.01 + 0.022m)
     [-9.4, 0.032, 22.45, 12.2, 0.76, 0],
     [0.0, 0.032, 22.45, 5.6, 0.76, 0],
     [9.4, 0.032, 22.45, 12.2, 0.76, 0],
-    // Inner Weilong courtyard eave drip strips on Hua-Tai
+    // Inner Weilong courtyard eave drip strips on Hua-Tai (+0.022m normal clearance)
     [iwCenter.x - iwCenter.nx * iwDripOffset, iwCenter.yBase + 0.04, iwCenter.z - iwCenter.nz * iwDripOffset, 9.6, 0.72, Math.atan2(iwCenter.nx, iwCenter.nz)],
     [iwWest.x - iwWest.nx * iwDripOffset, iwWest.yBase + 0.04, iwWest.z - iwWest.nz * iwDripOffset, 8.4, 0.72, Math.atan2(iwWest.nx, iwWest.nz)],
     [iwEast.x - iwEast.nx * iwDripOffset, iwEast.yBase + 0.04, iwEast.z - iwEast.nz * iwDripOffset, 8.4, 0.72, Math.atan2(iwEast.nx, iwEast.nz)],
   ];
   for (const [sx, sy, sz, sw, sd, sRot] of dripSplashSpecs) {
     const splash = new THREE.Mesh(trackGeo(new THREE.PlaneGeometry(sw, sd)), dripSplashMat);
+    splash.name = 'DripSplashVfx';
     splash.rotation.x = -Math.PI * 0.5;
     splash.rotation.z = sRot;
     splash.position.set(sx, sy, sz);
     splash.visible = false;
+    splash.userData.isWorldVfx = true;
     root.add(splash);
     rainCurtainMeshes.push(splash);
   }
@@ -3065,21 +3215,23 @@ export function buildWeilongArchitecture(
     const curbW = 0.07;
 
     const addGutterRun = (cx: number, cz: number, len: number, rotY: number) => {
-      // Dark carved granite trough bed
+      // Dark carved granite trough bed (top at yFloor + 0.020)
       addBox(len, 0.024, troughW, cx, yFloor + 0.008, cz, drainStoneMat, rotY, root, false);
-      // Pair of subtle raised granite curbs framing the drainage channel
+      // Pair of subtle raised granite curbs framing the drainage channel (top at yFloor + 0.044)
       for (const side of [-1, 1]) {
         const off = side * (troughW * 0.5 + curbW * 0.5);
         const ox = Math.sin(rotY) * off;
         const oz = Math.cos(rotY) * off;
-        addBox(len, 0.036, curbW, cx + ox, yFloor + 0.014, cz + oz, mats.granitePlinth, rotY, root, false);
+        addBox(len, 0.044, curbW, cx + ox, yFloor + 0.022, cz + oz, mats.granitePlinth, rotY, root, false);
       }
-      // Rain-activated flowing shallow water strip inside the granite trench
+      // Rain-activated flowing shallow water strip (+0.016m above trough bed, nestled cleanly inside curb)
       const waterStrip = new THREE.Mesh(trackGeo(new THREE.PlaneGeometry(len - 0.06, troughW - 0.03)), drainWaterMat);
+      waterStrip.name = 'SkywellDrainWaterVfx';
       waterStrip.rotation.x = -Math.PI * 0.5;
       waterStrip.rotation.z = rotY;
-      waterStrip.position.set(cx, yFloor + 0.023, cz);
+      waterStrip.position.set(cx, yFloor + 0.036, cz);
       waterStrip.visible = false;
+      waterStrip.userData.isWorldVfx = true;
       root.add(waterStrip);
       rainCurtainMeshes.push(waterStrip);
     };
@@ -3104,9 +3256,11 @@ export function buildWeilongArchitecture(
   const addSouthDrainRun = (cx: number, len: number) => {
     addBox(len, 0.02, 0.26, cx, 0.012, 22.45, drainStoneMat, 0, root, false);
     const ws = new THREE.Mesh(trackGeo(new THREE.PlaneGeometry(len - 0.1, 0.22)), drainWaterMat);
+    ws.name = 'SouthDrainWaterVfx';
     ws.rotation.x = -Math.PI * 0.5;
-    ws.position.set(cx, 0.025, 22.45);
+    ws.position.set(cx, 0.038, 22.45);
     ws.visible = false;
+    ws.userData.isWorldVfx = true;
     root.add(ws);
     rainCurtainMeshes.push(ws);
   };
@@ -3241,6 +3395,15 @@ export function buildWeilongArchitecture(
       slope.position.set(0, opts.h + ridgeRise * 0.5, side * halfSpan * 0.5);
       slope.rotation.x = side * pitch;
       hg.add(slope);
+      // Solid opaque interior cedar roof sheathing (望板) beneath cottage slope (depthWrite: true)
+      const cottageSheath = new THREE.Mesh(
+        trackGeo(new THREE.PlaneGeometry(opts.w + roofOver * 1.72, slopeLen * 0.98)),
+        mats.roofSheathing
+      );
+      cottageSheath.position.set(0, opts.h + ridgeRise * 0.5 - 0.09, side * halfSpan * 0.5);
+      cottageSheath.rotation.x = Math.PI * 0.5 + side * pitch;
+      cottageSheath.userData.isRoofSheathing = true;
+      hg.add(cottageSheath);
       // Visible cedar eave purlin & overhanging rafter beams under rural cottage eaves
       addBox(
         opts.w + roofOver * 1.6,
@@ -3671,6 +3834,7 @@ export function buildWeilongArchitecture(
     height: number
   ): number => {
     const gy = groundHeightAt(px, pz, 0);
+    compiler.registerPlanter(`planter_${style}_${px.toFixed(1)}_${pz.toFixed(1)}`, px, pz, radius, height);
     const pg = new THREE.Group();
     pg.position.set(px, gy, pz);
 
@@ -3812,13 +3976,12 @@ export function buildWeilongArchitecture(
   blossomTrees.forEach(([bx, bz, sc], idx) => {
     if (!isValidTreePosition(bx, bz, 2.2)) return;
     const pavedType = isPavedTreeSite(bx, bz);
-    let by = groundHeightAt(bx, bz, 0) - 0.14;
+    let overrideGroundY: number | undefined;
     if (pavedType) {
-      const soilY = addTreePlanter(bx, bz, 'octagonal_basin', 0.98 * Math.min(1.08, sc), 0.56);
-      by = soilY - 0.06;
+      overrideGroundY = addTreePlanter(bx, bz, 'octagonal_basin', 0.98 * Math.min(1.08, sc), 0.56);
     }
     const tg = new THREE.Group();
-    tg.position.set(bx, by, bz);
+    tg.name = `BlossomTree_${idx}`;
     tg.rotation.y = idx * 1.47;
     tg.scale.setScalar(sc);
 
@@ -3837,6 +4000,14 @@ export function buildWeilongArchitecture(
       cluster.rotation.y = pIdx * 1.15 + idx;
       cluster.castShadow = castShadow && pIdx < 4;
       tg.add(cluster);
+    });
+    compiler.placeOnGround(tg, bx, bz, {
+      id: `blossom_tree_${idx}`,
+      allowedSurface: ['soil', 'planter_pot'],
+      autoWrapPlanter: !pavedType,
+      overrideGroundY,
+      embedDepth: 0.012,
+      auditKind: 'tree',
     });
     root.add(tg);
   });
@@ -3903,13 +4074,12 @@ export function buildWeilongArchitecture(
   ];
   willowPositions.forEach(([wx, wz, sc], idx) => {
     const pavedType = isPavedTreeSite(wx, wz);
-    let wy = groundHeightAt(wx, wz, 0) - 0.12;
+    let overrideGroundY: number | undefined;
     if (pavedType) {
-      const soilY = addTreePlanter(wx, wz, 'stone_well', 1.12, 0.42);
-      wy = soilY - 0.06;
+      overrideGroundY = addTreePlanter(wx, wz, 'stone_well', 1.12, 0.42);
     }
     const wg = new THREE.Group();
-    wg.position.set(wx, wy, wz);
+    wg.name = `WeepingWillow_${idx}`;
     const toPondYaw = Math.atan2(0 - wx, 43.2 - wz);
     wg.rotation.y = toPondYaw - Math.PI * 0.5;
     wg.scale.setScalar(sc);
@@ -3958,6 +4128,14 @@ export function buildWeilongArchitecture(
         baseRz: 0,
       });
     }
+    compiler.placeOnGround(wg, wx, wz, {
+      id: `weeping_willow_${idx}`,
+      allowedSurface: ['soil', 'planter_pot'],
+      autoWrapPlanter: !pavedType,
+      overrideGroundY,
+      embedDepth: 0.012,
+      auditKind: 'tree',
+    });
     root.add(wg);
   });
 
@@ -3988,13 +4166,12 @@ export function buildWeilongArchitecture(
   ];
   shrubSpots.forEach(([sx, sz, sc], idx) => {
     const pavedType = isPavedTreeSite(sx, sz);
-    let sy = groundHeightAt(sx, sz, 0) - 0.04;
+    let overrideGroundY: number | undefined;
     if (pavedType) {
-      const soilY = addTreePlanter(sx, sz, 'terracotta_pot', 0.44 * sc, 0.52 * sc);
-      sy = soilY - 0.06;
+      overrideGroundY = addTreePlanter(sx, sz, 'terracotta_pot', 0.44 * sc, 0.52 * sc);
     }
     const sg = new THREE.Group();
-    sg.position.set(sx, sy, sz);
+    sg.name = `CourtyardShrub_${idx}`;
     sg.rotation.y = idx * 1.25;
     sg.scale.setScalar(sc);
 
@@ -4018,8 +4195,22 @@ export function buildWeilongArchitecture(
       dot.scale.setScalar(0.85 + (f % 2) * 0.35);
       sg.add(dot);
     }
+    const shrubPlace = compiler.placeOnGround(sg, sx, sz, {
+      id: `courtyard_shrub_${idx}`,
+      allowedSurface: ['soil', 'planter_pot'],
+      autoWrapPlanter: true,
+      overrideGroundY,
+      embedDepth: 0.01,
+      auditKind: 'tree',
+    });
+    if (shrubPlace.planterGroup) {
+      root.add(shrubPlace.planterGroup);
+    }
     root.add(sg);
   });
+
+  // Compile the Single Source of Truth (Visual + three-mesh-bvh Static/Ceiling BVH + NavObstacles)
+  const compiled = compiler.compile();
 
   return {
     root,
@@ -4031,6 +4222,8 @@ export function buildWeilongArchitecture(
     koiGroup,
     lanternLights,
     rainCurtainMeshes,
+    compiler,
+    compiled,
     updateWater: (
       t: number,
       nightFactor: number,
@@ -4076,6 +4269,7 @@ export function buildWeilongArchitecture(
       }
     },
     dispose: () => {
+      compiled.dispose();
       geometries.forEach((g) => g.dispose());
       localMaterials.forEach((m) => m.dispose());
     },

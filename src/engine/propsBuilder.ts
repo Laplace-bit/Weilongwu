@@ -11,6 +11,7 @@ import {
 } from './sculptHelpers';
 import { buildHwameiBird } from './hwameiModel';
 import type { HwameiAnimState } from './hwameiSongEngine';
+import type { ArchitectureCompiler } from './architectureCompiler';
 
 export interface PropAnimationRefs {
   root: THREE.Group;
@@ -18,6 +19,9 @@ export interface PropAnimationRefs {
   millUpperStone: THREE.Group;
   cradleBody: THREE.Group;
   birdcageGroup: THREE.Group;
+  hwameiBirdObject: THREE.Group;
+  birdcageWorldPos: [number, number, number];
+  vatKoi: THREE.Mesh;
   bellowsHandle: THREE.Mesh;
   wokSteamGroup: THREE.Group;
   leichaPestle: THREE.Group;
@@ -55,7 +59,8 @@ export interface PropAnimationRefs {
  */
 export function buildWeilongProps(
   mats: MaterialLibrary,
-  isSoftwareGl: boolean
+  isSoftwareGl: boolean,
+  compiler?: ArchitectureCompiler
 ): PropAnimationRefs {
   const root = new THREE.Group();
   const geometries: THREE.BufferGeometry[] = [];
@@ -81,6 +86,30 @@ export function buildWeilongProps(
     disc.scale.set(radius, 1, radius);
     disc.position.set(x, 0.018, z);
     parent.add(disc);
+  };
+
+  /** Grounding Contract helper: snaps prop Box3.min.y strictly to floorY and tags for SceneValidator. */
+  const placePropOnFloor = (
+    obj: THREE.Object3D,
+    id: string,
+    x: number,
+    z: number,
+    floorY?: number,
+    auditKind: 'furniture' | 'decoration' = 'furniture',
+    skipClipAudit = false
+  ) => {
+    obj.name = id;
+    if (compiler) {
+      compiler.placeOnGround(obj, x, z, {
+        id,
+        overrideGroundY: floorY,
+        auditKind,
+        skipClipAudit,
+      });
+    } else {
+      obj.position.set(x, floorY ?? groundHeightAt(x, z, 0), z);
+    }
+    root.add(obj);
   };
 
   // Shared artisanal painted wood/ceramic/bamboo materials
@@ -489,7 +518,7 @@ export function buildWeilongProps(
   hatCone.position.set(0.58, 0.02, 0.24);
   hatCone.rotation.z = -0.16;
   umbGroup.add(hatCone);
-  root.add(umbGroup);
+  placePropOnFloor(umbGroup, 'prop_lower_hall_umbrella_stand', -4.2, 19.2, 0.25, 'furniture');
 
   // =========================================================================
   // 04. FRONT SKYWELL: GLAZED TAIPING WATER VAT & 12-RIBBED BAMBOO BIRDCAGE
@@ -543,13 +572,15 @@ export function buildWeilongProps(
     vatGroup.add(dw);
   }
   const vatKoi = new THREE.Mesh(trackGeo(new THREE.SphereGeometry(0.045, 8, 6)), vermMat);
+  vatKoi.name = 'vat_koi';
   vatKoi.scale.set(0.6, 0.4, 1.8);
   vatKoi.position.set(-0.08, 0.82, 0.06);
   vatGroup.add(vatKoi);
-  root.add(vatGroup);
+  placePropOnFloor(vatGroup, 'prop_skywell_water_vat', -3.4, 13.6, 0.15, 'furniture');
 
-  // Domed 12-ribbed bamboo birdcage anchored cleanly beneath East Front Skywell veranda eave purlin (x=4.92, bottom y=3.08)
+  // Domed 12-ribbed bamboo birdcage anchored cleanly beneath East Front Skywell veranda eave purlin via semantic socket
   const birdcageGroup = new THREE.Group();
+  birdcageGroup.name = 'prop_skywell_birdcage';
   birdcageGroup.position.set(4.92, 3.08, 14.65);
 
   // Forged-brass beam bracket & curved S-hook clasping directly onto the x=4.92 cedar veranda eave purlin
@@ -652,7 +683,19 @@ export function buildWeilongProps(
   // physical syrinx lip-sync rig.
   // =========================================================================
   const hwameiRig = buildHwameiBird(castShadow);
+  hwameiRig.group.name = 'caged_hwamei_songbird';
   birdcageGroup.add(hwameiRig.group);
+  if (compiler && compiler.getSocket('veranda_hang_birdcage')) {
+    compiler.mountToSocket(birdcageGroup, 'veranda_hang_birdcage', {
+      mode: 'hang',
+      embedOffset: 0.015,
+    });
+  }
+  const birdcageWorldPos: [number, number, number] = [
+    birdcageGroup.position.x,
+    birdcageGroup.position.y,
+    birdcageGroup.position.z,
+  ];
   root.add(birdcageGroup);
 
   const updateHwameiBird = (timeSec: number, dt: number, anim: HwameiAnimState) => {
@@ -747,7 +790,7 @@ export function buildWeilongProps(
     cup.position.set(cx, 0.93, -0.22);
     tableGroup.add(cup);
   }
-  root.add(tableGroup);
+  placePropOnFloor(tableGroup, 'prop_middle_hall_table', 0, 8.0, 0.45, 'furniture');
 
   // Carved Taishi Armchairs (太师椅) flanking the table
   for (const sx of [-1.8, 1.8]) {
@@ -787,7 +830,7 @@ export function buildWeilongProps(
       cleg.position.set(cx, 0.26, cz);
       chair.add(cleg);
     }
-    root.add(chair);
+    placePropOnFloor(chair, `prop_taishi_chair_${sx < 0 ? 'w' : 'e'}`, sx, 8.0, 0.45, 'furniture');
   }
 
   // =========================================================================
@@ -832,26 +875,31 @@ export function buildWeilongProps(
   tGrip.position.set(0.42, 0.58, 0);
   millUpperStone.add(tGrip);
   millBase.add(millUpperStone);
-  root.add(millBase);
+  placePropOnFloor(millBase, 'prop_rear_skywell_mill', -2.2, 2.8, 0.35, 'furniture');
 
   // =========================================================================
   // 07. UPPER HALL (ANCESTRAL SANCTUARY): CARVED ALTAR, TRIPOD CENSER, CRESCENT JIAOBEI & DING LANTERN
   // =========================================================================
   const altarGroup = new THREE.Group();
   altarGroup.position.set(0, 0.85, -4.5);
-  addShadowDisc(altarGroup, 2.3);
-  const altarTable = new THREE.Mesh(trackGeo(new THREE.BoxGeometry(4.45, 1.05, 1.18)), mats.redLacquer);
+  {
+    const altarShadow = new THREE.Mesh(shadowDiscGeo, mats.contactShadow);
+    altarShadow.scale.set(2.10, 1, 0.64);
+    altarShadow.position.set(0, 0.018, 0);
+    altarGroup.add(altarShadow);
+  }
+  const altarTable = new THREE.Mesh(trackGeo(new THREE.BoxGeometry(4.08, 1.05, 1.16)), mats.redLacquer);
   altarTable.position.y = 0.525;
   altarTable.castShadow = castShadow;
   altarGroup.add(altarTable);
-  // Upturned altar end scrolls (翘头案) & gilded front relief panel
-  for (const sx of [-2.26, 2.26]) {
-    const scroll = new THREE.Mesh(trackGeo(new THREE.BoxGeometry(0.18, 0.16, 1.2)), mats.redLacquer);
+  // Upturned altar end scrolls (翘头案) & gilded front relief panel (cleanly framed between ±2.5m colonnade columns)
+  for (const sx of [-2.05, 2.05]) {
+    const scroll = new THREE.Mesh(trackGeo(new THREE.BoxGeometry(0.16, 0.16, 1.18)), mats.redLacquer);
     scroll.position.set(sx, 1.1, 0);
     altarGroup.add(scroll);
   }
-  const altarRelief = new THREE.Mesh(trackGeo(new THREE.BoxGeometry(3.8, 0.42, 0.06)), mats.gildedGold);
-  altarRelief.position.set(0, 0.62, 0.59);
+  const altarRelief = new THREE.Mesh(trackGeo(new THREE.BoxGeometry(3.65, 0.42, 0.06)), mats.gildedGold);
+  altarRelief.position.set(0, 0.62, 0.585);
   altarGroup.add(altarRelief);
 
   // Tiered gilded woodcarved ancestral shrine canopy (神龛)
@@ -927,11 +975,12 @@ export function buildWeilongProps(
   for (let s = 0; s < 6; s++) {
     const puff = new THREE.Mesh(trackGeo(createSoftPillowGeometry(0.06 + s * 0.024, s, 0.85, 8, 6)), smokeMat);
     puff.position.set(((s % 3) - 1) * 0.08, s * 0.32, 0);
+    puff.userData.isWorldVfx = true;
     incenseSmokeGroup.add(puff);
   }
   incenseSmokeGroup.visible = false;
   altarGroup.add(incenseSmokeGroup);
-  root.add(altarGroup);
+  placePropOnFloor(altarGroup, 'prop_upper_hall_altar', 0, -4.5, 0.85, 'furniture');
 
   // Curved crescent-moon wooden Jiaobei blocks (弯月木筊杯)
   const jiaobeiGeo = trackGeo(
@@ -957,10 +1006,13 @@ export function buildWeilongProps(
   jiaobeiRight.rotation.set(Math.PI * 0.5, -0.4, Math.PI);
   root.add(jiaobeiRight);
 
-  // Octagonal gilded palace Ding Lantern (八角添丁花灯) anchored by taut golden silk cord to Upper Hall ridge purlin (y=7.62)
-  const dingAnchorY = 7.62;
+  // Octagonal gilded palace Ding Lantern (八角添丁花灯) anchored by taut golden silk cord to Upper Hall ridge purlin socket
+  const dingSocket = compiler?.getSocket('ridge_hang_ding_lantern');
+  const dingX = dingSocket?.position[0] ?? -2.2;
+  const dingAnchorY = dingSocket?.position[1] ?? 7.62;
+  const dingZ = dingSocket?.position[2] ?? -2.7;
   const dingLanternGroup = new THREE.Group();
-  dingLanternGroup.position.set(-2.2, 3.55, -2.7);
+  dingLanternGroup.position.set(dingX, 3.55, dingZ);
   const dingBodyGeo = trackGeo(
     createTurnedLatheGeometry(
       [
@@ -988,12 +1040,20 @@ export function buildWeilongProps(
   dingLanternGroup.add(dingTassel);
   root.add(dingLanternGroup);
 
-  // Ceiling brass rosette & dynamically scaled suspension cord anchored strictly to the Upper Hall ridge purlin
+  // Ceiling brass rosette & dynamically scaled suspension cord anchored strictly to the Upper Hall ridge purlin socket
   const dingCeilingRosette = new THREE.Mesh(
     trackGeo(new THREE.CylinderGeometry(0.075, 0.09, 0.04, 12)),
     mats.bronzeMetal
   );
-  dingCeilingRosette.position.set(-2.2, dingAnchorY, -2.7);
+  dingCeilingRosette.name = 'prop_ding_lantern_rosette';
+  if (compiler && dingSocket) {
+    compiler.mountToSocket(dingCeilingRosette, 'ridge_hang_ding_lantern', {
+      mode: 'hang',
+      embedOffset: 0.015,
+    });
+  } else {
+    dingCeilingRosette.position.set(dingX, dingAnchorY, dingZ);
+  }
   root.add(dingCeilingRosette);
   const dingCordMesh = new THREE.Mesh(
     trackGeo(new THREE.CylinderGeometry(0.016, 0.016, 1.0, 8)),
@@ -1006,7 +1066,7 @@ export function buildWeilongProps(
     const cordBottomY = worldY + 0.66;
     const cordHeight = Math.max(0.2, dingAnchorY - cordBottomY);
     dingCordMesh.scale.set(1, cordHeight, 1);
-    dingCordMesh.position.set(-2.2, cordBottomY + cordHeight * 0.5, -2.7);
+    dingCordMesh.position.set(dingX, cordBottomY + cordHeight * 0.5, dingZ);
   };
   updateDingLanternHeight(3.55);
 
@@ -1052,7 +1112,7 @@ export function buildWeilongProps(
   const canopyFrieze = new THREE.Mesh(trackGeo(new THREE.BoxGeometry(2.38, 0.24, 1.98)), mats.gildedGold);
   canopyFrieze.position.y = 2.22;
   bedGroup.add(canopyFrieze);
-  root.add(bedGroup);
+  placePropOnFloor(bedGroup, 'prop_west_canopy_bed', -16.2, 13.6, 0.32, 'furniture');
 
   // Curved Rocker Cradle (摇篮) with arched runners & slatted crib sides
   const cradleBody = new THREE.Group();
@@ -1108,7 +1168,7 @@ export function buildWeilongProps(
   mirrorDisc.rotation.z = Math.PI * 0.5;
   mirrorDisc.position.set(0.1, 1.08, 0);
   chestGroup.add(mirrorDisc);
-  root.add(chestGroup);
+  placePropOnFloor(chestGroup, 'prop_west_camphor_chest', -16.8, 10.2, 0.32, 'furniture');
 
   // Octagonal Carved Stone Wellhead with Windlass, Rope & Wooden Bucket
   const wellGroup = new THREE.Group();
@@ -1144,7 +1204,7 @@ export function buildWeilongProps(
   const bucket = new THREE.Mesh(trackGeo(new THREE.CylinderGeometry(0.18, 0.14, 0.26, 12)), mats.darkTimber);
   bucket.position.set(0, 0.95, 0);
   wellGroup.add(bucket);
-  root.add(wellGroup);
+  placePropOnFloor(wellGroup, 'prop_west_stone_well', -15.2, 4.8, 0.32, 'furniture');
 
   // Scholar Study Desk with Inkstone, Brush Pot & Curved Glass-Chimney Kerosene Lamp
   const studyGroup = new THREE.Group();
@@ -1214,7 +1274,7 @@ export function buildWeilongProps(
   const studyLampLight = new THREE.PointLight(0xffb85c, 1.2, 10, 1.8);
   studyLampLight.position.set(0, 1.32, 0);
   studyGroup.add(studyLampLight);
-  root.add(studyGroup);
+  placePropOnFloor(studyGroup, 'prop_west_study_desk', -16.2, -1.6, 0.32, 'furniture');
 
   // =========================================================================
   // 11, 12, 13. EAST WING: 3-WOK HEARTH STOVE, LEICHA, WINNOWER, WINE JARS & 4 SCULPTED COOP CHICKENS
@@ -1258,11 +1318,12 @@ export function buildWeilongProps(
   for (let i = 0; i < 6; i++) {
     const sp = new THREE.Mesh(trackGeo(createSoftPillowGeometry(0.15, i + 1, 0.82, 8, 6)), smokeMat);
     sp.position.set(0, (i % 3) * 0.38, (Math.floor(i / 2) - 1) * 1.15);
+    sp.userData.isWorldVfx = true;
     wokSteamGroup.add(sp);
   }
   wokSteamGroup.visible = false;
   stoveGroup.add(wokSteamGroup);
-  root.add(stoveGroup);
+  placePropOnFloor(stoveGroup, 'prop_east_hearth_stove', 16.6, 13.0, 0.32, 'furniture');
 
   // Hakka Leicha Table with Turned Ceramic Mortar, Tea Paste & Side Ingredient Bowls
   const leichaTable = new THREE.Group();
@@ -1317,7 +1378,7 @@ export function buildWeilongProps(
   pestleStick.rotation.z = -0.25;
   leichaPestle.add(pestleStick);
   leichaTable.add(leichaPestle);
-  root.add(leichaTable);
+  placePropOnFloor(leichaTable, 'prop_east_leicha_table', 14.4, 9.8, 0.32, 'furniture');
 
   // Handcrafted Winnowing Fan (风谷机) + 3 Turned Hakka Niangjiu Wine Jars
   const winGroup = new THREE.Group();
@@ -1387,7 +1448,7 @@ export function buildWeilongProps(
     jg.add(twine);
     winGroup.add(jg);
   }
-  root.add(winGroup);
+  placePropOnFloor(winGroup, 'prop_east_winnower', 16.2, -1.6, 0.32, 'furniture');
 
   // 4 Sculpted Woodcarving Coop Chickens (matching livingWorldBuilder anatomy!) + Bamboo Coop
   const coopBasket = new THREE.Mesh(
@@ -1525,7 +1586,7 @@ export function buildWeilongProps(
   const gongMalletHead = new THREE.Mesh(trackGeo(new THREE.SphereGeometry(0.075, 10, 8)), vermMat);
   gongMalletHead.position.set(0.44, 0.62, 0.16);
   gongGroup.add(gongMalletHead);
-  root.add(gongGroup);
+  placePropOnFloor(gongGroup, 'prop_watchtower_gong', 18.7, -25.8, gongY, 'furniture');
 
   // Sculpted Swept-Wing Startled Birds
   const startledBirds = new THREE.Group();
@@ -1560,7 +1621,7 @@ export function buildWeilongProps(
     log.castShadow = castShadow;
     woodPile.add(log);
   }
-  root.add(woodPile);
+  placePropOnFloor(woodPile, 'prop_huatai_wood_pile', -1.4, -14.8, woodPileY, 'decoration');
 
   const fiveElementStones: THREE.Mesh[] = [];
   const elementColors = [0xe8c468, 0x52a86b, 0x4b94c7, 0xd95638, 0xc29354];
@@ -1645,7 +1706,7 @@ export function buildWeilongProps(
   loomShuttle.rotation.z = Math.PI * 0.5;
   loomShuttle.position.set(0, 0.92, 0.08);
   loomGroup.add(loomShuttle);
-  root.add(loomGroup);
+  placePropOnFloor(loomGroup, 'prop_inner_weaving_loom', -17.0, -16.6, groundHeightAt(-17.0, -16.6), 'furniture');
 
   // 18B. Han Music Barrel War Drum on Crossed Trestle + Drumsticks
   const musicGroup = new THREE.Group();
@@ -1678,7 +1739,7 @@ export function buildWeilongProps(
     trestle.position.set(0, 0.44, 0);
     musicGroup.add(trestle);
   }
-  root.add(musicGroup);
+  placePropOnFloor(musicGroup, 'prop_inner_han_drum', -9.9, -20.9, groundHeightAt(-9.9, -20.9), 'furniture');
 
   // 18C. Qiaopi Trunk, Flared Brass-Horn Gramophone & Red-Sealed Letters
   const qiaopiGroup = new THREE.Group();
@@ -1719,7 +1780,7 @@ export function buildWeilongProps(
   const letterSeal = new THREE.Mesh(trackGeo(new THREE.BoxGeometry(0.06, 0.072, 0.23)), vermMat);
   letterSeal.position.set(-0.32, 0.62, 0.06);
   qiaopiGroup.add(letterSeal);
-  root.add(qiaopiGroup);
+  placePropOnFloor(qiaopiGroup, 'prop_inner_qiaopi_trunk', 9.9, -20.9, groundHeightAt(9.9, -20.9), 'furniture');
 
   // 18D. Mortise-and-Tenon Carpentry Bench
   const carpGroup = new THREE.Group();
@@ -1746,7 +1807,7 @@ export function buildWeilongProps(
   const carpentryBeam = new THREE.Mesh(trackGeo(new THREE.BoxGeometry(1.38, 0.17, 0.2)), mats.gildedGold);
   carpentryBeam.position.set(0, 1.85, 0);
   carpGroup.add(carpentryBeam);
-  root.add(carpGroup);
+  placePropOnFloor(carpGroup, 'prop_inner_carpentry_bench', 17.0, -16.6, groundHeightAt(17.0, -16.6), 'furniture');
 
   // =========================================================================
   // 19 & 20. DRAGON HALL LAND SHRINE, FLYING-EAVE BOGONG FOREST SHRINE & TAIJI AR OVERLAY
@@ -1769,7 +1830,7 @@ export function buildWeilongProps(
   dsCenser.scale.setScalar(0.72);
   dsCenser.position.set(0, 1.1, 0.22);
   dragonShrine.add(dsCenser);
-  root.add(dragonShrine);
+  placePropOnFloor(dragonShrine, 'prop_dragon_hall_shrine', 0, -23.6, groundHeightAt(0, -23.6), 'furniture');
 
   // Sculpted Rear Bogong Forest Shrine (林间飞檐伯公亭)
   const bogongY = groundHeightAt(0, -46.5, 0);
@@ -1824,7 +1885,7 @@ export function buildWeilongProps(
   bCenser.scale.setScalar(0.65);
   bCenser.position.set(0, 0.83, 0.34);
   bogongGroup.add(bCenser);
-  root.add(bogongGroup);
+  placePropOnFloor(bogongGroup, 'prop_rear_bogong_shrine', 0, -46.5, bogongY, 'furniture');
 
   return {
     root,
@@ -1832,6 +1893,9 @@ export function buildWeilongProps(
     millUpperStone,
     cradleBody,
     birdcageGroup,
+    hwameiBirdObject: hwameiRig.group,
+    birdcageWorldPos,
+    vatKoi,
     bellowsHandle,
     wokSteamGroup,
     leichaPestle,

@@ -41,6 +41,14 @@ import {
   type RoamAgentState,
 } from './freeRoamSystem';
 import { evaluateLivingBehavior } from './livingBehavior';
+import type { SpatialPhysicsKernel } from './spatialPhysicsKernel';
+import {
+  COLLISION_MASKS,
+  CollisionLayer,
+  DEFAULT_CAPSULE_DIMS,
+  SCATTER_FROM_MASKS,
+  type StationSlot,
+} from './spatialTypes';
 
 export interface GrainLiveState {
   spread: number;
@@ -60,6 +68,7 @@ export interface LivingWorldRefs {
   ) => void;
   getGrainLiveState: () => GrainLiveState;
   getMinimapBlips: () => MinimapBlip[];
+  getStations: () => StationSlot[];
   dispose: () => void;
 }
 
@@ -147,6 +156,7 @@ interface PoultryAnim {
 }
 
 interface WaterfowlAnim {
+  id: string;
   group: THREE.Group;
   neck: THREE.Object3D;
   wake: THREE.Mesh;
@@ -246,7 +256,8 @@ interface SkyLanternItem {
  */
 export function buildLivingWorld(
   mats: MaterialLibrary,
-  isSoftwareGl: boolean
+  isSoftwareGl: boolean,
+  physicsKernel?: SpatialPhysicsKernel
 ): LivingWorldRefs {
   const root = new THREE.Group();
   root.name = 'LivingHakkaCommunity';
@@ -833,6 +844,8 @@ export function buildLivingWorld(
     const rightElbow = rightArmBuilt.elbow;
     const leftHandSocket = leftArmBuilt.hand;
     const rightHandSocket = rightArmBuilt.hand;
+    leftHandSocket.userData.socketId = 'hand_left_grip';
+    rightHandSocket.userData.socketId = 'hand_right_grip';
     torso.add(leftArm, rightArm);
 
     // Sculpted facial anatomy with contoured jaw, nose bridge, glossy catchlight eyes, arched brows & warm smile
@@ -1459,6 +1472,7 @@ export function buildLivingWorld(
       rakeHead.add(tooth);
     }
 
+    rakeGroup.userData.socketId = 'hand_right_grip';
     farmer.rightHandSocket.add(rakeGroup);
 
     root.add(farmer.group);
@@ -1769,6 +1783,7 @@ export function buildLivingWorld(
   fanMountain.scale.set(0.09, 0.07, 0.018);
   fanMountain.position.set(-0.02, 0.17, 0.008);
   fanGroup.add(fanMountain);
+  fanGroup.userData.socketId = 'hand_right_grip';
   elderA.rightHandSocket.add(fanGroup);
   elderA.rightArm.rotation.x = -0.82;
   root.add(elderA.group);
@@ -1989,6 +2004,7 @@ export function buildLivingWorld(
     scale: 0.96,
   });
   const umbGroup = createHandOilPaperUmbrella(HANDCRAFTED_PAL.verm);
+  umbGroup.userData.socketId = 'hand_right_grip';
   umbrellaWalker.rightHandSocket.add(umbGroup);
   umbrellaWalker.rightArm.rotation.x = -0.68;
   root.add(umbrellaWalker.group);
@@ -2029,7 +2045,7 @@ export function buildLivingWorld(
   });
 
   // 2G. Two Tea-Drinking Neighbors Seated in the Front Skywell Courtyard (下堂天井品茗)!
-  const teaTableX = 6.0;
+  const teaTableX = 3.35;
   const teaTableZ = 13.4;
   const teaY = groundHeightAt(teaTableX, teaTableZ, 0);
   const teaTableGroup = new THREE.Group();
@@ -2373,6 +2389,7 @@ export function buildLivingWorld(
       hat: ww.hat,
     });
     const rainUmbrella = createHandOilPaperUmbrella(rainUmbrellaPalette[idx % rainUmbrellaPalette.length]);
+    rainUmbrella.userData.socketId = 'hand_right_grip';
     rainUmbrella.visible = false;
     v.rightHandSocket.add(rainUmbrella);
     root.add(v.group);
@@ -2759,6 +2776,7 @@ export function buildLivingWorld(
     const nestBaseZ = 39.8;
     const slotAngle = (wfIdx % 4) * 1.55;
     waterfowlList.push({
+      id: `${kind}_${wfIdx}`,
       group: g,
       neck,
       wake,
@@ -3568,6 +3586,7 @@ export function buildLivingWorld(
   );
   const petalPoints = new THREE.Points(petalGeo, petalMat);
   petalPoints.frustumCulled = false;
+  petalPoints.userData.isWorldVfx = true;
   root.add(petalPoints);
 
   // 6E. 28 Turned Paper Sky Lanterns (孔明灯) with Bamboo Cross-Frame & Ember Halo!
@@ -3655,8 +3674,146 @@ export function buildLivingWorld(
   root.add(skyLanternGroup);
 
   // =========================================================================
+  // 6F. REGISTER ALL DYNAMIC MOVERS IN UNIFIED SpatialPhysicsKernel & StationRegistry
+  // =========================================================================
+  const stations: StationSlot[] = [];
+
+  for (let i = 0; i < walkingVillagers.length; i++) {
+    const v = walkingVillagers[i];
+    const dims = v.isChild ? DEFAULT_CAPSULE_DIMS.CHILD : DEFAULT_CAPSULE_DIMS.VILLAGER;
+    const initY = groundHeightAt(v.roamAgent.x, v.roamAgent.z, 0);
+    physicsKernel?.registerBody({
+      id: v.id,
+      x: v.roamAgent.x,
+      y: initY,
+      z: v.roamAgent.z,
+      radius: dims.radius,
+      height: dims.height,
+      layer: CollisionLayer.VILLAGER,
+      mask: COLLISION_MASKS.VILLAGER,
+      weight: v.isChild ? 0.72 : 1.0,
+    });
+    stations.push({
+      id: `station_home_${v.id}`,
+      label: `Villager home (${v.id})`,
+      x: v.homeRoom.x,
+      y: groundHeightAt(v.homeRoom.x, v.homeRoom.z, 0),
+      z: v.homeRoom.z,
+      radius: dims.radius,
+      height: dims.height,
+    });
+  }
+
+  for (let i = 0; i < idleVillagers.length; i++) {
+    const iv = idleVillagers[i];
+    const dims = DEFAULT_CAPSULE_DIMS.VILLAGER;
+    const baseY = groundHeightAt(iv.baseX, iv.baseZ, iv.kind === 'bow' ? 0.85 : iv.kind === 'tend' ? 1.0 : 0);
+    physicsKernel?.registerBody({
+      id: iv.id,
+      x: iv.baseX,
+      y: baseY,
+      z: iv.baseZ,
+      radius: dims.radius,
+      height: dims.height,
+      layer: CollisionLayer.VILLAGER,
+      mask: COLLISION_MASKS.VILLAGER,
+      weight: iv.seated ? 1.6 : 1.1,
+    });
+    stations.push({
+      id: `station_work_${iv.id}`,
+      label: `Villager station (${iv.id})`,
+      x: iv.baseX,
+      y: baseY,
+      z: iv.baseZ,
+      radius: dims.radius,
+      height: dims.height,
+      allowPropOverlap: Boolean(iv.seated || iv.kind === 'wash'),
+    });
+    const endPt = iv.homeRoute[iv.homeRoute.length - 1];
+    if (endPt) {
+      stations.push({
+        id: `station_home_${iv.id}`,
+        label: `Villager room (${iv.id})`,
+        x: endPt.x,
+        y: groundHeightAt(endPt.x, endPt.z, 0),
+        z: endPt.z,
+        radius: dims.radius,
+        height: dims.height,
+      });
+    }
+  }
+
+  for (let i = 0; i < poultryList.length; i++) {
+    const p = poultryList[i];
+    const dims = p.isChick ? DEFAULT_CAPSULE_DIMS.CHICK : DEFAULT_CAPSULE_DIMS.POULTRY;
+    const initY = groundHeightAt(p.baseX, p.baseZ, 0);
+    physicsKernel?.registerBody({
+      id: p.id,
+      x: p.baseX,
+      y: initY,
+      z: p.baseZ,
+      radius: dims.radius,
+      height: dims.height,
+      layer: CollisionLayer.POULTRY,
+      mask: COLLISION_MASKS.POULTRY,
+      scatterFromMask: SCATTER_FROM_MASKS.POULTRY,
+      scatterRadius: 1.85,
+      weight: p.isChick ? 0.16 : 0.3,
+    });
+  }
+
+  for (let i = 0; i < waterfowlList.length; i++) {
+    const wf = waterfowlList[i];
+    const dims = DEFAULT_CAPSULE_DIMS.WATERFOWL;
+    physicsKernel?.registerBody({
+      id: wf.id,
+      x: wf.cx,
+      y: -0.2,
+      z: wf.cz,
+      radius: dims.radius,
+      height: dims.height,
+      layer: CollisionLayer.WATERFOWL,
+      mask: COLLISION_MASKS.WATERFOWL,
+      weight: 0.45,
+    });
+  }
+
+  for (let i = 0; i < quadrupeds.length; i++) {
+    const q = quadrupeds[i];
+    const dims =
+      q.kind === 'buffalo'
+        ? DEFAULT_CAPSULE_DIMS.QUADRUPED_LARGE
+        : DEFAULT_CAPSULE_DIMS.QUADRUPED_SMALL;
+    physicsKernel?.registerBody({
+      id: q.id,
+      x: q.baseX,
+      y: q.baseY,
+      z: q.baseZ,
+      radius: dims.radius,
+      height: dims.height,
+      layer: CollisionLayer.QUADRUPED,
+      mask: COLLISION_MASKS.QUADRUPED,
+      weight: q.kind === 'buffalo' ? 4.0 : 0.85,
+    });
+    const entryPt = q.homeRouteTail[0];
+    if (entryPt) {
+      stations.push({
+        id: `station_shelter_${q.id}`,
+        label: `Animal shelter entry (${q.id})`,
+        x: entryPt.x,
+        y: groundHeightAt(entryPt.x, entryPt.z, 0),
+        z: entryPt.z,
+        radius: dims.radius,
+        height: dims.height,
+        allowPropOverlap: true,
+      });
+    }
+  }
+
+  // =========================================================================
   // 7. ZERO-GC PER-FRAME CONTINUOUS FREE-ROAM + SOCIAL PLAY + HOME/NEST + GRAIN LOOP
   //    Strictly ZERO `visible = false` popping & ZERO teleporting across day/night/weather!
+  //    ALL dynamic movers submit desiredDelta to SpatialPhysicsKernel.moveCapsule().
   // =========================================================================
   let fowlClock = 0;
   let craneRoostSmooth = 0;
@@ -3692,6 +3849,8 @@ export function buildLivingWorld(
     const scrubbed = !initialized || Math.abs(timeOfDay - lastTimeOfDay) > 0.35;
     initialized = true;
     lastTimeOfDay = timeOfDay;
+
+    physicsKernel?.setDoumenOpen(doumenOpen);
 
     // Step whole-map autonomous free-roam & social play coordinator!
     freeRoam.update(dt, doumenOpen, Math.max(0.45, b.walkSpeedScale));
@@ -3816,7 +3975,27 @@ export function buildLivingWorld(
         moveSpeed = v.roamAgent.speed;
       }
 
-      const py = groundHeightAt(px, pz, 0);
+      let py = groundHeightAt(px, pz, 0);
+      if (physicsKernel) {
+        if (scrubbed) {
+          physicsKernel.syncBodyPosition(v.id, px, py, pz);
+        } else {
+          const body = physicsKernel.getBody(v.id);
+          if (body) {
+            const moved = physicsKernel.moveCapsule(
+              v.id,
+              { x: px - body.x, z: pz - body.z },
+              dt,
+              { doumenOpen }
+            );
+            px = moved.x;
+            py = moved.y;
+            pz = moved.z;
+            v.roamAgent.x = px;
+            v.roamAgent.z = pz;
+          }
+        }
+      }
       const isMoving = moveSpeed > 0.08;
       v.stridePhase += dt * (isMoving ? moveSpeed * (v.isChild ? 4.4 : 3.4) : 0);
       const strideAmp = isMoving ? Math.min(1, moveSpeed / (v.isChild ? 2.1 : 1.35)) : 0;
@@ -3926,14 +4105,34 @@ export function buildLivingWorld(
       const atHome = hb >= 0.97;
 
       const sample = sampleOpenPolyline(iv.homeRoute, hb);
-      const px = sample.x;
-      const pz = sample.z;
+      let px = sample.x;
+      let pz = sample.z;
       const targetYaw = hb < 0.03 ? iv.baseYaw : atHome ? iv.homeYaw : sample.yaw;
+      let py = groundHeightAt(px, pz, iv.kind === 'bow' ? 0.85 : iv.kind === 'tend' ? 1.0 : 0);
+
+      if (physicsKernel) {
+        const isStationarySeated = Boolean(iv.seated && hb < 0.04);
+        if (scrubbed || isStationarySeated) {
+          physicsKernel.syncBodyPosition(iv.id, px, py, pz);
+        } else {
+          const body = physicsKernel.getBody(iv.id);
+          if (body) {
+            const moved = physicsKernel.moveCapsule(
+              iv.id,
+              { x: px - body.x, z: pz - body.z },
+              dt,
+              { doumenOpen }
+            );
+            px = moved.x;
+            py = moved.y;
+            pz = moved.z;
+          }
+        }
+      }
       iv.curX = px;
       iv.curZ = pz;
       iv.curYaw = targetYaw;
 
-      const py = groundHeightAt(px, pz, iv.kind === 'bow' ? 0.85 : iv.kind === 'tend' ? 1.0 : 0);
       if (inTransit) {
         iv.stridePhase += dt * 5.6;
       }
@@ -4145,7 +4344,32 @@ export function buildLivingWorld(
         yaw = 0;
       }
 
-      const py = groundHeightAt(tx, tz, 0);
+      let py = groundHeightAt(tx, tz, 0);
+      if (physicsKernel) {
+        if (scrubbed || cb > 0.35) {
+          physicsKernel.syncBodyPosition(p.id, tx, py, tz);
+        } else {
+          const body = physicsKernel.getBody(p.id);
+          if (body) {
+            const moved = physicsKernel.moveCapsule(
+              p.id,
+              { x: tx - body.x, z: tz - body.z },
+              dt,
+              { doumenOpen }
+            );
+            tx = moved.x;
+            py = moved.y;
+            tz = moved.z;
+            if (p.roamAgent) {
+              p.roamAgent.x = tx;
+              p.roamAgent.z = tz;
+            }
+            if (moved.scatterX !== 0 || moved.scatterZ !== 0) {
+              yaw = Math.atan2(moved.scatterX, moved.scatterZ);
+            }
+          }
+        }
+      }
       const coopPerchLift = cb > 0.92 ? 0.14 * ((cb - 0.92) / 0.08) : 0;
       const hop =
         activeForaging && p.isChick
@@ -4171,6 +4395,7 @@ export function buildLivingWorld(
 
     // -----------------------------------------------------------------------
     // 4. POND WATERFOWL (Swim freely -> glide smoothly into Shoreline Reed Nests!)
+    //    Uses COLLISION_MASKS.WATERFOWL which bypasses POND_WATER while staying physically resolved.
     // -----------------------------------------------------------------------
     for (let i = 0; i < waterfowlList.length; i++) {
       const wf = waterfowlList[i];
@@ -4188,13 +4413,32 @@ export function buildLivingWorld(
         fowlClock * wf.speed + wf.phaseOffset,
         wf.dir
       );
-      const wx = THREE.MathUtils.lerp(sample.x, wf.nestX, nb);
-      const wz = THREE.MathUtils.lerp(sample.z, wf.nestZ, nb);
+      let wx = THREE.MathUtils.lerp(sample.x, wf.nestX, nb);
+      let wz = THREE.MathUtils.lerp(sample.z, wf.nestZ, nb);
       const swimToNestYaw = Math.atan2(wf.nestX - sample.x, wf.nestZ - sample.z);
       const targetYaw = nb < 0.08 ? sample.yaw : nb > 0.92 ? wf.nestYaw : swimToNestYaw;
       const bob = Math.sin(t * THREE.MathUtils.lerp(2.6, 1.2, nb) + wf.phaseOffset * 3) * THREE.MathUtils.lerp(0.024, 0.008, nb);
+      const targetY = -0.2 + bob + nb * 0.06;
 
-      wf.group.position.set(wx, -0.2 + bob + nb * 0.06, wz);
+      if (physicsKernel) {
+        if (scrubbed || nb > 0.55) {
+          physicsKernel.syncBodyPosition(wf.id, wx, targetY, wz);
+        } else {
+          const body = physicsKernel.getBody(wf.id);
+          if (body) {
+            const moved = physicsKernel.moveCapsule(
+              wf.id,
+              { x: wx - body.x, y: targetY - body.y, z: wz - body.z },
+              dt,
+              { doumenOpen, preserveY: true }
+            );
+            wx = moved.x;
+            wz = moved.z;
+          }
+        }
+      }
+
+      wf.group.position.set(wx, targetY, wz);
       wf.group.rotation.y = dampAngle(wf.group.rotation.y, targetYaw, 5.0, dt);
 
       if (nb > 0.85) {
@@ -4274,7 +4518,27 @@ export function buildLivingWorld(
         speed = q.roamAgent.speed;
       }
 
-      const groundY = groundHeightAt(px, pz, 0);
+      let groundY = groundHeightAt(px, pz, 0);
+      if (physicsKernel) {
+        if (scrubbed || hb > 0.5) {
+          physicsKernel.syncBodyPosition(q.id, px, groundY, pz);
+        } else {
+          const body = physicsKernel.getBody(q.id);
+          if (body) {
+            const moved = physicsKernel.moveCapsule(
+              q.id,
+              { x: px - body.x, z: pz - body.z },
+              dt,
+              { doumenOpen }
+            );
+            px = moved.x;
+            groundY = moved.y;
+            pz = moved.z;
+            q.roamAgent.x = px;
+            q.roamAgent.z = pz;
+          }
+        }
+      }
       const settled = hb > 0.95;
       const isMoving = speed > 0.06;
       q.gaitPhase += dt * (isMoving ? speed * (q.kind === 'buffalo' ? 3.2 : 5.6) : 0);
@@ -4460,11 +4724,14 @@ export function buildLivingWorld(
     return blips;
   };
 
+  const getStations = (): StationSlot[] => stations;
+
   return {
     root,
     update,
     getGrainLiveState,
     getMinimapBlips,
+    getStations,
     dispose: () => {
       geometries.forEach((g) => g.dispose());
       materials.forEach((m) => m.dispose());

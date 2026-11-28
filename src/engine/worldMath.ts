@@ -1,4 +1,5 @@
 import type { SurfaceType } from '../types/game';
+import { createWeilongArchitectureBlueprint } from './architectureData';
 
 /**
  * 1:1 Spatial Geometry & Pure Physics/Collision Math for the Meizhou Oval Double-Weilongwu.
@@ -397,157 +398,79 @@ export function detectNodeIdAt(x: number, z: number, _y = 0): string {
 
 /**
  * Generates static AABB colliders for straight masonry walls, interior room partitions,
- * and solid rectangular furniture/altars/beds/stoves so nothing clips.
+ * Derived directly from the Single Source of Truth (SSOT) `createWeilongArchitectureBlueprint()`
+ * so visual meshes, three-mesh-bvh colliders, NavMesh footprints, and legacy 2D queries never drift!
  */
 export function buildWallColliders(): Aabb2D[] {
+  const bp = createWeilongArchitectureBlueprint();
   const walls: Aabb2D[] = [];
-  const add = (
-    id: string,
-    minX: number,
-    maxX: number,
-    minZ: number,
-    maxZ: number,
-    opts?: { dynamicGate?: 'doumen_east' | 'doumen_west' }
-  ) => {
-    walls.push({ id, minX, maxX, minZ, maxZ, ...opts });
-  };
 
-  // --- Front Straight Facade Wall at z = 21.65 (3 portals: main, West Doumen, East Doumen) ---
-  add('front_outer_w1', -19.6, -17.4, 21.4, 22.0);
-  add('front_outer_w_door', -17.4, -14.8, 21.4, 22.0, { dynamicGate: 'doumen_west' });
-  add('front_outer_w2', -14.8, -2.0, 21.4, 22.0);
-  add('front_outer_e1', 2.0, 14.8, 21.4, 22.0);
-  add('front_outer_e_door', 14.8, 17.4, 21.4, 22.0, { dynamicGate: 'doumen_east' });
-  add('front_outer_e2', 17.4, 19.6, 21.4, 22.0);
-  // Main portal recessed alcove side walls
-  add('front_alcove_w', -2.18, -1.82, 20.25, 21.65);
-  add('front_alcove_e', 1.82, 2.18, 20.25, 21.65);
+  for (const w of bp.walls) {
+    if (!w.collides) continue;
+    const rotY = w.rotY ?? 0;
+    const c = Math.abs(Math.cos(rotY));
+    const s = Math.abs(Math.sin(rotY));
+    const halfX = (w.w * c + w.d * s) * 0.5;
+    const halfZ = (w.w * s + w.d * c) * 0.5;
+    walls.push({
+      id: w.id,
+      minX: w.x - halfX,
+      maxX: w.x + halfX,
+      minZ: w.z - halfZ,
+      maxZ: w.z + halfZ,
+    });
+  }
 
-  // --- Front Straight Wing Inner Wall at z = 16.55 ---
-  add('front_inner_w', -12.8, -2.6, 16.35, 16.75);
-  add('front_inner_e', 2.6, 12.8, 16.35, 16.75);
+  for (const g of bp.dynamicGates) {
+    walls.push({
+      id: g.id,
+      minX: g.centerX - g.width * 0.5,
+      maxX: g.centerX + g.width * 0.5,
+      minZ: g.z - g.depth * 0.5,
+      maxZ: g.z + g.depth * 0.5,
+      dynamicGate: g.id === 'doumen_w' ? 'doumen_west' : 'doumen_east',
+    });
+  }
 
-  // --- Front Skywell Flanking White Chambers ---
-  add('skywell_chamber_w', -8.45, -5.35, 11.55, 15.65);
-  add('skywell_chamber_e', 5.35, 8.45, 11.55, 15.65);
-
-  // --- Central Axis Side Partition Walls (wide openings to West/East wings) ---
-  add('axis_w_mid', -11.6, -11.2, 7.6, 10.6);
-  add('axis_w_rear', -11.6, -11.2, -2.5, 0.8);
-  add('axis_e_mid', 11.2, 11.6, 7.6, 10.6);
-  add('axis_e_rear', 11.2, 11.6, -2.5, 0.8);
-
-  // --- Upper Hall Rear Ancestral Shrine Wall at z = -5.6 ---
-  add('shangtang_rear_altar', -4.45, 4.45, -5.85, -5.35);
-
-  // --- West Horizontal Wing Outer Wall (x = -18.4) & Room Dividers ---
-  add('west_wing_outer_1', -18.6, -18.2, 13.8, 16.4);
-  add('west_wing_outer_2', -18.6, -18.2, 5.4, 10.0);
-  add('west_wing_outer_3', -18.6, -18.2, -1.0, 1.4);
-  add('west_div_1', -18.2, -14.2, 8.05, 8.35);
-  add('west_div_2', -18.2, -14.2, 1.25, 1.55);
-
-  // --- East Horizontal Wing Outer Wall (x = +18.4) & Room Dividers ---
-  add('east_wing_outer_1', 18.2, 18.6, 13.8, 16.4);
-  add('east_wing_outer_2', 18.2, 18.6, 5.4, 10.0);
-  add('east_wing_outer_3', 18.2, 18.6, -1.0, 1.4);
-  add('east_div_1', 14.2, 18.2, 8.05, 8.35);
-  add('east_div_2', 14.2, 18.2, 1.25, 1.55);
-
-  // --- Solid Architectural Furniture & Shrine Colliders (exact propsBuilder.ts footprints) ---
-  add('prop_middle_table', -0.95, 0.95, 7.38, 8.62); // Eight-Immortals table
-  add('prop_upper_altar', -1.85, 1.85, -5.15, -3.88); // Upper Hall ancestral altar
-  add('prop_dragon_shrine', -1.22, 1.22, -24.18, -23.02); // Dragon Hall land shrine
-  add('prop_bogong_shrine', -1.18, 1.18, -47.4, -45.6); // Rear forest Bogong shrine
-  add('prop_bedroom_bed', -17.35, -15.05, 12.75, 14.45); // West canopy bed
-  add('prop_bedroom_chest', -17.45, -16.15, 9.65, 10.75); // West camphor chest & mirror
-  add('prop_study_desk', -16.9, -15.5, -2.4, -0.8); // West study desk
-  add('prop_kitchen_stove', 15.75, 17.5, 10.9, 15.1); // East 3-wok stove
-  add('prop_kitchen_leicha', 13.85, 14.95, 9.25, 10.35); // East Leicha table
-  add('prop_granary_winnower', 15.35, 17.05, -2.25, -0.95); // East winnowing machine
-  add('prop_front_bench', -7.45, -4.95, 22.45, 23.15); // Elders sitting bench on He-Ping
-  add('prop_huatai_woodpile', -10.3, -8.1, -15.65, -13.95); // Huatai firewood stack
+  for (const prop of bp.defaultPropColliders) {
+    if (prop.kind === 'aabb') {
+      walls.push({
+        id: prop.id,
+        minX: prop.minX ?? 0,
+        maxX: prop.maxX ?? 0,
+        minZ: prop.minZ ?? 0,
+        maxZ: prop.maxZ ?? 0,
+      });
+    }
+  }
 
   return walls;
 }
 
 /**
  * Generates cylindrical colliders for all architectural timber columns, lantern posts,
- * circular stone wells/vats/mills, and foreground hero trees.
+ * circular stone wells/vats/mills, planters, and foreground hero trees — derived from SSOT!
  */
 export function buildCircleColliders(): CircleCollider2D[] {
+  const bp = createWeilongArchitectureBlueprint();
   const circles: CircleCollider2D[] = [];
-  const add = (id: string, x: number, z: number, radius: number) => {
-    circles.push({ id, x, z, radius });
-  };
 
-  // Lower Hall columns
-  for (const cx of [-2.4, 2.4, -13.0, 13.0, -18.2, 18.2]) {
-    add(`col_lower_${cx}`, cx, 16.65, 0.25);
+  for (const col of bp.columns) {
+    circles.push({ id: col.id, x: col.x, z: col.z, radius: col.radius ?? 0.25 });
   }
-  // Middle Hall columns
-  for (const cx of [-9.2, -5.2, -2.4, 2.4, 5.2, 9.2]) {
-    add(`col_mid_s_${cx}`, cx, 10.2, 0.25);
-    add(`col_mid_n_${cx}`, cx, 5.7, 0.25);
+  for (const planter of bp.planters) {
+    circles.push({ id: planter.id, x: planter.x, z: planter.z, radius: planter.radius });
   }
-  // Rear Skywell columns
-  for (const sx of [-4.7, 4.7]) {
-    add(`col_rsky_s_${sx}`, sx, 3.8, 0.25);
-    add(`col_rsky_n_${sx}`, sx, 1.4, 0.25);
+  for (const prop of bp.defaultPropColliders) {
+    if (prop.kind === 'circle') {
+      circles.push({
+        id: prop.id,
+        x: prop.cx ?? 0,
+        z: prop.cz ?? 0,
+        radius: prop.radius ?? 0.5,
+      });
+    }
   }
-  // Upper Hall columns
-  for (const cx of [-10.4, -5.4, -2.5, 2.5, 5.4, 10.4]) {
-    add(`col_up_s_${cx}`, cx, -0.1, 0.25);
-    add(`col_up_n_${cx}`, cx, -5.1, 0.25);
-  }
-  // He-Ping pavilion lantern posts
-  for (const [px, pz] of [
-    [-16.5, 35.4],
-    [16.5, 35.4],
-    [-19.5, 24.5],
-    [19.5, 24.5],
-  ] as [number, number][]) {
-    add(`lantern_post_${px}_${pz}`, px, pz, 0.3);
-  }
-  // Circular courtyard & room props
-  add('prop_skywell_vat', -3.4, 13.6, 0.65);
-  add('prop_rear_mill', -2.2, 2.8, 0.68);
-  add('prop_west_well', -15.2, 4.8, 0.82);
-  add('prop_east_coop', 16.1, 4.8, 0.68);
-  add('prop_weaving_loom', -17.0, -16.6, 0.72);
-  add('prop_music_drum', -9.9, -20.9, 0.56);
-  add('prop_qiaopi_trunk', 9.9, -20.9, 0.62);
-  add('prop_carpentry_bench', 17.0, -16.6, 0.78);
-  // Foreground weeping willows (stone tree basins on granite apron) & hero camphor trunks
-  for (const [wx, wz, r] of [
-    [-17.8, 39.2, 1.18],
-    [17.8, 39.6, 1.18],
-    [-13.8, 49.4, 0.45],
-    [13.4, 49.6, 0.45],
-    [0.8, 50.8, 0.48],
-    [39.5, 16.5, 0.65],
-    [43.0, 9.5, 0.72],
-    [44.5, 2.5, 0.7],
-    [42.0, 22.0, 0.58],
-    [-42.5, 15.0, 0.65],
-    [-45.0, 6.0, 0.7],
-  ] as [number, number, number][]) {
-    add(`tree_trunk_${wx}_${wz}`, wx, wz, r);
-  }
-  // He-Ping forecourt peach blossom octagonal brick-and-stone tree planters (种树坛子)
-  for (const [px, pz, r] of [
-    [-27.0, 25.2, 1.12],
-    [27.0, 25.6, 1.12],
-    [-30.5, 32.0, 1.08],
-    [30.5, 31.8, 1.08],
-    [-21.8, 36.2, 1.05],
-    [21.8, 36.0, 1.05],
-  ] as [number, number, number][]) {
-    add(`planter_peach_${px}_${pz}`, px, pz, r);
-  }
-  // Courtyard handcrafted animal shelters (doghouse & courtyard chicken coop)
-  add('animal_doghouse', -9.6, 22.85, 0.78);
-  add('animal_heping_coop', 13.4, 22.95, 1.02);
 
   return circles;
 }
